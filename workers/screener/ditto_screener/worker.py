@@ -40,6 +40,7 @@ from ditto_screener.heartbeat import (
     probe_docker_health,
 )
 from ditto_screener.policy import (
+    PolicyEvidence,
     ScreeningOutcome,
     SourceReviewObservation,
     builtin_policy_manifest,
@@ -85,6 +86,55 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 EXACT_CROSS_MINER_DUPLICATE = "exact-cross-miner-duplicate"
+
+# ScreenResultRequest accepts private failure feedback only on these outcomes.
+# Attaching it to a pass or quarantine makes the signed request fail to build,
+# which the worker can only report as worker-result-processing-failed (#2081).
+_PRIVATE_FEEDBACK_OUTCOMES = frozenset(
+    {
+        ScreenResultOutcome.DETERMINISTIC_REJECT,
+        ScreenResultOutcome.RETRYABLE_INFRA,
+        ScreenResultOutcome.INCONCLUSIVE,
+    }
+)
+_PRIVATE_BUILD_FAILURE_CODES = frozenset(
+    {"docker-build", "docker-build-infrastructure"}
+)
+# Shadow /seed mode appends observations after the deciding evidence without
+# changing the outcome. The envelope sample is never a verdict reason; other
+# seed-* codes decide only when enforce mode turned them into a failure.
+_SEED_ENVELOPE_OBSERVATION = "seed-envelope-usage"
+
+
+def _verdict_reason_code(
+    outcome: ScreenResultOutcome, evidence: tuple[PolicyEvidence, ...]
+) -> str | None:
+    """Return the code of the evidence that decided ``outcome``."""
+    if outcome == ScreenResultOutcome.PASS_INCONCLUSIVE:
+        return "source-review-inconclusive"
+    if not evidence:
+        return None
+    failure = outcome in _PRIVATE_FEEDBACK_OUTCOMES
+    for item in reversed(evidence):
+        if item.code == _SEED_ENVELOPE_OBSERVATION:
+            continue
+        if not failure and item.code.startswith("seed-"):
+            continue
+        return item.code
+    return evidence[-1].code
+
+
+def _attaches_private_failure_feedback(
+    outcome: ScreenResultOutcome, reason_code: str | None
+) -> bool:
+    """Whether the owner-private diagnostic is both useful and protocol-legal."""
+    if outcome not in _PRIVATE_FEEDBACK_OUTCOMES:
+        return False
+    return (
+        outcome != ScreenResultOutcome.DETERMINISTIC_REJECT
+        or reason_code in _PRIVATE_BUILD_FAILURE_CODES
+        or (reason_code or "").startswith("seed-")
+    )
 
 
 def _private_failure_feedback(detail: str, reason_code: str | None) -> str:
@@ -744,28 +794,10 @@ class ScreenerWorker:
                     "build-only screen produced a quarantine outcome for "
                     f"agent_id={agent_id}"
                 )
-            reason_code = (
-                "source-review-inconclusive"
-                if typed_outcome == ScreenResultOutcome.PASS_INCONCLUSIVE
-                else result.evidence[-1].code
-                if result.evidence
-                else None
-            )
+            reason_code = _verdict_reason_code(typed_outcome, result.evidence)
             private_failure_detail: str | None = None
             private_failure_log_tail: str | None = None
-            if (
-                typed_outcome
-                in {
-                    ScreenResultOutcome.RETRYABLE_INFRA,
-                    ScreenResultOutcome.INCONCLUSIVE,
-                }
-                or reason_code
-                in {
-                    "docker-build",
-                    "docker-build-infrastructure",
-                }
-                or (reason_code or "").startswith("seed-")
-            ):
+            if _attaches_private_failure_feedback(typed_outcome, reason_code):
                 # The public reason stays generic. Preserve the exact bounded
                 # diagnostic for the submission owner, with the same sanitizer
                 # Platform applies before durable storage. This includes an

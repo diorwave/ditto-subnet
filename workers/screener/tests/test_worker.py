@@ -923,6 +923,99 @@ async def test_seed_probe_rejection_forwards_private_miner_feedback(
     assert "secret-value" not in verdict["private_failure_detail"]
 
 
+def _with_shadow_seed_observation(
+    decision: ScreeningDecision, *, seed_passed: bool = False
+) -> ScreeningDecision:
+    """Apply the gate's real shadow-mode /seed evidence to ``decision``."""
+    from ditto_screener.gate import (
+        _SandboxUsage,
+        _SeedProbe,
+        _with_seed_probe_evidence,
+    )
+
+    probe = _SeedProbe(
+        passed=seed_passed,
+        code="seed-ok" if seed_passed else "seed-readonly-write",
+        detail="" if seed_passed else "/seed wrote outside the writable filesystem",
+        usage=_SandboxUsage(memory_peak_bytes=120 * 1024 * 1024),
+    )
+    return _with_seed_probe_evidence(decision, probe)
+
+
+def _validated_request(verdict: dict[str, Any]) -> ScreenResultRequest:
+    """Build the wire request exactly as PlatformClient.submit_result does."""
+    return ScreenResultRequest(
+        screener_hotkey=_MINER,
+        **{key: value for key, value in verdict.items() if key != "agent_id"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "code", "passed"),
+    [
+        (ScreeningOutcome.QUARANTINE, "benchmark-emulation", False),
+        (ScreeningOutcome.PASS, "health-ok", True),
+    ],
+)
+async def test_shadow_seed_evidence_never_attaches_private_feedback_to_non_failure(
+    make_config: Callable[..., ScreenerConfig],
+    outcome: ScreeningOutcome,
+    code: str,
+    passed: bool,
+) -> None:
+    # Regression for #2081: shadow /seed evidence is appended after the
+    # deciding evidence. Its seed-* tail used to become the reason code and
+    # attach private failure feedback, so ScreenResultRequest raised "private
+    # failure feedback requires a failure outcome" and the attempt was parked
+    # as worker-result-processing-failed instead of carrying its verdict.
+    decision = _with_shadow_seed_observation(
+        core_decision(outcome, code=code, summary="deciding evidence", detail="")
+    )
+    assert [item.code for item in decision.evidence][-2:] == [
+        "seed-readonly-write",
+        "seed-envelope-usage",
+    ]
+    platform = _FakePlatform([])
+    worker = _worker(make_config(), platform, _FakeGate(decision))
+
+    await worker._screen_one(_item(uuid4()), policy_version=SCREENING_POLICY_VERSION)
+
+    assert len(platform.verdicts) == 1
+    request = _validated_request(platform.verdicts[0])
+    assert request.outcome == ScreenResultOutcome(outcome.value)
+    assert request.passed is passed
+    assert request.reason_code == code
+    assert request.private_failure_detail is None
+    assert request.private_failure_log_tail is None
+
+
+async def test_failure_with_shadow_seed_envelope_keeps_deciding_reason(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    # The envelope sample is recorded even when /seed passes; it must not
+    # replace the deciding failure code or its specific private feedback.
+    decision = _with_shadow_seed_observation(
+        core_decision(
+            ScreeningOutcome.INCONCLUSIVE,
+            code="challenge-transport-failure",
+            summary="behavioral oracle could not reach /run",
+            detail="connection refused",
+        ),
+        seed_passed=True,
+    )
+    assert decision.evidence[-1].code == "seed-envelope-usage"
+    platform = _FakePlatform([])
+    worker = _worker(make_config(), platform, _FakeGate(decision))
+
+    await worker._screen_one(_item(uuid4()), policy_version=SCREENING_POLICY_VERSION)
+
+    request = _validated_request(platform.verdicts[0])
+    assert request.outcome == ScreenResultOutcome.INCONCLUSIVE
+    assert request.reason_code == "challenge-transport-failure"
+    assert request.private_failure_detail is not None
+    assert "could not reach" in request.private_failure_detail
+
+
 async def test_exact_cross_miner_duplicate_skips_artifact_and_private_gate(
     make_config: Callable[..., ScreenerConfig],
 ) -> None:
