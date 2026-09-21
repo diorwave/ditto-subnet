@@ -57,7 +57,7 @@ real and must be stated plainly: at full activation, miners receive
 never reaches a spendable balance. A "fixed split of the existing burn share"
 would therefore still burn the money. The treasury needs its own destination:
 a separate registered hotkey owned by a coldkey with no owner association. That
-coldkey is the custody key described below.
+coldkey is the reserve account described under [Custody](#custody).
 
 ### Denominator
 
@@ -108,30 +108,61 @@ pauses, and reconciliation therefore count **per epoch**, not per block.
 | Key | Holder | Can do | Can't do |
 |---|---|---|---|
 | Treasury hotkey | Registration only, held offline after registration | Hold the treasury UID and receive incentive | Move stake or TAO |
-| Treasury coldkey | A Substrate `Multisig` account, 2-of-3 by default (D2) | Unstake treasury alpha and send payouts, only when signatories co-sign | Act on a single signature |
+| Reserve account | A 3-of-3 Substrate `Multisig` of the three signatories. It is the coldkey that owns the treasury hotkey | Hold all inflow; unstake alpha; pay large awards; top up the operating account | Act without **all three** signatures |
+| Operating account | A 2-of-3 `Multisig` of the same signatories, with its balance capped at `OPERATING_BALANCE_CAP_TAO` (proposed 25 TAO) | Pay awards up to `LARGE_AWARD_TAO` | Receive funds from anywhere except a reserve top-up; hold more than the cap; touch the reserve |
 | Signatory keys | Three named maintainers who don't share a machine or a secret store | Approve one multisig call | Spend alone |
 | Platform | No treasury key | Record ledger entries, serve `treasury_share_bps`, and verify receipts | Sign or submit any treasury extrinsic |
+
+The approval tiers are enforced **by which account pays, not by a check made
+after the transfer**:
+
+- The reserve's threshold is 3, so the chain won't dispatch any reserve call,
+  whether a large award, an unstake, or a top-up, without all three
+  signatures.
+- The operating account's threshold is 2, but it only ever holds what the
+  reserve sent it, and that top-up itself needed all three signatures.
+- Two signatories acting alone, whether compromised or colluding, can move at
+  most the current operating balance. That is at most
+  `OPERATING_BALANCE_CAP_TAO`, which is set no higher than `LARGE_AWARD_TAO`.
+
+This bounded loss is the remaining on-chain risk, and this contract accepts
+it knowingly. Reviewer counts, conflict rules, and the approval record are
+off-chain policy for every tier: the chain enforces only signature counts. A
+violation of that off-chain policy is detected after the fact by the receipt
+checks below. Detection can freeze *future* outflows. It can't prevent or
+reverse a transfer.
 
 Rules:
 
 - **Holding keys is not the same as spending authority.** A payout needs an
-  approved ledger record (see #2046) *and* a multisig extrinsic whose call data
-  matches that record. Signatories co-sign only after checking the call hash
+  approved ledger record (see #2046) *and* an extrinsic from the account that
+  matches its tier, with call data that matches that record. Signatories co-sign only after checking the call hash
   against the published approval.
 - **Platform never holds a treasury key.** Secrets live in Secret Manager or
   offline hardware. They are never in this repository, CI, or Backroom.
-- **Signatory rotation** creates a new multisig address. The old signers move
-  the balance to the new address in one recorded `custody_rotation` entry, and
-  both addresses stay listed in the ledger. Each new signatory proves the key
+- **Top-ups** are reserve-to-operating transfers recorded as `internal_transfer`
+  entries. A top-up may never raise the operating balance above
+  `OPERATING_BALANCE_CAP_TAO`. The three signers check this before signing, and
+  it is enforced by their third signature, not by Platform.
+- **Signatory rotation** creates new addresses for both accounts. The old
+  signers move each balance to its new address in recorded `custody_rotation`
+  entries, and every address stays listed in the ledger. Rotating the reserve
+  needs all three current signatures. Each new signatory proves the key
   change by signing a `ditto-treasury-signer:v1` payload with both the outgoing
   and incoming keys. This follows the two-key `ditto-owner-link:v1` attestation
   pattern in [OWNER-LINKS.md](OWNER-LINKS.md).
 - **Treasury hotkey rotation** uses Subtensor's hotkey swap, together with a
   validator release that changes `FINNEY_TREASURY_HOTKEY`. Inflow resolves to 0
   until the release is adopted, and the ledger records the gap.
-- **Recovery.** Losing one signatory key leaves 2-of-3 able to rotate. Losing
-  two keys is unrecoverable by design. The exposure is bounded by the outflow
-  and balance caps below, not by a recovery backdoor.
+- **Recovery.** The trade-off is explicit. A 3-of-3 reserve can't rotate or
+  move funds if any one signatory's key is lost, so each signatory keeps a
+  sealed offline backup of their own key, stored separately from the working
+  copy. Losing a key **and** its backup freezes the reserve permanently. The
+  operating account (2-of-3) keeps working in that case, but it can't be
+  refilled. D2 may choose a 3-of-4 reserve instead, with a sealed recovery key
+  held by a separate custodian. That still enforces three signatures on chain
+  for large awards, but no longer *all* signatories. There is no recovery
+  backdoor beyond what D2 approves.
 - **Registration order.** The treasury UID is registered only after this
   contract, the threat model, and the custody design are approved (acceptance
   item 1). It is registered at activation, not during shadow. An unfunded UID
@@ -180,9 +211,14 @@ The thresholds are proposed defaults. Maintainers set the final numbers (D2).
 
 | Award | Required |
 |---|---|
-| Up to `SMALL_AWARD_TAO` (proposed 5 TAO) | 1 reviewer + 1 approver who is a different person, then 2 multisig signatures |
-| Above `SMALL_AWARD_TAO`, up to `LARGE_AWARD_TAO` (proposed 25 TAO) | 2 distinct reviewers + 1 approver, then 2 multisig signatures |
-| Above `LARGE_AWARD_TAO`, or above 20% of the treasury balance | 3 distinct non-conflicted operators, then **all** multisig signatures |
+| Up to `SMALL_AWARD_TAO` (proposed 5 TAO) | 1 reviewer + 1 approver who is a different person, then 2 signatures on the **operating** account |
+| Above `SMALL_AWARD_TAO`, up to `LARGE_AWARD_TAO` (proposed 25 TAO) | 2 distinct reviewers + 1 approver, then 2 signatures on the **operating** account |
+| Above `LARGE_AWARD_TAO`, or above 20% of the reconciled treasury balance | 3 distinct non-conflicted operators, then all 3 signatures on the **reserve** account (enforced on chain) |
+
+Reviewer and approver counts are off-chain policy. Signature counts are
+enforced on chain by the paying account. An award that exceeds the operating
+balance is paid from the reserve, whatever its tier, so it always needs all
+three signatures.
 
 The distinct-operator shape follows the name-claim `ENDORSEMENT_THRESHOLD = 3`
 precedent (`apps/platform/ditto/api_server/name_claim.py`). No single person can
@@ -227,7 +263,7 @@ construction as the score audit log (`apps/platform/ditto/db/queries/audit.py`):
 - Each entry is written inside the transaction that makes its state durable.
 
 Entry kinds: `policy_revision`, `custody_rotation`, `inflow_epoch`,
-`conversion`, `reservation`, `reservation_release`, `approval`, `payout`,
+`conversion`, `internal_transfer`, `reservation`, `reservation_release`, `approval`, `payout`,
 `payout_failed`, `cancellation`, `dispute`, `dispute_resolution`, `pause`,
 `correction`.
 
@@ -244,14 +280,16 @@ entries also carry the block number, canonical block hash, and extrinsic index.
 - **Payouts** are denominated and verified in TAO rao. The verifier starts from
   `PaymentVerifier` (`apps/platform/ditto/api_server/payment_verifier/`), but a
   multisig payout has two origins, and it checks them separately. The outer
-  extrinsic is signed by one **signatory**. The treasury multisig account is the
+  extrinsic is signed by one **signatory**. The paying multisig account is the
   origin of the **inner** transfer that the multisig pallet dispatches. It is
   never the signer of the outer extrinsic, so checking the outer signer against
   the multisig address would reject every valid payout. Checks, in order:
   1. **Block.** The canonical block hash matches the block number.
-  2. **Multisig account.** Derive the account from the signatory set and
-     threshold recorded in the active `custody_rotation` entry, using the
-     pallet's own derivation. It must equal the recorded treasury address.
+  2. **Paying account and tier.** Derive the paying account from the signatory
+     set and threshold recorded in the active `custody_rotation` entry, using
+     the pallet's own derivation. It must equal the recorded reserve address
+     (threshold 3) or operating address (threshold 2). An award above
+     `LARGE_AWARD_TAO` must come from the reserve.
   3. **Outer call.** The extrinsic at the proof's index is exactly
      `Multisig.as_multi`. Any other wrapper is rejected, including
      `Utility.batch`, `Proxy.proxy`, and `Multisig.as_multi_threshold_1`. The
@@ -265,35 +303,45 @@ entries also carry the block number, canonical block hash, and extrinsic index.
      `approval` entry, which is the hash the signatories checked before signing.
   5. **Receipt.** At that extrinsic index there must be all three of:
      - `ExtrinsicSuccess`;
-     - `Multisig.MultisigExecuted` with `multisig` equal to the treasury
+     - `Multisig.MultisigExecuted` with `multisig` equal to the paying
        account, the approved `call_hash`, and `result = Ok`;
-     - `Balances.Transfer` with `from` equal to the treasury account, and `to`
+     - `Balances.Transfer` with `from` equal to the paying account, and `to`
        and `amount` equal to the approval.
 
      `ExtrinsicSuccess` alone is **not** proof of payment. The outer extrinsic
      succeeds even when the dispatched inner call fails, and that case shows up
      only as an `Err` result on `MultisigExecuted`. It is recorded as
      `payout_failed`.
-  6. **Approvals.** Collect the signatories that approved the operation from the
+  6. **Approvals.** Record which signatories approved, taken from the
      `Multisig.NewMultisig`, `Multisig.MultisigApproval`, and
      `Multisig.MultisigExecuted` events for the operation's timepoint and
-     `call_hash`. The count must meet the award's tier. The chain enforces only
-     the multisig threshold. So when a tier requires *all* signatures, this
-     check is the enforcement point: a payout executed with fewer approvals is
-     recorded, and it freezes outflows automatically until a dispute is
-     resolved.
+     `call_hash`. This is an audit record, not an enforcement point: the chain
+     has already enforced the paying account's threshold.
 
-  A `conversion` (unstake) is also a multisig-dispatched call. It is verified
-  the same way, with the approved staking call in place of the transfer.
+  Any transfer out of either account that fails a check is detected after the
+  fact, for example a large award paid from the operating account or a
+  transfer with no matching approval. It is recorded, and it freezes outflows
+  automatically until a dispute is resolved. Detection can't undo the
+  transfer. That is why the loss is bounded by where funds sit, not by this
+  check.
+
+  Conversions (unstakes) and top-ups are also multisig-dispatched calls from
+  the reserve. They are verified the same way, with the approved staking or
+  transfer call in their place.
 - **Valuation.** Rao is the only authoritative unit. USD figures from the
   existing price oracle are informational only and never decide an award.
-- **Reconciliation.** Every day, and before every payout, two balances must
-  match the chain. The alpha stake on the treasury hotkey must equal inflows
-  minus the alpha given up in conversions. The multisig's TAO balance must equal
-  the TAO received from conversions minus payouts. Transaction fees and multisig
-  deposits are paid by the signatory who submits, not by the treasury. A
-  mismatch writes a
-  `pause` entry that freezes outflows until a `correction` explains it.
+- **Reconciliation.** Every day, and before every payout, three balances must
+  match the chain:
+  - The alpha stake on the treasury hotkey must equal inflows minus the alpha
+    given up in conversions.
+  - The reserve's TAO must equal TAO from conversions minus top-ups and reserve
+    payouts.
+  - The operating account's TAO must equal top-ups minus operating payouts, and
+    must never exceed `OPERATING_BALANCE_CAP_TAO`.
+
+  Transaction fees and multisig deposits are paid by the signatory who submits,
+  not by either account. A mismatch writes a `pause` entry that freezes
+  outflows until a `correction` explains it.
 - **Public read.** Anyone can read and verify the ledger on the existing audit
   line. Payloads are limited to public inputs: issue, PR, commit, claimant
   hotkey and payee coldkey, amounts, and receipts. Nothing from private review
@@ -308,8 +356,9 @@ entries also carry the block number, canonical block hash, and extrinsic index.
   confirmer, and can't exceed the compiled `MAX_TREASURY_SHARE_BPS`.
 - **Outflow freeze:** a `pause` entry. Any signatory may add one, and a failed
   reconciliation adds one automatically. Removing it needs the large-award
-  threshold. Signatories can also refuse to co-sign, which is the multisig's
-  built-in veto.
+  threshold. Signatories can also refuse to co-sign. On the reserve, any one
+  signatory's refusal is a veto enforced on chain. On the operating account,
+  refusal blocks a payout only while the other two also decline.
 - **Policy changes** such as thresholds, eligible classes, or caps are
   revisioned `policy_revision` entries with `expected_revision`. They apply to
   bounties opened after the revision. Each bounty is bound to the reward
@@ -324,6 +373,9 @@ entries also carry the block number, canonical block hash, and extrinsic index.
 | 2. Capped | 100 | Yes, outflow cap `MONTHLY_OUTFLOW_CAP_TAO` (proposed 25 TAO/30 days) | 14 days of clean daily reconciliation and at least one verified payout |
 | 3. Target | 500 | Yes, cap reviewed by revision | Ongoing |
 
+`OPERATING_BALANCE_CAP_TAO` also caps the funds two signatories can reach at
+any time, whatever the stage.
+
 Every step is a reversible `TreasurySettings` revision. Moving back one stage is
 an inflow pause and a new revision, never a code rollback. Reservations may
 never exceed the reconciled balance minus the outflow still available under the
@@ -335,7 +387,10 @@ cap.
 |---|---|
 | Compromised or buggy Platform redirects emission | The destination hotkey and ceiling are compiled into the validator. Platform serves only a capped share, and invalid values resolve to 0 |
 | Platform or Backroom compromise tries to spend | Platform holds no treasury key. Spending needs a multisig co-signed against a published approval hash |
-| One signatory is compromised or coerced | 2-of-3 multisig, plus all signatures for large awards. The outflow freeze is available to any other signatory |
+| One signatory is compromised or coerced | Can't move either account alone. The outflow freeze is available to any other signatory |
+| Two signatories are compromised or collude | **Residual risk, bounded on chain.** They can move at most the operating balance (≤ `OPERATING_BALANCE_CAP_TAO`). They can't touch the reserve or refill the operating account. Detection freezes future outflows but can't reverse the transfer |
+| A large award is paid without full approval | Impossible from the reserve without all three signatures. The operating account can't hold enough to pay one |
+| A signatory key is lost | Sealed personal backups. Losing a key and its backup freezes the reserve permanently (see Recovery, and the D2 3-of-4 alternative) |
 | An insider pays themselves or a friend | Conflict rules, distinct-operator thresholds, and a public ledger bound to exact commits and payees |
 | A GitHub account takeover redirects a payout | The payee is the claimant's hotkey-signed coldkey (#2045). GitHub identity is never a payment destination |
 | A Discord or issue promise is treated as a debt | Principle 1: only an approved ledger record can lead to a payout |
@@ -362,8 +417,11 @@ cap.
   recommended) or option B (owner transfer). For option A, choose 500 bps of the
   miner vector (about 2% of total emission) or about 1,220 bps (5% of total
   emission).
-- **D2: Custody and thresholds.** Name the three signatories. Confirm 2-of-3,
-  `SMALL_AWARD_TAO`, `LARGE_AWARD_TAO`, and `MONTHLY_OUTFLOW_CAP_TAO`.
+- **D2: Custody and thresholds.** Name the three signatories. Confirm the
+  3-of-3 reserve and 2-of-3 operating account, or choose the 3-of-4 reserve
+  with a sealed recovery key. Confirm `SMALL_AWARD_TAO`, `LARGE_AWARD_TAO`,
+  `OPERATING_BALANCE_CAP_TAO` (no higher than `LARGE_AWARD_TAO`), and
+  `MONTHLY_OUTFLOW_CAP_TAO`.
 - **D3: Bootstrap bounties.** Issues #2044–#2047 predate the contract they
   create. Either record their awards as the ledger's first entries after
   genesis, approved under this contract once it is adopted, or declare them
