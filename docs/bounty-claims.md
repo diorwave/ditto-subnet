@@ -240,13 +240,20 @@ forever.
     reason `inactive`.
 
   If the deadline passes without a decision, the reservation stays held, since
-  the contributor isn't at fault. It is flagged `review_overdue` on the board
-  and in Backroom, and the reviewer is reassigned. That delay is for
-  maintainers to fix, not the contributor.
+  the contributor isn't at fault. Platform appends a `review_overdue` ledger
+  entry, flags it on the board and in Backroom, and reassigns the reviewer. The
+  reassigned reviewer has one more `review_days`. After that, the reservation
+  escalates to every non-conflicted maintainer, and the board and Backroom
+  report it on every read until someone records a decision. A held submission
+  can therefore outlast the deadline only through visible maintainer inaction,
+  never through anything the claimant does. It still counts toward the
+  claimant's per-payee limit.
 - **Rework is limited.** `changes_requested` sends the claim back to `active`
   with a rework window of `rework_days` (default 7). This window is not a new
-  `reservation_days` period and not a renewal. After `max_change_rounds`
-  (default 2) rounds, the reviewer must accept or reject.
+  `reservation_days` period and not a renewal. If the rework window ends
+  without a new signed `submit`, the reservation is released with reason
+  `expired`, recorded in the ledger. After `max_change_rounds` (default 2)
+  rounds, the reviewer must accept or reject.
 - **Stale submissions are released automatically.** Platform re-reads the PR,
   both on a schedule and when it receives webhooks. The reservation is released
   with reason `stale_submission`, with actor `system` and the PR state recorded
