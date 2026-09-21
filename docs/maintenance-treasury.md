@@ -337,7 +337,7 @@ cap.
 
 | Work | Owner issue |
 |---|---|
-| Hotkey-signed claim payload, reservation, handoff, and appeal | #2045 |
+| Hotkey-signed claim payload, reservation, handoff, and appeal ([bounty-claims.md](bounty-claims.md)) | #2045 |
 | `TreasurySettings` revision API and `treasury_share_bps` on the ledger; validator fold and constants; ledger tables and hash chain; payout verifier variant; reconciliation job; Backroom MCP read tools for treasury policy, balance, and ledger | #2046 |
 | Board views, bounty template fields (`policy revision`, `reward revision`, `reviewer`, `expiry`, `conflicts`), contributor guide | #2047 |
 
