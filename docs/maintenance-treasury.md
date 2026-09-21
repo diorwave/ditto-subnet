@@ -241,21 +241,58 @@ entries also carry the block number, canonical block hash, and extrinsic index.
 - **Conversion.** Emission arrives as alpha staked to the treasury hotkey. An
   unstake to TAO is a `conversion` entry, with the alpha given up, the TAO
   received, and the receipt.
-- **Payouts** are denominated and verified in TAO rao. They reuse the check
-  order in `PaymentVerifier` (`apps/platform/ditto/api_server/payment_verifier/`)
-  in reverse:
-  1. canonical block hash resolved from the block number;
-  2. `Balances.transfer_keep_alive`, nested in `Multisig.as_multi`;
-  3. `ExtrinsicSuccess`;
-  4. the treasury multisig as signer;
-  5. the approved payee coldkey as destination;
-  6. the exact approved amount.
+- **Payouts** are denominated and verified in TAO rao. The verifier starts from
+  `PaymentVerifier` (`apps/platform/ditto/api_server/payment_verifier/`), but a
+  multisig payout has two origins, and it checks them separately. The outer
+  extrinsic is signed by one **signatory**. The treasury multisig account is the
+  origin of the **inner** transfer that the multisig pallet dispatches. It is
+  never the signer of the outer extrinsic, so checking the outer signer against
+  the multisig address would reject every valid payout. Checks, in order:
+  1. **Block.** The canonical block hash matches the block number.
+  2. **Multisig account.** Derive the account from the signatory set and
+     threshold recorded in the active `custody_rotation` entry, using the
+     pallet's own derivation. It must equal the recorded treasury address.
+  3. **Outer call.** The extrinsic at the proof's index is exactly
+     `Multisig.as_multi`. Any other wrapper is rejected, including
+     `Utility.batch`, `Proxy.proxy`, and `Multisig.as_multi_threshold_1`. The
+     outer signer, together with `other_signatories`, must equal the recorded
+     signatory set, and `threshold` must equal the recorded threshold. The outer
+     signer must be a signatory. It does not need to be the multisig.
+  4. **Inner call.** The embedded call decodes to exactly
+     `Balances.transfer_keep_alive(dest, value)`. `dest` is the approved payee
+     coldkey, and `value` is the exact approved amount in rao. The blake2-256
+     hash of the encoded inner call equals the `call_hash` recorded on the
+     `approval` entry, which is the hash the signatories checked before signing.
+  5. **Receipt.** At that extrinsic index there must be all three of:
+     - `ExtrinsicSuccess`;
+     - `Multisig.MultisigExecuted` with `multisig` equal to the treasury
+       account, the approved `call_hash`, and `result = Ok`;
+     - `Balances.Transfer` with `from` equal to the treasury account, and `to`
+       and `amount` equal to the approval.
+
+     `ExtrinsicSuccess` alone is **not** proof of payment. The outer extrinsic
+     succeeds even when the dispatched inner call fails, and that case shows up
+     only as an `Err` result on `MultisigExecuted`. It is recorded as
+     `payout_failed`.
+  6. **Approvals.** Collect the signatories that approved the operation from the
+     `Multisig.NewMultisig`, `Multisig.MultisigApproval`, and
+     `Multisig.MultisigExecuted` events for the operation's timepoint and
+     `call_hash`. The count must meet the award's tier. The chain enforces only
+     the multisig threshold. So when a tier requires *all* signatures, this
+     check is the enforcement point: a payout executed with fewer approvals is
+     recorded, and it freezes outflows automatically until a dispute is
+     resolved.
+
+  A `conversion` (unstake) is also a multisig-dispatched call. It is verified
+  the same way, with the approved staking call in place of the transfer.
 - **Valuation.** Rao is the only authoritative unit. USD figures from the
   existing price oracle are informational only and never decide an award.
 - **Reconciliation.** Every day, and before every payout, two balances must
   match the chain. The alpha stake on the treasury hotkey must equal inflows
   minus the alpha given up in conversions. The multisig's TAO balance must equal
-  the TAO received from conversions minus payouts and fees. A mismatch writes a
+  the TAO received from conversions minus payouts. Transaction fees and multisig
+  deposits are paid by the signatory who submits, not by the treasury. A
+  mismatch writes a
   `pause` entry that freezes outflows until a `correction` explains it.
 - **Public read.** Anyone can read and verify the ledger on the existing audit
   line. Payloads are limited to public inputs: issue, PR, commit, claimant
