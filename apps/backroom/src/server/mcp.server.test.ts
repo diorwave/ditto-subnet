@@ -341,6 +341,8 @@ describe('Backroom MCP tools', () => {
     // One bounded conversation observation tool adds ~900 bytes.
     // The audited retry adds exact report/artifact digests; measured 136,355 bytes.
     // Exact-agent continual retest diagnosis adds one bounded read schema.
+    // The two validator-retry inputs then gain acknowledgeProviderOutage
+    // (#2087) on top of that read.
     expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(137_200)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
@@ -6926,6 +6928,8 @@ describe('Backroom MCP tools', () => {
         blocking_reason: null,
         recommended_action: null,
         dominant_failure_code: null,
+        provider_outage: null,
+        provider_outage_blocks_retry: null,
         earliest_retry_after: null,
         attempts_used: 3,
         exhausted_validator_count: 3,
@@ -7197,6 +7201,7 @@ describe('Backroom MCP tools', () => {
               expected_snapshot: snapshotB,
             },
           ],
+          acknowledge_provider_outage: false,
         }),
       }),
     )

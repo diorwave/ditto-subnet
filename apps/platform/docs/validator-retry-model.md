@@ -146,6 +146,18 @@ remaining exhausted ticket's **current** `failure_detail` (the one whose
 `failed_at >= issued_at`) is one of the three agent codes does a retry grant
 refuse and point at withdrawal.
 
+A remaining slot whose current `failure_detail` is `provider_outage_parked`
+was parked by the relay-owned provider circuit, not by the agent. Both routes
+then return `provider_outage` (the circuit: `state`, `last_failure_at`,
+`last_error_code`, `failure_count`, and `closed_at`, the last recovery). While
+that circuit is still `open`, `provider_outage_blocks_retry` is true,
+`recovery_allowed` is false, `recommended_action` is null rather than `retry`,
+and the single and batch retry routes refuse the grant unless the request
+carries `acknowledge_provider_outage: true`. A lease issued into an open
+circuit is parked again and, having used its one no-fault resume, charges the
+new grant (ditto-subnet#2087). A closed circuit restores the ordinary `retry`
+recommendation.
+
 The platform never finalizes an evaluating agent without k=3 validator scores.
 A proven zero-inference run is a **validator-submitted** composite of 0.00, not
 a platform-minted ledger row. Agent-attributable `fail_job` is the opposite:

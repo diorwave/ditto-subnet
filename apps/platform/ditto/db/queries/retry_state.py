@@ -24,6 +24,7 @@ from ditto.db.models import (
     Agent,
     BenchmarkRollout,
     BenchmarkRolloutMember,
+    ProviderOutageCircuit,
     Score,
     SubmissionRetirement,
     ValidatorHeartbeat,
@@ -53,6 +54,14 @@ AGENT_ATTRIBUTABLE_FAILURE_DETAILS = frozenset(
 )
 AGENT_ATTRIBUTABLE_WITHDRAW_REASON = (
     "exhausted on agent-attributable failures; withdraw rather than retry"
+)
+# Written by ``park_scoring_leases`` when the relay's provider circuit parks a
+# live scoring lease. Infrastructure, never the agent's fault.
+PROVIDER_OUTAGE_PARKED_DETAIL = "provider_outage_parked"
+PROVIDER_OUTAGE_RETRY_BLOCKING_REASON = (
+    "inference provider outage circuit is still open and parked these slots; "
+    "a retry now would be parked again. Wait for the circuit to close, or "
+    "retry with acknowledge_provider_outage=true"
 )
 
 
@@ -194,16 +203,48 @@ def dominant_agent_failure_detail(
     return detail if detail in AGENT_ATTRIBUTABLE_FAILURE_DETAILS else None
 
 
+def provider_outage_parked_exhaustion(
+    *, scores: list[Score], tickets: list[ValidatorTicket]
+) -> bool:
+    """Whether a remaining exhausted slot was last parked by the provider circuit."""
+    return any(
+        current_failure_detail(ticket) == PROVIDER_OUTAGE_PARKED_DETAIL
+        for ticket in remaining_exhausted_tickets(scores=scores, tickets=tickets)
+    )
+
+
+def provider_outage_blocks_retry(
+    *,
+    circuit: ProviderOutageCircuit | None,
+    scores: list[Score],
+    tickets: list[ValidatorTicket],
+) -> bool:
+    """Whether a plain retry grant would lease straight back into the outage.
+
+    True while the relay-owned circuit is still ``open`` (cooling down or
+    half-open) and a remaining exhausted slot was parked by it. Scoring leases
+    issued in that window are parked again by ``park_scoring_leases`` and,
+    having already used their one no-fault resume, charge the new grant — the
+    ditto-subnet#2087 loop. A closed circuit restores the ordinary retry path.
+    """
+    return (
+        circuit is not None
+        and circuit.state == "open"
+        and provider_outage_parked_exhaustion(scores=scores, tickets=tickets)
+    )
+
+
 def recommended_retry_action(
     *,
     scores: list[Score],
     tickets: list[ValidatorTicket],
     recovery_allowed: bool,
+    provider_outage_blocked: bool = False,
 ) -> RecommendedRetryAction | None:
     """Operator next step for a below-quorum row, or ``None`` when none applies."""
     if is_agent_attributable_exhaustion(scores=scores, tickets=tickets):
         return "withdraw"
-    if recovery_allowed:
+    if recovery_allowed and not provider_outage_blocked:
         return "retry"
     return None
 
