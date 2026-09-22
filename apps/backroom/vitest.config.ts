@@ -12,5 +12,8 @@ export default defineConfig({
     // assertion. They finish in well under a second of actual work; this is
     // headroom for scheduling, not permission for a slow test.
     testTimeout: 20_000,
+    // The OAuth grant tests drive the real provider library; inlining it lets
+    // their `cloudflare:workers` mock replace the Workers-only import.
+    server: { deps: { inline: ['@cloudflare/workers-oauth-provider'] } },
   },
 })

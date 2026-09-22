@@ -266,6 +266,27 @@ export type McpGrantProps = {
   session: BackroomSession
   scopes: Array<string>
   clientName: string
+  /**
+   * The exact OAuth grant and client this access token belongs to. Stamped at
+   * token issuance so an operator can match a live connection to the grant
+   * listed (and revocable) on the Agent access page.
+   */
+  grant?: { id: string; clientId: string }
+}
+
+/**
+ * The scopes this connection can actually exercise right now: the token's
+ * granted scopes, further capped by the account's live Backroom level. A
+ * read-level account never exercises artifact or write scopes, whatever an
+ * older grant recorded.
+ */
+export function effectiveScopes(props: McpGrantProps) {
+  return props.scopes.filter(
+    (scope) =>
+      scope === BACKROOM_READ_SCOPE ||
+      ((scope === BACKROOM_ARTIFACT_SCOPE || scope === BACKROOM_WRITE_SCOPE) &&
+        props.session.accessLevel === 'write'),
+  )
 }
 
 export type BackroomEnv = {
@@ -794,7 +815,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get Backroom access',
       description:
-        'Show the authenticated staff identity and the read, artifact-download, and write scopes granted to this MCP connection.',
+        "Show the staff identity, this connection's OAuth grant and client ids, and effective scopes (granted scopes capped by the live account level).",
       annotations: toolAnnotations('read'),
     },
     async () =>
@@ -805,7 +826,9 @@ export function createBackroomMcpServer(props: McpGrantProps) {
           name: props.session.name,
         },
         clientName: props.clientName,
-        scopes: props.scopes,
+        grant: props.grant ?? null,
+        scopes: effectiveScopes(props),
+        grantedScopes: props.scopes,
         accessLevel: hasWriteAccess(props)
           ? hasArtifactAccess(props)
             ? 'full'

@@ -23,13 +23,20 @@ export class BackroomMcpHandler extends WorkerEntrypoint<
   McpGrantProps
 > {
   async fetch(request: Request) {
-    const props = this.ctx.props
+    const grantProps = this.ctx.props
+    let props: McpGrantProps
     try {
-      accessLevelForEmail(
-        props.session.email,
+      // The live binding, not the level sealed into the grant, decides what
+      // this connection may exercise: removing an address from
+      // BACKROOM_ADMIN_EMAILS drops artifact and write access on the next
+      // request (the tools' own level checks refuse them), and
+      // get_backroom_access reports that effective level.
+      const accessLevel = accessLevelForEmail(
+        grantProps.session.email,
         this.env.BACKROOM_ADMIN_EMAILS,
         this.env.BACKROOM_BLOCKED_EMAILS,
       )
+      props = { ...grantProps, session: { ...grantProps.session, accessLevel } }
     } catch {
       return Response.json(
         { error: 'access_denied', error_description: 'This account is not authorized' },
