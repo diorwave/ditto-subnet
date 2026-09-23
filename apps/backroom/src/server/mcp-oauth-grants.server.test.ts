@@ -7,11 +7,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it, vi } from 'vitest'
 
-// The provider only references WorkerEntrypoint to classify handlers; node has
-// no `cloudflare:` loader, so stand in a plain base class.
-vi.mock('cloudflare:workers', () => ({ WorkerEntrypoint: class {} }))
+// `cloudflare:workers` is aliased to a test stub in vitest.config.ts; node's
+// loader cannot resolve the Workers-runtime module the provider library and the
+// MCP handler both import.
 import type { BackroomSession } from '../lib/auth.types'
 import { sealToken } from './crypto.server'
+import { BackroomMcpHandler } from './mcp-handler.server'
 import {
   beginMcpAuthorization,
   completeMcpAuthorization,
@@ -120,11 +121,12 @@ async function sessionCookie(overrides: Partial<BackroomSession> = {}) {
 
 type Harness = ReturnType<typeof harness>
 
-async function connect(
+async function authorize(
   h: Harness,
   clientId: string,
   requestedScope: string,
   accessLevel: 'read' | 'artifact' | 'write' | 'full',
+  sessionOverrides: Partial<BackroomSession> = {},
 ) {
   const { verifier, challenge } = await pkcePair()
   const authorize = new URL(`${origin}/authorize`)
@@ -148,7 +150,7 @@ async function connect(
       headers: {
         Origin: origin,
         'Content-Type': 'application/json',
-        Cookie: await sessionCookie(),
+        Cookie: await sessionCookie(sessionOverrides),
       },
       body: JSON.stringify({ requestToken, csrf: details.csrf, decision: 'allow', accessLevel }),
     }),
@@ -156,7 +158,11 @@ async function connect(
   )
   const { redirectTo } = (await complete.json()) as { redirectTo: string }
   const code = new URL(redirectTo).searchParams.get('code') ?? ''
-  const token = await h.provider.fetch(
+  return { details, code, verifier }
+}
+
+async function exchangeCode(h: Harness, clientId: string, code: string, verifier: string) {
+  return h.provider.fetch(
     new Request(`${origin}/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -171,11 +177,29 @@ async function connect(
     h.env,
     h.ctx,
   )
+}
+
+async function connect(
+  h: Harness,
+  clientId: string,
+  requestedScope: string,
+  accessLevel: 'read' | 'artifact' | 'write' | 'full',
+  sessionOverrides: Partial<BackroomSession> = {},
+) {
+  const { details, code, verifier } = await authorize(
+    h,
+    clientId,
+    requestedScope,
+    accessLevel,
+    sessionOverrides,
+  )
+  const token = await exchangeCode(h, clientId, code, verifier)
   expect(token.status).toBe(200)
   const body = (await token.json()) as {
     access_token: string
     refresh_token: string
     scope: string
+    expires_in: number
   }
   return { details, ...body }
 }
@@ -379,6 +403,79 @@ describe('Backroom MCP OAuth grants (issue #2080)', () => {
     expect(await h.oauth.unwrapToken(connection.access_token)).toBeNull()
     expect((await refresh(h, clientId, connection.refresh_token)).status).toBe(400)
     expect((await h.oauth.listUserGrants(session.uid)).items).toEqual([])
+  })
+
+  it('clamps the access token to the session and refuses a near-expiry exchange', async () => {
+    const h = harness()
+    const clientId = await registerClient(h)
+
+    // 90 seconds left: the token must die with the session, not round up.
+    const shortLived = await connect(h, clientId, BACKROOM_READ_SCOPE, 'read', {
+      expiresAt: Date.now() + 90_000,
+    })
+    expect(shortLived.expires_in).toBeLessThanOrEqual(90)
+    expect(shortLived.expires_in).toBeGreaterThan(80)
+
+    // Under the 60-second Workers KV floor the token cannot be made to expire
+    // with the session, so the exchange is refused instead.
+    const aboutToExpire = await authorize(h, clientId, BACKROOM_READ_SCOPE, 'read', {
+      expiresAt: Date.now() + 1_000,
+    })
+    const refused = await exchangeCode(h, clientId, aboutToExpire.code, aboutToExpire.verifier)
+    expect(refused.status).toBe(400)
+    await expect(refused.json()).resolves.toMatchObject({ error: 'invalid_grant' })
+
+    // A full-length session still gets the 50-minute ceiling.
+    const normal = await connect(h, clientId, BACKROOM_READ_SCOPE, 'read')
+    expect(normal.expires_in).toBe(50 * 60)
+  })
+
+  it('refuses every MCP call once the authorizing staff session expired', async () => {
+    const h = harness()
+    const clientId = await registerClient(h)
+    const expiresAt = Date.now() + 120_000
+    const connection = await connect(h, clientId, FULL.join(' '), 'full', { expiresAt })
+    const props = (await tokenProps(h, connection.access_token)).grant.props
+    const handler = new BackroomMcpHandler(
+      { props } as unknown as ExecutionContext & { props: McpGrantProps },
+      h.env,
+    )
+    const call = (tool: string) =>
+      handler.fetch(
+        new Request(`${origin}/mcp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: tool, arguments: {} },
+          }),
+        }),
+      )
+
+    const live = await call('get_backroom_access')
+    expect(live.status).toBe(200)
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(expiresAt + 1_000)
+      for (const tool of [
+        'get_backroom_access',
+        'get_screening_quarantine_artifact',
+        'resolve_screening_quarantine',
+      ]) {
+        const response = await call(tool)
+        expect(response.status).toBe(401)
+        expect(response.headers.get('WWW-Authenticate')).toContain('error="invalid_token"')
+        await expect(response.json()).resolves.toMatchObject({ error: 'invalid_token' })
+      }
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refuses grant listing to a blocked operator', async () => {

@@ -18,12 +18,39 @@ function hasReadAccess(props: McpGrantProps) {
   return props.scopes.includes(BACKROOM_READ_SCOPE)
 }
 
+/**
+ * The authorizing staff session is re-checked on every MCP request, exactly as
+ * the live `BACKROOM_ADMIN_EMAILS` level is. Token TTLs are clamped to the
+ * session at issuance, but expiry is enforced here too so no rounding, clock
+ * skew, or future issuance path can let a token outlive its session.
+ */
+export function expiredSessionResponse(request: Request) {
+  const origin = new URL(request.url).origin
+  const resourceMetadata = `${origin}/.well-known/oauth-protected-resource/mcp`
+  return Response.json(
+    {
+      error: 'invalid_token',
+      error_description: 'The Backroom staff session expired; authorize again',
+    },
+    {
+      status: 401,
+      headers: {
+        'Cache-Control': 'no-store',
+        'WWW-Authenticate': `Bearer error="invalid_token", error_description="The Backroom staff session expired", scope="${BACKROOM_READ_SCOPE}", resource_metadata="${resourceMetadata}"`,
+      },
+    },
+  )
+}
+
 export class BackroomMcpHandler extends WorkerEntrypoint<
   BackroomEnv,
   McpGrantProps
 > {
   async fetch(request: Request) {
     const grantProps = this.ctx.props
+    if (!grantProps?.session || grantProps.session.expiresAt <= Date.now()) {
+      return expiredSessionResponse(request)
+    }
     let props: McpGrantProps
     try {
       // The live binding, not the level sealed into the grant, decides what

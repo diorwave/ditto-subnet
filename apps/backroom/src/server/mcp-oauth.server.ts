@@ -1,5 +1,6 @@
 import '@tanstack/react-start/server-only'
 
+import { OAuthError } from '@cloudflare/workers-oauth-provider'
 import type {
   AuthRequest,
   ClientInfo,
@@ -21,6 +22,10 @@ import { constantTimeEqual, randomToken, sealToken, unsealToken } from './crypto
 import { readSessionFromRequest } from './session.server'
 
 const PENDING_AUTH_MAX_AGE_MS = 10 * 60 * 1_000
+/** The access-token ceiling; `server.ts` configures the same value. */
+export const MAX_ACCESS_TOKEN_TTL_SECONDS = 50 * 60
+/** Workers KV rejects an `expirationTtl` below 60 seconds. */
+export const MIN_ACCESS_TOKEN_TTL_SECONDS = 60
 const SUPPORTED_SCOPES = new Set([
   BACKROOM_READ_SCOPE,
   BACKROOM_ARTIFACT_SCOPE,
@@ -294,8 +299,22 @@ export function mcpTokenExchange(
   // has no refresh path, so an expired staff session ends the connection rather
   // than being silently renewed: the 7-day session bound documented in
   // docs/oauth.md has to mean the same thing over MCP as it does in the console.
-  if (!props?.session || props.session.expiresAt <= now) {
-    throw new Error('The Backroom staff session expired; authorize again')
+  if (!props?.session) {
+    throw new OAuthError('invalid_grant', {
+      description: 'The Backroom staff session expired; authorize again',
+      statusCode: 400,
+    })
+  }
+  // The token can never outlive the session. Workers KV will not accept an
+  // expiration under MIN_ACCESS_TOKEN_TTL_SECONDS, so a session with less life
+  // than that cannot be represented by a token that dies with it: refuse the
+  // exchange instead of rounding the token's life up past the session's.
+  const remainingSeconds = Math.floor((props.session.expiresAt - now) / 1_000)
+  if (remainingSeconds < MIN_ACCESS_TOKEN_TTL_SECONDS) {
+    throw new OAuthError('invalid_grant', {
+      description: 'The Backroom staff session is about to expire; authorize again',
+      statusCode: 400,
+    })
   }
   const scopes = [
     ...new Set(
@@ -310,11 +329,10 @@ export function mcpTokenExchange(
     clientName: props.clientName,
     grant: { id: options.grantId, clientId: options.clientId },
   }
-  const sessionLifetime = Math.max(60, Math.floor((props.session.expiresAt - now) / 1_000) - 60)
   return {
     accessTokenProps,
     accessTokenScope: scopes,
-    accessTokenTTL: Math.min(50 * 60, sessionLifetime),
+    accessTokenTTL: Math.min(MAX_ACCESS_TOKEN_TTL_SECONDS, remainingSeconds),
   }
 }
 

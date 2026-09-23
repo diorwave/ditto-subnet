@@ -127,10 +127,14 @@ list and revoke their own grants (with every access and refresh token issued
 under them) on the Agent access page, backed by `GET /oauth/grants` and
 same-origin `POST /oauth/grants/revoke`.
 
-Access tokens never outlive the operator session: `tokenExchangeCallback`
-refuses an expired one and clamps the token TTL to the session's remaining life.
-There is no refresh path for the identity itself — when the session ends, the
-operator authorizes again.
+Access tokens never outlive the operator session. `mcpTokenExchange` clamps the
+token TTL to the session's exact remaining seconds (capped at 50 minutes) and
+answers `invalid_grant` when less than 60 seconds remain, because Workers KV
+cannot express an expiry under a minute and rounding it up would outlive the
+session. The MCP handler re-checks `session.expiresAt` on every request, exactly
+as it re-derives the live email level, so an expired session ends read, artifact,
+and write access at once. There is no refresh path for the identity itself — when
+the session ends, the operator authorizes again.
 
 ## Bindings
 

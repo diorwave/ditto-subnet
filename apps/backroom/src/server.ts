@@ -11,6 +11,7 @@ import {
   beginMcpAuthorization,
   completeMcpAuthorization,
   listMcpGrants,
+  MAX_ACCESS_TOKEN_TTL_SECONDS,
   mcpTokenExchange,
   revokeMcpGrant,
 } from './server/mcp-oauth.server'
@@ -142,7 +143,7 @@ const oauthProvider = new OAuthProvider<BackroomEnv>({
   allowTokenExchangeGrant: false,
   disallowPublicClientRegistration: false,
   clientIdMetadataDocumentEnabled: true,
-  accessTokenTTL: 50 * 60,
+  accessTokenTTL: MAX_ACCESS_TOKEN_TTL_SECONDS,
   refreshTokenTTL: SESSION_MAX_AGE_SECONDS,
   clientRegistrationTTL: 90 * 24 * 60 * 60,
   // Tokens never outlive the authorizing staff session, carry only scopes the
