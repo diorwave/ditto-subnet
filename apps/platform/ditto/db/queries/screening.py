@@ -749,6 +749,7 @@ async def _park_repeatedly_inconclusive(
     agent leaves the retry pool and a human decides its fate instead of the
     screener re-attempting it every lease forever.
     """
+    # This is an operator park, not an artifact-bound execution lease.
     attempt = ScreeningAttempt(
         attempt_id=uuid4(),
         agent_id=agent.agent_id,
@@ -1314,6 +1315,7 @@ async def claim_screening_attempts(
                 AgentStatus.SCREENING_FAILED: "failed",
             }.get(agent.status)
             if legacy_status is not None:
+                # Historical state has no observed attempt/artifact receipt.
                 session.add(
                     ScreeningAttempt(
                         attempt_id=uuid4(),
@@ -1490,6 +1492,7 @@ async def claim_screening_attempts(
         attempt = ScreeningAttempt(
             attempt_id=uuid4(),
             agent_id=agent.agent_id,
+            artifact_sha256=agent.sha256,
             screener_hotkey=screener_hotkey,
             policy_version=attempt_policy_version,
             status="running",
