@@ -2238,6 +2238,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/screening-submissions/{agent_id}/attempts/{attempt_id}/verification-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Screening Verification Readiness
+         * @description Read exact-artifact verification receipts without implying completion.
+         *
+         *     This first read foundation has no writer. Absence means no matching
+         *     Platform receipt, not proof that an external check never ran. Existing
+         *     screening/oracle results never synthesize mandatory-v13 receipts.
+         */
+        get: operations["get_screening_verification_readiness_api_v1_admin_screening_submissions__agent_id__attempts__attempt_id__verification_readiness_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/screening-submissions/{agent_id}/baseline-diff": {
         parameters: {
             query?: never;
@@ -4815,6 +4839,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/screener/agent/{agent_id}/verification-receipts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record Screening Verification Receipt
+         * @description Append one mechanical-check digest under the active v13 lease.
+         *
+         *     Only the authenticated owner of a running, unexpired attempt may write.
+         *     The row is intentionally evidence presence, not a check-pass or CLEAR.
+         *     A deterministic receipt ID makes an uncertain HTTP retry idempotent.
+         */
+        post: operations["record_screening_verification_receipt_api_v1_screener_agent__agent_id__verification_receipts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/screener/claim": {
         parameters: {
             query?: never;
@@ -6790,13 +6838,61 @@ export interface components {
          */
         AdjudicationClearClause: "retrieval_ranking_not_family_engine" | "content_complete_memoization_cache" | "standard_broker_inference_client" | "unreported_tool_calls_executed" | "local_practice_harness_stub" | "intent_routing_or_precursor_pass" | "bench_version_branching_alone" | "single_success_duplicate_suppression" | "plain_answer_normalization" | "prior_pattern_removed" | "model_authors_graded_slot" | "no_proven_breach_before_deadline";
         /**
+         * AdjudicationRequestAttemptDiagnostic
+         * @description Bounded, text-free timing for one automated-court model request.
+         */
+        AdjudicationRequestAttemptDiagnostic: {
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            /**
+             * Event Count
+             * @default 0
+             */
+            event_count: number;
+            /** First Byte Ms */
+            first_byte_ms?: number | null;
+            /** First Event Ms */
+            first_event_ms?: number | null;
+            /** Headers Ms */
+            headers_ms?: number | null;
+            /** Http Status */
+            http_status?: number | null;
+            /** Last Byte Ms */
+            last_byte_ms?: number | null;
+            /** Last Event Ms */
+            last_event_ms?: number | null;
+            /** Ordinal */
+            ordinal: number;
+            /** Prompt Bytes */
+            prompt_bytes: number;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "request" | "headers" | "bytes" | "event" | "complete";
+            /** Started Ms */
+            started_ms: number;
+            /** Stream Requested */
+            stream_requested: boolean;
+            /** Upstream */
+            upstream?: string | null;
+            /**
+             * Wire Bytes
+             * @default 0
+             */
+            wire_bytes: number;
+        };
+        /**
          * AdjudicationRunDiagnostic
          * @description Sanitized trace of one automated-court run that did not finish.
          *
-         *     Operators need the failure class, stage, and provider status. The trace
-         *     never carries source, prompts, credentials, exception text, or model text.
+         *     Operators need the failure class, fixed subtype, stage, and provider
+         *     status. The trace never carries source, prompts, credentials, exception
+         *     text, or model text.
          */
         AdjudicationRunDiagnostic: {
+            /** Completion Ceiling Reached */
+            completion_ceiling_reached?: boolean | null;
             /** Completion Tokens */
             completion_tokens?: number | null;
             /** Elapsed Ms */
@@ -6805,6 +6901,8 @@ export interface components {
             error_class?: string | null;
             /** Escalation Code */
             escalation_code?: string | null;
+            /** Failure Code */
+            failure_code?: ("completion-timeout" | "provider-http-error" | "provider-stream-error" | "provider-body-error" | "transport-error" | "stream-incomplete" | "stream-no-tool-call" | "stream-invalid" | "response-too-large" | "response-json-invalid" | "tool-call-invalid" | "verdict-invalid" | "lease-budget" | "step-budget" | "response-invalid") | null;
             /** Final Tool Call Returned */
             final_tool_call_returned?: boolean | null;
             /** Http Status */
@@ -6815,6 +6913,15 @@ export interface components {
             prompt_tokens?: number | null;
             /** Provider */
             provider?: string | null;
+            /** Request Attempts */
+            request_attempts?: components["schemas"]["AdjudicationRequestAttemptDiagnostic"][];
+            /**
+             * Request Count
+             * @default 0
+             */
+            request_count: number;
+            /** Response Bound Kind */
+            response_bound_kind?: ("wire" | "tool") | null;
             /** Timeout Stage */
             timeout_stage?: ("completion" | "lease" | "step-budget" | "unavailable" | "response") | null;
             /** Upstream */
@@ -10512,6 +10619,88 @@ export interface components {
             generation: "active" | "all";
             /** Items */
             items: components["schemas"]["AdminScreeningSubmission"][];
+        };
+        /** AdminScreeningVerificationCheck */
+        AdminScreeningVerificationCheck: {
+            /** Check Code */
+            check_code: string;
+            /** Receipt Count */
+            receipt_count: number;
+            /**
+             * Record Status
+             * @enum {string}
+             */
+            record_status: "not_recorded" | "recorded_unverified";
+        };
+        /**
+         * AdminScreeningVerificationReadiness
+         * @description Exact-attempt Platform receipt inventory, never a CLEAR authorization.
+         *
+         *     `not_recorded` means there is no matching receipt in this Platform ledger;
+         *     it does not prove the check never ran in an external system. The trusted
+         *     screener records only archive and built-image mechanical observations;
+         *     neither those receipts nor the small behavioral oracle can certify v13's
+         *     mandatory 19 checks or private 60-pair package.
+         */
+        AdminScreeningVerificationReadiness: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /**
+             * Attempt Id
+             * Format: uuid
+             */
+            attempt_id: string;
+            /** Attempt Status */
+            attempt_status: string;
+            /** Checks */
+            checks: components["schemas"]["AdminScreeningVerificationCheck"][];
+            /** Policy Version */
+            policy_version: number;
+            /**
+             * Private Metamorphic Applicability
+             * @default not_recorded
+             * @constant
+             */
+            private_metamorphic_applicability: "not_recorded";
+            /** Receipt Count */
+            receipt_count: number;
+            /** Receipts */
+            receipts: components["schemas"]["AdminScreeningVerificationReceipt"][];
+            /** Receipts Truncated */
+            receipts_truncated: boolean;
+        };
+        /**
+         * AdminScreeningVerificationReceipt
+         * @description Digest-only evidence presence, not a verified policy outcome.
+         */
+        AdminScreeningVerificationReceipt: {
+            /** Challenge Manifest Sha256 */
+            challenge_manifest_sha256: string | null;
+            /** Check Code */
+            check_code: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Evidence Sha256 */
+            evidence_sha256: string;
+            /** Image Sha256 */
+            image_sha256: string | null;
+            /** Profile Sha256 */
+            profile_sha256: string | null;
+            /**
+             * Receipt Id
+             * Format: uuid
+             */
+            receipt_id: string;
+            /** Worker Hotkey */
+            worker_hotkey: string;
         };
         /** AdminShadowReviewObservation */
         AdminShadowReviewObservation: {
@@ -27230,6 +27419,8 @@ export interface components {
          * @description Strict, secret-free settings applied between screening leases.
          */
         ScreenerReviewSettings: {
+            /** Adjudicator Max Completion Tokens */
+            adjudicator_max_completion_tokens?: number | null;
             /**
              * Adjudicator Max Steps
              * @default 128
@@ -27527,6 +27718,37 @@ export interface components {
              * @enum {string}
              */
             source: "platform" | "cache" | "bootstrap";
+        };
+        /**
+         * ScreeningVerificationReceiptRequest
+         * @description Digest-only evidence emitted by the active trusted screener lease.
+         *
+         *     This records execution observations, not a policy pass or an authorization
+         *     to release a source-integrity hold. Runtime receipts remain unverified until
+         *     the complete v13 decision record is assembled.
+         */
+        ScreeningVerificationReceiptRequest: {
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /**
+             * Attempt Id
+             * Format: uuid
+             */
+            attempt_id: string;
+            /**
+             * Check Code
+             * @enum {string}
+             */
+            check_code: "archive_sha" | "build_image_digest" | "health" | "ordinary_model_run" | "tool_selection_run" | "seed_memory_run" | "two_user_isolation";
+            /** Evidence Sha256 */
+            evidence_sha256: string;
+            /** Image Sha256 */
+            image_sha256?: string | null;
+            /**
+             * Policy Version
+             * @constant
+             */
+            policy_version: 13;
         };
         /**
          * ShadowReviewObservationRequest
@@ -34814,6 +35036,41 @@ export interface operations {
             };
         };
     };
+    get_screening_verification_readiness_api_v1_admin_screening_submissions__agent_id__attempts__attempt_id__verification_readiness_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+                attempt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminScreeningVerificationReadiness"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_screening_baseline_diff_api_v1_admin_screening_submissions__agent_id__baseline_diff_get: {
         parameters: {
             query?: never;
@@ -39036,6 +39293,42 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_screening_verification_receipt_api_v1_screener_agent__agent_id__verification_receipts_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-screener-hotkey"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScreeningVerificationReceiptRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             204: {

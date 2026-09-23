@@ -144,6 +144,7 @@ import {
   fetchScreeningQuarantines,
   fetchScreeningDisputes,
   fetchScreeningFailureDiagnostic,
+  fetchScreeningVerificationReadiness,
   fetchScreeningSubmission,
   fetchScreeningSubmissions,
   fetchScreeningFailureSummary,
@@ -349,6 +350,7 @@ export const TOOL_SCOPE_REQUIREMENTS = new Map<string, string>([
   ...[...WRITE_TOOL_NAMES].map((name) => [name, BACKROOM_WRITE_SCOPE] as const),
   ['get_screening_artifact', BACKROOM_ARTIFACT_SCOPE],
   ['get_screening_failure_diagnostic', BACKROOM_ARTIFACT_SCOPE],
+  ['get_screening_verification_readiness', BACKROOM_ARTIFACT_SCOPE],
   ['download_runtime_profile', BACKROOM_ARTIFACT_SCOPE],
   // Trace records carry miner prompts and full model responses, so anything
   // that discloses record CONTENT gates on the artifact scope. Listing object
@@ -642,6 +644,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Group active-benchmark screening / screening_failed agents by reason_code. Pass generation=all only for a cross-benchmark audit. Use get_screening_submission for one row.',
   get_screening_failure_diagnostic:
     'Private exact-attempt failure diagnostic; artifact scope.',
+  get_screening_verification_readiness:
+    'Read exact v13 receipt presence; no completion claim. Artifact scope.',
   reject_screening_submission:
     'Reject a screening row. Confirmation: REJECT SCREENING SUBMISSION. Requires backroom:write.',
   get_queue_policy_settings:
@@ -693,7 +697,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_burn_settings:
     'Read the emission burn in force, the miner share it leaves, the governing revision, and how many validators are live enough to fold it. Revision history is newest-first and opt-in; historyLimit defaults to 0.',
   get_emission_eligibility_policy:
-    'Read the terminal-review emission gate: posture (off / shadow / enforce), whether it is a stored revision or the shipped off default, the current and next emission window, and how many artifacts the shadow rehearsal would withhold now. Revision history is newest-first and opt-in.',
+    'Read the terminal-review emission gate: posture (off / shadow / enforce), stored revision or shipped off default, current and next emission window, and how many artifacts shadow would withhold now. Revision history is newest-first and opt-in.',
   get_agent_emission_eligibility:
     'Read one exact agent UUID: whether that artifact is earning, the withheld class and miner-facing reason if not, when a clear starts earning, the review row it came from, and whether the validator fold can see it. Answers a "why am I not earning" appeal.',
   get_submission_cooldown:
@@ -1177,13 +1181,28 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get screening failure diagnostic',
       description:
-        'Read one exact screening attempt. court_diagnostic is the narrow automated-court trace: error class, escalation code, timeout stage, provider HTTP status, elapsed milliseconds, prompt and completion token counts, whether a final tool call was returned, and the upstream that served the call behind the gateway. Read `upstream` before blaming an artifact for a burst: one model is routed across many upstreams and the gateway may fail over between them per request, so several attempts failing on one upstream is a fleet fact, not a miner fact. That object contains no source, prompt, response text, credential, model text, or raw log. It is null when the attempt has no court trace, including attempts screened before the field existed. private_failure_detail and private_failure_log_tail are the separate build/runtime fields and are null on a court hold. A court failure is not a misconduct finding and not a clearance. Reading this does not clear, reject, or rescreen. Requires backroom:artifact:read because the private failure text, when present, can contain miner-influenced build or runtime diagnostics.',
+        'Read one exact screening attempt. court_diagnostic is the narrow automated-court trace: error class, fixed failure code, escalation code, timeout stage, provider HTTP status, elapsed milliseconds, prompt and completion token counts, whether a final tool call was returned, and the upstream that served the call behind the gateway. New request_count and request_attempts fields expose a bounded timeline per model request: request start, headers, first/last wire byte and parsed SSE event, stage, elapsed time, prompt byte count, status, and upstream when known. They distinguish no-response timeouts from streams that stalled mid-response; old attempts may omit them. The failure code separates provider errors from malformed responses without exposing exception text; it is null for attempts before this field existed. Read `upstream` before blaming an artifact for a burst: one model is routed across many upstreams and the gateway may fail over between them per request, so several attempts failing on one upstream is a fleet fact, not a miner fact. That object contains no source, prompt, response text, credential, model text, or raw log. It is null when the attempt has no court trace, including attempts screened before the field existed. private_failure_detail and private_failure_log_tail are the separate build/runtime fields and are null on a court hold. A court failure is not a misconduct finding and not a clearance. Reading this does not clear, reject, or rescreen. Requires backroom:artifact:read because the private failure text, when present, can contain miner-influenced build or runtime diagnostics.',
       inputSchema: screeningFailureDiagnosticInputSchema,
       annotations: toolAnnotations('read'),
     },
     async (input) =>
       artifact(() =>
         fetchScreeningFailureDiagnostic(input, props.session.email),
+      ),
+  )
+
+  registerTool(
+    'get_screening_verification_readiness',
+    {
+      title: 'Get screening verification readiness',
+      description:
+        'Read exact v13 UUID/SHA/attempt receipts for 19 checks plus the conditional private package. `not_recorded` means no Platform receipt, not proof an external check never ran; `recorded_unverified` is not a pass. Current screening does not write these receipts. No CLEAR, REJECT, or retry. Requires backroom:artifact:read.',
+      inputSchema: screeningFailureDiagnosticInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) =>
+      artifact(() =>
+        fetchScreeningVerificationReadiness(input, props.session.email),
       ),
   )
 

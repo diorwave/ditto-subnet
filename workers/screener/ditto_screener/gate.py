@@ -66,12 +66,13 @@ from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping, S
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
+from urllib.parse import urlencode
 from uuid import UUID
 
 import httpx
 
 from ditto_screener.adjudicator import build_adjudicator
-from ditto_screener.fake_gateway import LOCKED_HARNESS_MODEL
+from ditto_screener.fake_gateway import LOCKED_HARNESS_MODEL, tool_capability
 from ditto_screener.heartbeat import (
     ScreenerProgressStage,
     source_review_progress_stage,
@@ -105,6 +106,7 @@ from ditto_screener.preflight_audit import (
     StaticPreflightAuditError,
     StaticPreflightAuditJournal,
 )
+from ditto_screener.runtime_verification import runtime_evidence_sha256
 from ditto_screener.source_review import (
     OpenRouterSourceReviewAgent,
     SourceReviewObservation,
@@ -151,6 +153,7 @@ _CANARY_IMAGE = (
 _GATEWAY_ALIAS = "host.docker.internal"
 _CHAT_GATEWAY_PORT = 11435
 _EMBED_GATEWAY_PORT = 11434
+_TOOL_GATEWAY_PORT = 11436
 _OPENROUTER_SHIM_HOST = "openrouter.ai"
 _OPENROUTER_SHIM_CA_BUNDLE_PATH = "/run/dittobench/openrouter-shim-ca.pem"
 _HARNESS_ALIAS = "harness"
@@ -355,17 +358,16 @@ class _AuditRuntime:
     provider: Literal["platform", "chutes"] = _PRIMARY_HARNESS_PROVIDER
     seed_probe: _SeedProbe | None = None
     """Shadow-mode ``/seed`` observation; ``None`` when the probe is off."""
+    tool_route: str = ""
+    tool_key: bytes = b""
 
 
-# The fake gateway serves a benign `/tool` sink at the same host-container alias
-# the harness already uses for the model, so a tool-shaped challenge's
-# `tool_endpoint` is reachable from inside the harness network and carries no
-# screener-specific tell (it is the same host:port the model calls go to).
-_TOOL_ENDPOINT = f"http://{_GATEWAY_ALIAS}:{_CHAT_GATEWAY_PORT}/tool"
-
-
-def _with_tool_endpoint(request: Mapping[str, object]) -> dict[str, object]:
-    """Fill a reachable ``tool_endpoint`` for a tool-declaring challenge request.
+# The isolated fake gateway serves a case-bound capability on the scorer's
+# tool host and port. The harness sees the same endpoint shape as a scored run.
+def _with_tool_endpoint(
+    request: Mapping[str, object], *, tool_route: str, tool_key: bytes
+) -> dict[str, object]:
+    """Fill the scorer-shaped tool capability for a tool-declaring request.
 
     Returns a copy so the caller's mapping is not mutated. A request that
     already carries a ``tool_endpoint``, or declares no ``tools``, is returned
@@ -379,7 +381,26 @@ def _with_tool_endpoint(request: Mapping[str, object]) -> dict[str, object]:
     """
     payload = dict(request)
     if payload.get("tools") and not payload.get("tool_endpoint"):
-        payload["tool_endpoint"] = _TOOL_ENDPOINT
+        case_id = payload.get("case_id")
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError("tool challenge requires a case_id")
+        user_id = payload.get("user_id")
+        if not isinstance(user_id, str) or not user_id:
+            # The scorer binds V13 tool calls to a projected wire user. A
+            # randomly coined user keeps the private challenge on that wire.
+            user_id = secrets.token_hex(16)
+            payload["user_id"] = user_id
+        query = urlencode(
+            {
+                "cap": tool_capability(tool_key, case_id, user_id),
+                "case_id": case_id,
+                "user_id": user_id,
+            }
+        )
+        payload["tool_endpoint"] = (
+            f"http://{_GATEWAY_ALIAS}:{_TOOL_GATEWAY_PORT}"
+            f"/v1/tools/{tool_route}/tool?{query}"
+        )
     return payload
 
 
@@ -1050,6 +1071,10 @@ class BuildGate:
         progress: Callable[[ScreenerProgressStage], None] | None = None,
         deadline: Deadline = None,
         publish_image: Callable[[BuiltImageArtifact], Awaitable[None]] | None = None,
+        record_archive_verification: Callable[[], Awaitable[None]] | None = None,
+        record_runtime_verification: (
+            Callable[[str, str], Awaitable[None]] | None
+        ) = None,
         remote_build: Callable[[], Awaitable[RemoteImageArchive | None]] | None = None,
         remote_build_consumed: Callable[[UUID], Awaitable[None]] | None = None,
         remote_source_review: Callable[[], Awaitable[SourceReviewObservation | None]]
@@ -1179,6 +1204,11 @@ class BuildGate:
                     detail=contract_error,
                 )
             source_digest, source_paths = self._source_metadata(tmp_path)
+            if policy_version == 13 and record_archive_verification is not None:
+                # The streamed archive digest and its bounded container
+                # contract have both been verified. Record before a later L4
+                # hold can skip the build/runtime path.
+                await record_archive_verification()
 
             # General source review is deliberately deferred until the image
             # has built and passed its runtime contract. Broken Dockerfiles and
@@ -1839,6 +1869,39 @@ class BuildGate:
                 finally:
                     with contextlib.suppress(OSError):
                         os.unlink(image.path)
+            # Shadow probes mutate the harness's memory and model-gateway state.
+            # Run them only after the policy decision and screened-image handoff
+            # are complete, so neither their responses nor their side effects
+            # can influence the authoritative challenge or outcome. Reserve 30s
+            # for Platform's lease completion and cap the entire shadow lane at
+            # 15s, including all receipt writes; an observation is expendable.
+            if (
+                policy_version == 13
+                and not targon_runtime_ok
+                and self._config.v13_runtime_receipts_mode == "shadow"
+                and record_runtime_verification is not None
+            ):
+                remaining = self._lease_remaining(deadline)
+                shadow_budget = (
+                    15.0 if remaining is None else min(15.0, remaining - 30.0)
+                )
+                if shadow_budget > 0:
+                    try:
+                        async with asyncio.timeout(shadow_budget):
+                            await self._run_v13_runtime_observations(
+                                audit_runtime=active_audit_runtime,
+                                probe_container=gateway_container,
+                                artifact_sha256=sha256.lower(),
+                                image_id=built_image_id,
+                                bench_version=bench_version,
+                                deadline=deadline,
+                                record=record_runtime_verification,
+                                include_runs=not build_only,
+                            )
+                    except TimeoutError:
+                        logger.info("v13 shadow runtime observation budget expired")
+                    except Exception:  # noqa: BLE001 - never change a settled decision
+                        logger.exception("v13 shadow runtime observations unavailable")
             return decision
         except Exception as e:  # noqa: BLE001 - the loop must never die on one agent
             logger.exception("gate error for agent_id=%s", agent_id)
@@ -2745,12 +2808,16 @@ class BuildGate:
         # second round-trip (the gateway-encoded correctness oracle).
         response_text = secrets.token_hex(16)
         oracle_answer = secrets.token_hex(16)
+        tool_route = secrets.token_urlsafe(18)
+        tool_key = secrets.token_bytes(32)
         started, detail = await self._start_fake_gateway(
             gateway_container=gateway_container,
             network=network,
             response_text=response_text,
             oracle_answer=oracle_answer,
             state_dir=gateway_state_dir,
+            tool_route=tool_route,
+            tool_key=tool_key,
         )
         if not started:
             return _StageResult(False, detail, retryable=True), None
@@ -2809,6 +2876,8 @@ class BuildGate:
                 oracle_answer=oracle_answer,
                 gateway_state_file=str(Path(gateway_state_dir) / "model-called"),
                 seed_probe=seed_probe,
+                tool_route=tool_route,
+                tool_key=tool_key,
             ),
         )
 
@@ -2931,6 +3000,8 @@ class BuildGate:
         response_text: str,
         oracle_answer: str,
         state_dir: str,
+        tool_route: str,
+        tool_key: bytes,
     ) -> tuple[bool, str]:
         """Start the fake gateway beside the harness on an internal network."""
         try:
@@ -2988,6 +3059,10 @@ class BuildGate:
                 "-e",
                 f"DITTO_FAKE_GATEWAY_ORACLE_ANSWER={oracle_answer}",
                 "-e",
+                f"DITTO_FAKE_GATEWAY_TOOL_ROUTE={tool_route}",
+                "-e",
+                f"DITTO_FAKE_GATEWAY_TOOL_KEY={tool_key.hex()}",
+                "-e",
                 "DITTO_FAKE_GATEWAY_STATE_FILE=/state/model-called",
                 "-e",
                 "DITTO_FAKE_GATEWAY_TLS_CERT=/state/leaf.crt",
@@ -3009,7 +3084,7 @@ class BuildGate:
         probe = """\
 import socket
 import ssl
-for port in (11434, 11435):
+for port in (11434, 11435, 11436):
     socket.create_connection(('127.0.0.1', port), 2).close()
 context = ssl.create_default_context(cafile='/state/ca.crt')
 with socket.create_connection(('127.0.0.1', 443), 2) as raw:
@@ -3232,6 +3307,208 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
             waited += _PROBE_INTERVAL_SECONDS
         return False, f"/health never healthy within {deadline:g}s ({last})"
 
+    async def _run_v13_runtime_observations(
+        self,
+        *,
+        audit_runtime: _AuditRuntime,
+        probe_container: str,
+        artifact_sha256: str,
+        image_id: str,
+        bench_version: int,
+        deadline: Deadline,
+        record: Callable[[str, str], Awaitable[None]],
+        include_runs: bool,
+    ) -> None:
+        """Shadow-observe mandatory checks 3–7 in the isolated smoke network.
+
+        Every receipt remains ``recorded_unverified``. In particular, the fake
+        broker's text response cannot establish real tool choice, memory
+        correctness, or cross-user non-disclosure. Failed/incomplete requests
+        leave the corresponding check ``not_recorded``; they never change the
+        screening decision. A separate verifier must assess behavior and the
+        remaining v13 checks before any CLEAR.
+        """
+
+        async def emit(
+            code: str,
+            requests: list[str],
+            responses: list[str],
+            broker_calls: int,
+        ) -> None:
+            try:
+                digest = runtime_evidence_sha256(
+                    check_code=code,
+                    artifact_sha256=artifact_sha256,
+                    image_id=image_id,
+                    request_sha256s=requests,
+                    response_sha256s=responses,
+                    broker_calls=broker_calls,
+                )
+                await record(code, digest)
+            except Exception:  # noqa: BLE001 - shadow evidence cannot settle a screen
+                logger.warning("v13 runtime receipt unavailable check=%s", code)
+
+        await emit("health", [], [], 0)
+        if not include_runs:
+            return
+
+        # The caller has already settled policy and applies one total shadow
+        # timeout. Keep only the lease-completion reserve here.
+        def budget_available() -> bool:
+            remaining = self._lease_remaining(deadline)
+            return remaining is None or remaining > 30.0
+
+        async def post(
+            path: str, payload: dict[str, object], *, seed_pairs: int = 0
+        ) -> tuple[str, str, int] | None:
+            if not budget_available():
+                return None
+            request_bytes = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode()
+            calls_before = _gateway_call_count(audit_runtime.gateway_state_file)
+            try:
+                code, body = await self._request_from_sidecar(
+                    probe_container,
+                    f"{audit_runtime.harness_base}{path}",
+                    payload=payload,
+                    timeout=min(20.0, self._config.run_timeout_seconds),
+                )
+            except Exception:  # noqa: BLE001 - no decision from a failed probe
+                return None
+            if code != 0:
+                return None
+            try:
+                parsed = json.loads(body)
+            except (UnicodeError, ValueError):
+                return None
+            if not isinstance(parsed, dict):
+                return None
+            if seed_pairs and _seed_ack_mismatch(body, expected_pairs=seed_pairs):
+                return None
+            calls = max(
+                0,
+                _gateway_call_count(audit_runtime.gateway_state_file) - calls_before,
+            )
+            return (
+                hashlib.sha256(request_bytes).hexdigest(),
+                hashlib.sha256(body.encode()).hexdigest(),
+                calls,
+            )
+
+        token = secrets.token_hex(12)
+        user_a = f"u-{secrets.token_hex(12)}"
+        user_b = f"u-{secrets.token_hex(12)}"
+        system_prompt = (
+            "You are a helpful assistant. Follow the supplied system instructions."
+        )
+
+        def run_request(
+            user_id: str, prompt: str, *, tools: list[object] | None = None
+        ) -> dict[str, object]:
+            return {
+                "case_id": f"c-{secrets.token_hex(12)}",
+                "system_prompt": system_prompt,
+                "user_input": prompt,
+                "tools": tools or [],
+                "user_id": user_id,
+                "bench_version": bench_version,
+            }
+
+        ordinary = await post(
+            "/run", run_request(user_a, f"Explain this ordinary request: {token}")
+        )
+        if ordinary is not None and ordinary[2] > 0:
+            await emit("ordinary_model_run", [ordinary[0]], [ordinary[1]], ordinary[2])
+
+        tool_request = run_request(
+            user_a,
+            f"Search for the current information about {token}.",
+            tools=[
+                {
+                    "name": "search_web",
+                    "description": "Search the public web.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                }
+            ],
+        )
+        try:
+            tool_request = _with_tool_endpoint(
+                tool_request,
+                tool_route=audit_runtime.tool_route,
+                tool_key=audit_runtime.tool_key,
+            )
+        except ValueError:
+            tool_request = {}
+        if tool_request:
+            tool = await post("/run", tool_request)
+            if tool is not None and tool[2] > 0:
+                await emit("tool_selection_run", [tool[0]], [tool[1]], tool[2])
+
+        def seed_request(user_id: str, marker: str) -> dict[str, object]:
+            return {
+                "user_id": user_id,
+                "wave": 0,
+                "pairs": [
+                    {
+                        "pair_id": f"p-{secrets.token_hex(12)}",
+                        "session_id": f"s-{secrets.token_hex(12)}",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "prompt": "What is the reference marker?",
+                        "response": marker,
+                    }
+                ],
+                "subjects": [],
+                "links": [],
+            }
+
+        seeded_a = await post(
+            self._config.seed_path, seed_request(user_a, token), seed_pairs=1
+        )
+        if seeded_a is None:
+            return
+        memory_a = await post(
+            "/run", run_request(user_a, "What is my reference marker?")
+        )
+        if memory_a is None or memory_a[2] == 0:
+            return
+        await emit(
+            "seed_memory_run",
+            [seeded_a[0], memory_a[0]],
+            [seeded_a[1], memory_a[1]],
+            seeded_a[2] + memory_a[2],
+        )
+
+        seeded_b = await post(
+            self._config.seed_path,
+            seed_request(user_b, secrets.token_hex(12)),
+            seed_pairs=1,
+        )
+        if seeded_b is None:
+            return
+        isolation_a = await post(
+            "/run", run_request(user_a, "Repeat only my own reference marker.")
+        )
+        isolation_b = await post(
+            "/run", run_request(user_b, "Repeat only my own reference marker.")
+        )
+        if (
+            isolation_a is not None
+            and isolation_b is not None
+            and isolation_a[2] > 0
+            and isolation_b[2] > 0
+        ):
+            await emit(
+                "two_user_isolation",
+                [seeded_a[0], seeded_b[0], isolation_a[0], isolation_b[0]],
+                [seeded_a[1], seeded_b[1], isolation_a[1], isolation_b[1]],
+                sum(item[2] for item in (seeded_a, seeded_b, isolation_a, isolation_b)),
+            )
+
     async def _run_private_challenge_with_compatibility(
         self,
         challenge_id: str,
@@ -3266,6 +3543,8 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
             gateway_response_token=audit_runtime.gateway_response_token,
             oracle_answer=audit_runtime.oracle_answer,
             gateway_state_file=audit_runtime.gateway_state_file,
+            tool_route=audit_runtime.tool_route,
+            tool_key=audit_runtime.tool_key,
         )
         if (
             audit_runtime.provider != _PRIMARY_HARNESS_PROVIDER
@@ -3314,6 +3593,8 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
             oracle_answer=audit_runtime.oracle_answer,
             gateway_state_file=audit_runtime.gateway_state_file,
             provider=_COMPAT_HARNESS_PROVIDER,
+            tool_route=audit_runtime.tool_route,
+            tool_key=audit_runtime.tool_key,
         )
         remaining = deadline - loop.time()
         if remaining <= 0:
@@ -3337,6 +3618,8 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
             gateway_response_token=compatibility_runtime.gateway_response_token,
             oracle_answer=compatibility_runtime.oracle_answer,
             gateway_state_file=compatibility_runtime.gateway_state_file,
+            tool_route=compatibility_runtime.tool_route,
+            tool_key=compatibility_runtime.tool_key,
         )
         return second, compatibility_runtime
 
@@ -3384,6 +3667,8 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
         gateway_response_token: str,
         gateway_state_file: str,
         oracle_answer: str | None = None,
+        tool_route: str = "",
+        tool_key: bytes = b"",
     ) -> ChallengeObservation:
         """Run one selected private challenge and retain only bounded evidence.
 
@@ -3397,7 +3682,7 @@ with socket.create_connection(('127.0.0.1', 443), 2) as raw:
         # the model returns and proceed to the second model turn. Filled here
         # (not in the policy module) because only the gate knows the network
         # topology.
-        payload = _with_tool_endpoint(request)
+        payload = _with_tool_endpoint(request, tool_route=tool_route, tool_key=tool_key)
         calls_before = _gateway_call_count(gateway_state_file)
         started = asyncio.get_running_loop().time()
         code, out = await self._request_from_sidecar(

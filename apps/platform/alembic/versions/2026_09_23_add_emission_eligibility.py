@@ -1,7 +1,7 @@
 """add the terminal-review emission eligibility posture and its shadow ledger
 
 Revision ID: b6f3d0c7a915
-Revises: 3c9d5e7a1b42
+Revises: 7b62d9c083f1
 Create Date: 2026-09-23
 
 Two new tables, no change to any existing one, so this is additive and safe to
@@ -26,7 +26,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision: str = "b6f3d0c7a915"
-down_revision: str | Sequence[str] | None = "3c9d5e7a1b42"
+down_revision: str | Sequence[str] | None = "7b62d9c083f1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

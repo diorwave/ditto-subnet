@@ -1204,11 +1204,36 @@ class SourceReviewCitation(BaseModel):
     line: Annotated[int, Field(ge=1, le=10_000_000)]
 
 
+class AdjudicationRequestAttemptDiagnostic(BaseModel):
+    """Bounded, text-free timing for one automated-court model request."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    ordinal: Annotated[int, Field(ge=1, le=1_024)]
+    started_ms: Annotated[int, Field(ge=0, le=3_600_000)]
+    elapsed_ms: Annotated[int, Field(ge=0, le=3_600_000)]
+    stage: Literal["request", "headers", "bytes", "event", "complete"]
+    stream_requested: bool
+    prompt_bytes: Annotated[int, Field(ge=0, le=20_000_000)]
+    http_status: Annotated[int, Field(ge=100, le=599)] | None = None
+    headers_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    first_byte_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    last_byte_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    first_event_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    last_event_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    event_count: Annotated[int, Field(ge=0, le=100_000)] = 0
+    wire_bytes: Annotated[int, Field(ge=0, le=20_000_000)] = 0
+    upstream: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")] | None = (
+        None
+    )
+
+
 class AdjudicationRunDiagnostic(BaseModel):
     """Sanitized trace of one automated-court run that did not finish.
 
-    Operators need the failure class, stage, and provider status. The trace
-    never carries source, prompts, credentials, exception text, or model text.
+    Operators need the failure class, fixed subtype, stage, and provider
+    status. The trace never carries source, prompts, credentials, exception
+    text, or model text.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1216,6 +1241,29 @@ class AdjudicationRunDiagnostic(BaseModel):
     error_class: (
         Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9]{0,63}$")] | None
     ) = None
+    failure_code: (
+        Literal[
+            "completion-timeout",
+            "provider-http-error",
+            "provider-stream-error",
+            "provider-body-error",
+            "transport-error",
+            "stream-incomplete",
+            "stream-no-tool-call",
+            "stream-invalid",
+            "response-too-large",
+            "response-json-invalid",
+            "tool-call-invalid",
+            "verdict-invalid",
+            "lease-budget",
+            "step-budget",
+            "response-invalid",
+        ]
+        | None
+    ) = None
+    """Fixed, text-free subtype of a court failure; null on older attempts."""
+    response_bound_kind: Literal["wire", "tool"] | None = None
+    """Which bounded response surface overflowed; old consumers ignore it."""
     escalation_code: (
         Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")] | None
     ) = None
@@ -1227,6 +1275,10 @@ class AdjudicationRunDiagnostic(BaseModel):
     prompt_tokens: Annotated[int, Field(ge=0, le=10_000_000)] | None = None
     completion_tokens: Annotated[int, Field(ge=0, le=10_000_000)] | None = None
     final_tool_call_returned: bool | None = None
+    completion_ceiling_reached: bool | None = None
+    """True only when a complete no-tool stream reports a length finish and
+    usage at the requested completion cap. Null when that cannot be proved.
+    """
     model: (
         Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")] | None
     ) = None
@@ -1245,6 +1297,11 @@ class AdjudicationRunDiagnostic(BaseModel):
     when it does not fit, so an upstream name is never free text. Null on a
     failure that produced no response to read it from.
     """
+    request_count: Annotated[int, Field(ge=0, le=1_024)] = 0
+    request_attempts: Annotated[
+        list[AdjudicationRequestAttemptDiagnostic], Field(max_length=32)
+    ] = Field(default_factory=list)
+    """Last 32 requests, oldest first; count includes any earlier requests."""
 
 
 class SourceReviewAdjudication(BaseModel):

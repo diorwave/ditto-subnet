@@ -12,6 +12,7 @@ import {
   fetchScreenedImageRebuild,
   fetchBenchmarkContractMigration,
   fetchScreeningFailureDiagnostic,
+  fetchScreeningVerificationReadiness,
   fetchScreeningSubmission,
   fetchScreeningSubmissions,
   fetchScreeningFailureSummary,
@@ -834,6 +835,7 @@ describe('screening submission admin service', () => {
     const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const court = {
       error_class: 'ValueError',
+      failure_code: 'stream-no-tool-call',
       escalation_code: 'adjudicator-failed',
       timeout_stage: 'response',
       http_status: null,
@@ -843,6 +845,24 @@ describe('screening submission admin service', () => {
       final_tool_call_returned: true,
       model: 'z-ai/glm-5.3-flash',
       provider: 'openrouter',
+      request_count: 1,
+      request_attempts: [{
+        ordinal: 1,
+        started_ms: 4,
+        elapsed_ms: 38,
+        stage: 'event',
+        stream_requested: true,
+        prompt_bytes: 923,
+        http_status: 200,
+        headers_ms: 8,
+        first_byte_ms: 11,
+        last_byte_ms: 30,
+        first_event_ms: 13,
+        last_event_ms: 30,
+        event_count: 2,
+        wire_bytes: 650,
+        upstream: 'together',
+      }],
     }
     const diagnostic = {
       agent_id: agentId,
@@ -861,6 +881,10 @@ describe('screening submission admin service', () => {
       court_diagnostic: {
         ...court,
         exception: 'prompt text that must not be stored',
+        request_attempts: court.request_attempts.map((attempt) => ({
+          ...attempt,
+          prompt: 'source text that must not be stored',
+        })),
       },
     }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(diagnostic)))
@@ -874,6 +898,40 @@ describe('screening submission admin service', () => {
       ...diagnostic,
       court_diagnostic: court,
     })
+  })
+
+  it('reads exact v13 receipt absence without implying completed verification', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const agentId = '90cb5697-cbc1-40f4-a27e-439a7986a054'
+    const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const checks = Array.from({ length: 20 }, (_, index) => ({
+      check_code: `check_${index}`,
+      record_status: 'not_recorded',
+      receipt_count: 0,
+    }))
+    const payload = {
+      agent_id: agentId,
+      artifact_sha256: 'ab'.repeat(32),
+      attempt_id: attemptId,
+      policy_version: 13,
+      attempt_status: 'quarantined',
+      checks,
+      private_metamorphic_applicability: 'not_recorded',
+      receipts: [],
+      receipt_count: 0,
+      receipts_truncated: false,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      fetchScreeningVerificationReadiness({ agentId, attemptId }, 'peyton@omniaura.ai'),
+    ).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/screening-submissions/${agentId}/attempts/${attemptId}/verification-readiness`),
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'X-Admin-Actor': 'peyton@omniaura.ai' }),
+      }),
+    )
   })
 
   it('passes the payment coldkey through on a submission read', async () => {
