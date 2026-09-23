@@ -5018,9 +5018,11 @@ export const validationQueueReinstatementSchema = z.object({
   created_at: z.string(),
 })
 
-// The relay-owned provider outage circuit, attached to a retry row only when a
-// remaining exhausted slot was last parked by it (`provider_outage_parked`).
-// `closed_at` is the last time a provider request succeeded and closed it.
+// The relay-owned, provider-WIDE outage circuit. Attached to a retry row while
+// it is open (then it is why the grant is refused, whatever the slot failed on),
+// and while closed if a remaining slot carries `provider_outage_parked`.
+// `closed_at` is the last time a provider request succeeded and closed it — a
+// current-state observation, not proof the route is healthy now.
 export const validationProviderOutageSchema = z.object({
   provider: z.string(),
   state: z.enum(['open', 'closed']),
@@ -5090,8 +5092,8 @@ export const retryValidationInputSchema = z.object({
   agentId: z.string().uuid(),
   expectedSnapshot: z.string().regex(/^[0-9a-f]{64}$/),
   reason: auditReasonSchema(3),
-  // Required to grant while provider_outage_blocks_retry is true: the circuit
-  // that parked these slots is still open, so the lease would be parked again.
+  // Required to grant while provider_outage_blocks_retry is true: the
+  // provider-wide circuit is open, so every restored lease is parked again.
   acknowledgeProviderOutage: z.boolean().default(false),
 })
 

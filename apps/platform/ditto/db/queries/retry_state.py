@@ -59,9 +59,9 @@ AGENT_ATTRIBUTABLE_WITHDRAW_REASON = (
 # live scoring lease. Infrastructure, never the agent's fault.
 PROVIDER_OUTAGE_PARKED_DETAIL = "provider_outage_parked"
 PROVIDER_OUTAGE_RETRY_BLOCKING_REASON = (
-    "inference provider outage circuit is still open and parked these slots; "
-    "a retry now would be parked again. Wait for the circuit to close, or "
-    "retry with acknowledge_provider_outage=true"
+    "inference provider outage circuit is still open; every scoring lease is "
+    "parked while it is, so a restored slot would be parked again. Wait for "
+    "the circuit to close, or retry with acknowledge_provider_outage=true"
 )
 
 
@@ -213,25 +213,31 @@ def provider_outage_parked_exhaustion(
     )
 
 
-def provider_outage_blocks_retry(
-    *,
-    circuit: ProviderOutageCircuit | None,
-    scores: list[Score],
-    tickets: list[ValidatorTicket],
-) -> bool:
-    """Whether a plain retry grant would lease straight back into the outage.
+def provider_outage_blocks_retry(*, circuit: ProviderOutageCircuit | None) -> bool:
+    """Whether a retry grant would restore a slot the outage parks again.
 
-    True while the relay-owned circuit is still ``open`` (cooling down or
-    half-open) and a remaining exhausted slot was parked by it. Scoring leases
-    issued in that window are parked again by ``park_scoring_leases`` and,
-    having already used their one no-fault resume, charge the new grant — the
-    ditto-subnet#2087 loop. A closed circuit restores the ordinary retry path.
+    Scoped to the circuit alone, deliberately matching what the lease path
+    actually does rather than what the slot last failed on.
+    ``park_scoring_leases`` selects **every** ``ISSUED`` validator ticket while
+    the circuit is open — no filter on purpose, benchmark version, or prior
+    failure cause — and exempts only the one live half-open scoring probe. So a
+    grant made in that window cannot be consumed safely whatever killed the
+    slot before: the first claim the gate admits is that probe, the next
+    provider failure re-parks it, and because the ticket has already spent its
+    one no-fault resume the park charges the operator's new grant. That is the
+    ditto-subnet#2087 loop, and it does not depend on the failure detail being
+    ``provider_outage_parked``.
+
+    There is no safe subset to exempt. Every scoring lease carries an inference
+    grant that ``park_scoring_leases`` revokes, so a version or purpose that
+    made no hosted-inference call would still lose the lease.
+
+    A ``closed`` circuit restores the ordinary retry path. That is a
+    current-state guard, not a healthy-route proof: the relay reopens the
+    circuit on the next qualifying failure, so a grant can still be spent in a
+    window that closes and reopens seconds later.
     """
-    return (
-        circuit is not None
-        and circuit.state == "open"
-        and provider_outage_parked_exhaustion(scores=scores, tickets=tickets)
-    )
+    return circuit is not None and circuit.state == "open"
 
 
 def recommended_retry_action(

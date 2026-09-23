@@ -342,8 +342,8 @@ describe('Backroom MCP tools', () => {
     // The audited retry adds exact report/artifact digests; measured 136,355 bytes.
     // Exact-agent continual retest diagnosis adds one bounded read schema.
     // The two validator-retry inputs then gain acknowledgeProviderOutage
-    // (#2087) on top of that read.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(137_200)
+    // (#2087) on top of that read; measured 137,266 bytes together.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(137_300)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener

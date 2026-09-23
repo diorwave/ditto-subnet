@@ -3594,11 +3594,53 @@ async def test_closed_provider_circuit_still_recommends_retry_for_parked_slot(
     assert granted.status_code == 200, granted.text
 
 
-async def test_open_provider_outage_does_not_block_unrelated_exhaustion(
+async def test_closed_circuit_is_not_reported_for_an_unrelated_submission(
     app: FastAPI,
     client: httpx.AsyncClient,
     retry_maker: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A closed circuit no slot was parked by is noise, not evidence."""
+    agent_id = await _seed(retry_maker, score_count=2, ticket_count=3)
+    now = datetime.now(UTC)
+    async with retry_maker() as session, session.begin():
+        session.add(
+            ProviderOutageCircuit(
+                provider="openrouter",
+                state="closed",
+                epoch=uuid4(),
+                opened_at=now - timedelta(days=2),
+                retry_at=now - timedelta(days=2),
+                last_failure_at=now - timedelta(days=2),
+                closed_at=now - timedelta(days=2),
+                failure_count=1,
+                last_status=429,
+                last_error_code="upstream_http_429",
+                updated_at=now - timedelta(days=2),
+            )
+        )
+    _install(app, retry_maker)
+
+    detail = await client.get(
+        f"/api/v1/admin/validation-retries/{agent_id}", headers=_HEADERS
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["recommended_action"] == "retry"
+    assert detail.json()["provider_outage"] is None
+    assert detail.json()["provider_outage_blocks_retry"] is False
+
+
+async def test_open_provider_outage_blocks_retry_after_any_failure_cause(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    retry_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The guard is the circuit, not the slot's last failure code.
+
+    ``park_scoring_leases`` parks every issued lease while the circuit is open,
+    so a slot that died of some unrelated infrastructure failure is restored
+    into exactly the same outage. Reviewed on #2090: the first cut of this guard
+    only covered ``provider_outage_parked`` slots and let this case through.
+    """
     agent_id = await _seed(retry_maker, score_count=2, ticket_count=3)
     now = datetime.now(UTC)
     async with retry_maker() as session, session.begin():
@@ -3622,9 +3664,39 @@ async def test_open_provider_outage_does_not_block_unrelated_exhaustion(
         f"/api/v1/admin/validation-retries/{agent_id}", headers=_HEADERS
     )
     assert detail.status_code == 200, detail.text
-    assert detail.json()["recommended_action"] == "retry"
-    assert detail.json()["provider_outage"] is None
-    assert detail.json()["provider_outage_blocks_retry"] is False
+    body = detail.json()
+    # No slot here carries provider_outage_parked; the open circuit alone is
+    # what makes the grant unsafe, and it is reported as the reason.
+    assert {ticket["failure_detail"] for ticket in body["tickets"]} == {None}
+    assert body["recommended_action"] is None
+    assert body["recovery_allowed"] is False
+    assert body["provider_outage_blocks_retry"] is True
+    assert body["provider_outage"]["state"] == "open"
+    assert "every scoring lease is parked" in body["blocking_reason"]
+
+    refused = await client.post(
+        f"/api/v1/admin/validation-retries/{agent_id}/retry",
+        headers=_HEADERS,
+        json={
+            "request_id": str(uuid4()),
+            "expected_snapshot": body["snapshot"],
+            "reason": "unrelated scoring failure during a provider outage",
+        },
+    )
+    assert refused.status_code == 409, refused.text
+    assert "acknowledge_provider_outage" in refused.text
+
+    acknowledged = await client.post(
+        f"/api/v1/admin/validation-retries/{agent_id}/retry",
+        headers=_HEADERS,
+        json={
+            "request_id": str(uuid4()),
+            "expected_snapshot": body["snapshot"],
+            "reason": "operator accepts the outage risk for this slot",
+            "acknowledge_provider_outage": True,
+        },
+    )
+    assert acknowledged.status_code == 200, acknowledged.text
 
 
 async def test_historical_infra_grant_does_not_authorize_retry(

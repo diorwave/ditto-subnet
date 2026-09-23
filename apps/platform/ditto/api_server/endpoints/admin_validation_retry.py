@@ -561,18 +561,21 @@ def _provider_outage_view(
 ) -> tuple[ProviderCircuitSnapshot | None, bool]:
     """``(circuit snapshot, blocks_retry)`` for one submission's remaining slots.
 
-    The snapshot is shown whenever a remaining exhausted slot was parked by the
-    circuit, open or closed, so the operator can see when the provider last
-    recovered (``closed_at``) and the newest outage evidence.
+    The snapshot is shown in two cases: the circuit is open, so it is why a
+    grant is blocked whatever the slots last failed on; or it is closed but a
+    remaining exhausted slot was parked by it, so ``closed_at`` (the last time
+    a provider request succeeded and closed the circuit) is the evidence for
+    granting now. Otherwise the circuit is unrelated to this submission and
+    reporting it would be noise.
     """
-    if circuit is None or not provider_outage_parked_exhaustion(
+    if circuit is None:
+        return None, False
+    blocked = provider_outage_blocks_retry(circuit=circuit)
+    if not blocked and not provider_outage_parked_exhaustion(
         scores=scores, tickets=tickets
     ):
         return None, False
-    return (
-        ProviderCircuitSnapshot.model_validate(circuit),
-        provider_outage_blocks_retry(circuit=circuit, scores=scores, tickets=tickets),
-    )
+    return ProviderCircuitSnapshot.model_validate(circuit), blocked
 
 
 @router.get("/validation-retries", response_model=AdminStuckSubmissionsResponse)
@@ -931,9 +934,7 @@ async def _apply_recovery(
         return "skipped", gate_reason or "retry unavailable", None
     # Advisory read, deliberately unlocked: the lease path locks the circuit
     # before tickets, and this transaction already holds ticket locks.
-    if provider_outage_blocks_retry(
-        circuit=await _provider_circuit(session), scores=scores, tickets=tickets
-    ):
+    if provider_outage_blocks_retry(circuit=await _provider_circuit(session)):
         if not acknowledge_provider_outage:
             return "skipped", PROVIDER_OUTAGE_RETRY_BLOCKING_REASON, None
         logger.warning(
