@@ -307,6 +307,7 @@ export const screenerReviewSettingsSchema = z
     adjudicator_model: z.literal('z-ai/glm-5.3-flash').default('z-ai/glm-5.3-flash'),
     adjudicator_max_steps: z.number().int().min(1).max(1024).default(128),
     adjudicator_timeout_seconds: z.number().int().min(60).max(3_600).default(600),
+    adjudicator_max_completion_tokens: z.number().int().min(1_000).max(128_000).nullable().default(null),
     fanout_shadow_mode: z.enum(['off', 'shadow']).default('off'),
     fanout_shadow_image_source_sha: z.string().regex(/^[0-9a-f]{40}$/).default('0'.repeat(40)),
     fanout_shadow_model: z.literal('z-ai/glm-5.3-flash').default('z-ai/glm-5.3-flash'),
@@ -341,6 +342,13 @@ export const screenerReviewSettingsSchema = z
         code: 'custom',
         message: 'Completion budget cannot exceed output budget',
         path: ['max_completion_tokens'],
+      })
+    }
+    if (value.adjudicator_max_completion_tokens !== null && value.adjudicator_max_completion_tokens > value.max_output_tokens) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Adjudicator completion budget cannot exceed output budget',
+        path: ['adjudicator_max_completion_tokens'],
       })
     }
     if (
@@ -646,6 +654,16 @@ export const setScreenerNodeChannelSettingsInputSchema = z.object({
   confirmation: z.string(),
 })
 
+export const setScreenerNodeReplayCapacityInputSchema = z.object({
+  nodeId: z.literal('subnet-screener-2'),
+  expectedHotkey: z.string().min(1),
+  expectedStatus: z.enum(['active', 'draining', 'quarantined', 'revoked']),
+  expectedCapacity: z.number().int().min(0).max(4),
+  capacity: z.union([z.literal(0), z.literal(1)]),
+  reason: auditReasonSchema(8),
+  confirmation: z.string(),
+})
+
 export function screenerNodeChannelSettingsConfirmation(
   nodeId: string,
   settings: z.infer<typeof screenerNodeChannelSettingsSchema>,
@@ -746,6 +764,7 @@ export const screenerCapacityNodeSchema = z.object({
   screener_hotkey: z.string().min(1),
   status: screenerNodeStatusSchema,
   capacity: z.number().int().positive(),
+  verification_replay_capacity: z.number().int().min(0).max(4).default(0),
   token_expires_at: z.string(),
   registered_at: z.string(),
   rotated_at: z.string(),
@@ -4309,10 +4328,37 @@ export const screeningAttemptSchema = z.object({
   duplicate_version: z.number().int().positive().nullish().default(null),
 })
 
+export const adjudicationRequestAttemptDiagnosticSchema = z.object({
+  ordinal: z.number().int().min(1).max(1_024),
+  started_ms: z.number().int().min(0).max(3_600_000),
+  elapsed_ms: z.number().int().min(0).max(3_600_000),
+  stage: z.enum(['request', 'headers', 'bytes', 'event', 'complete']),
+  stream_requested: z.boolean(),
+  prompt_bytes: z.number().int().min(0).max(20_000_000),
+  http_status: z.number().int().min(100).max(599).nullish(),
+  headers_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  first_byte_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  last_byte_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  first_event_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  last_event_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  event_count: z.number().int().min(0).max(100_000),
+  wire_bytes: z.number().int().min(0).max(20_000_000),
+  upstream: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/).nullish(),
+})
+
 export const adjudicationRunDiagnosticSchema = z.object({
   error_class: z
     .string()
     .regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/)
+    .nullish(),
+  failure_code: z
+    .enum([
+      'completion-timeout', 'provider-http-error', 'provider-stream-error',
+      'provider-body-error', 'transport-error', 'stream-incomplete',
+      'stream-no-tool-call', 'stream-invalid', 'response-too-large',
+      'response-json-invalid', 'tool-call-invalid', 'verdict-invalid',
+      'lease-budget', 'step-budget', 'response-invalid',
+    ])
     .nullish(),
   escalation_code: z
     .string()
@@ -4340,6 +4386,9 @@ export const adjudicationRunDiagnosticSchema = z.object({
     .string()
     .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
     .nullish(),
+  /** Bounded per-request timeline; contains counts and times, never prompt or response text. */
+  request_count: z.number().int().min(0).max(1_024).optional(),
+  request_attempts: z.array(adjudicationRequestAttemptDiagnosticSchema).max(32).optional(),
 })
 
 export const screeningFailureDiagnosticSchema = z.object({
@@ -4367,6 +4416,135 @@ export const screeningFailureDiagnosticSchema = z.object({
   // failures that were not an automated-court run. Older Platform responses
   // omit the key; treat that the same as an absent trace.
   court_diagnostic: adjudicationRunDiagnosticSchema.nullish().default(null),
+  court_completion_receipt: z.object({
+    elapsed_ms: z.number().int().min(0).max(3_600_000),
+    first_tool_call_ms: z.number().int().min(0).max(3_600_000).nullable(),
+    first_tool_observation: z.enum(['stream_delta', 'complete_body']).nullable(),
+    observed_model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/).nullable(),
+    gateway_provider: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/).nullable(),
+    observed_upstream: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/).nullable(),
+    request_count: z.number().int().min(0).max(1_024),
+    final_request_prompt_bytes: z.number().int().min(0).max(20_000_000).nullable(),
+    final_request_wire_bytes: z.number().int().min(0).max(20_000_000).nullable(),
+    final_request_event_count: z.number().int().min(0).max(100_000).nullable(),
+    prompt_tokens: z.number().int().min(0).max(10_000_000).nullable(),
+    completion_tokens: z.number().int().min(0).max(10_000_000).nullable(),
+  }).nullish().default(null),
+})
+
+export const adjudicationAttemptsInputSchema = z.object({
+  limit: z.number().int().min(1).max(100).default(50),
+  offset: z.number().int().min(0).max(10_000).default(0),
+  lookbackHours: z.number().int().min(1).max(720).default(72),
+})
+
+export const adjudicationAttemptsSchema = z.object({
+  limit: z.number().int().min(1).max(100),
+  offset: z.number().int().min(0).max(10_000),
+  lookback_hours: z.number().int().min(1).max(720),
+  items: z.array(z.object({
+    agent_id: z.string().uuid(),
+    attempt_id: z.string().uuid(),
+    artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    policy_version: z.number().int().positive(),
+    manifest_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    started_at: z.string(),
+    finished_at: z.string().nullable(),
+    attempt_status: z.string(),
+    adjudication_decision: z.enum(['clear', 'reject', 'escalate']),
+    review_settings_revision: z.number().int().positive().nullable(),
+    review_settings_checksum: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    configured_model: z.string().nullable(),
+    configured_timeout_seconds: z.number().int().nullable(),
+    configured_completion_ceiling: z.number().int().nullable(),
+    observed_model: z.string().nullable(),
+    observed_provider: z.string().nullable(),
+    observed_upstream: z.string().nullable(),
+    failure_code: z.string().nullable(),
+    elapsed_ms: z.number().int().nullable(),
+    first_tool_call_ms: z.number().int().nullable(),
+    first_tool_observation: z.enum(['stream_delta', 'complete_body']).nullish().default(null),
+    request_count: z.number().int().nullable(),
+    request_prompt_bytes: z.number().int().nullable(),
+    request_wire_bytes: z.number().int().nullable(),
+    request_event_count: z.number().int().nullable(),
+    prompt_tokens: z.number().int().nullable(),
+    completion_tokens: z.number().int().nullable(),
+  })).max(100),
+})
+
+export const screeningVerificationReadinessSchema = z.object({
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  attempt_id: z.string().uuid(),
+  policy_version: z.literal(13),
+  attempt_status: z.string(),
+  // Optional while Platform and Backroom roll out independently. Omission is
+  // unknown, never evidence that no verified image exists.
+  verified_image_sha256s: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(16).optional(),
+  verified_image_count: z.number().int().nonnegative().optional(),
+  verified_images_truncated: z.boolean().optional(),
+  checks: z.array(z.object({
+    check_code: z.string().regex(/^[a-z0-9_]{1,64}$/),
+    record_status: z.enum(['not_recorded', 'recorded_unverified', 'mechanically_verified']),
+    receipt_count: z.number().int().nonnegative(),
+  })).length(20),
+  private_metamorphic_applicability: z.literal('not_recorded'),
+  private_package: z.object({
+    registration_status: z.enum(['not_registered', 'registered_unverified']),
+    prerequisites: z.array(z.object({
+      code: z.string(),
+      status: z.enum(['not_observed', 'recorded_unverified', 'mechanically_verified']),
+    })),
+    clear_authorized: z.literal(false),
+  }).nullish(),
+  receipts: z.array(z.object({
+    receipt_id: z.string().uuid(),
+    check_code: z.string().regex(/^[a-z0-9_]{1,64}$/),
+    evidence_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    image_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    profile_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    challenge_manifest_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    worker_hotkey: z.string().min(1).max(120),
+    created_at: z.string(),
+  })).max(128),
+  receipt_count: z.number().int().nonnegative(),
+  receipts_truncated: z.boolean(),
+})
+
+export const screeningReviewDeadlineDiagnosticSchema = z.object({
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  agent_status: z.string(),
+  policy_version: z.number().int().nonnegative(),
+  quarantine_id: z.string().uuid().nullable(),
+  quarantine_status: z.string().nullable(),
+  quarantine_resolution: z.string().nullable(),
+  quarantine_attempt_id: z.string().uuid().nullable(),
+  quarantine_artifact_matches: z.boolean().nullable(),
+  manifest_digest: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  deadline_state: z.enum(['bound', 'not_configured']),
+  finalizer_state: z.literal('not_configured'),
+  activation_revision: z.number().int().positive().nullable(),
+  activation_actor: z.string().nullable(),
+  activation_reason: z.string().nullable(),
+  activated_at: z.string().nullable(),
+  start_event: z.string().nullable(),
+  window_started_at: z.string().nullable(),
+  deadline_at: z.string().nullable(),
+  recorded_attempts: z.array(z.object({
+    attempt_id: z.string().uuid(),
+    status: z.string(),
+    screener_hotkey: z.string(),
+    started_at: z.string(),
+    finished_at: z.string().nullable(),
+    reason_code: z.string().nullable(),
+  })),
+  observed_worker_hotkeys: z.array(z.string()),
+  required_retries: z.null(),
+  independent_worker_count: z.null(),
+  failure_domain: z.null(),
+  outstanding_mandatory_checks: z.null(),
 })
 
 export const screeningImageBuildSchema = z.object({
@@ -4819,6 +4997,47 @@ export const screeningSubmissionLookupInputSchema = z.object({
 export const screeningFailureDiagnosticInputSchema = z.object({
   agentId: z.string().uuid(),
   attemptId: z.string().uuid(),
+})
+
+export const v13GenerationGroupInputSchema = z.object({
+  groupId: z.string().uuid(),
+  role: z.enum(['target', 'known_benign']).optional(),
+})
+
+export const v13GenerationGroupSchema = z.object({
+  group_id: z.string().uuid(),
+  target_agent_id: z.string().uuid(),
+  target_attempt_id: z.string().uuid(),
+  target_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  target_image_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  control_agent_id: z.string().uuid(),
+  control_attempt_id: z.string().uuid(),
+  control_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  control_image_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  approval_id: z.string().uuid(),
+  approval_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  profile_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  target_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  control_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  actor: z.string().min(1).max(120),
+  started_at: z.string(),
+  status: z.literal('recorded_unverified'),
+})
+
+export const v13GroupPackageSchema = z.object({
+  group_id: z.string().uuid(),
+  role: z.enum(['target', 'known_benign']),
+  agent_id: z.string().uuid(),
+  attempt_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  image_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  profile_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  generation_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  manifest_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  pair_inventory_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  registrar_actor: z.string().min(1).max(120),
+  registered_at: z.string(),
+  status: z.literal('recorded_unverified'),
 })
 
 export const screeningArtifactSchema = z.object({
@@ -7277,6 +7496,12 @@ export type ScreeningDisputeKind = z.infer<typeof screeningDisputeKindSchema>
 export type ScreeningSubmission = z.infer<typeof screeningSubmissionSchema>
 export type ScreeningFailureDiagnostic = z.infer<
   typeof screeningFailureDiagnosticSchema
+>
+export type ScreeningVerificationReadiness = z.infer<
+  typeof screeningVerificationReadinessSchema
+>
+export type ScreeningReviewDeadlineDiagnostic = z.infer<
+  typeof screeningReviewDeadlineDiagnosticSchema
 >
 export type ScreeningEvidenceItem = z.infer<typeof screeningEvidenceItemSchema>
 export type SourceReviewFinding = z.infer<typeof sourceReviewFindingSchema>

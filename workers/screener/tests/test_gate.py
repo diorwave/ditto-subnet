@@ -15,6 +15,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import httpx
@@ -53,11 +54,371 @@ from ditto_screener.policy import (
     SourceReviewObservation,
     load_policy_engine,
 )
+from ditto_screener.runtime_verification import runtime_evidence_sha256
 from ditto_screening_protocol import SCREENING_POLICY_VERSION
 
 _AGENT = UUID("550e8400-e29b-41d4-a716-446655440000")
 _ATTEMPT = UUID("7c5df3f9-3ea7-47ba-92d1-1bbcf4c5f300")
 _MINER = "5DhaT8U7LVwnnJNUU8VL1XEipicatoaDVVq7cHo227gogVZm"
+
+
+async def test_v13_shadow_runtime_observations_record_only_attempt_bound_digests(
+    make_config: Callable[..., ScreenerConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = _gate_with(make_config(), _ok_run([]), tarball=_valid_tar())
+    calls = 0
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def gateway_count(_path: str) -> int:
+        return calls
+
+    async def request(
+        _container: str, url: str, *, payload: dict[str, object], timeout: float
+    ) -> tuple[int, str]:
+        nonlocal calls
+        assert timeout <= 20
+        requests.append((url, payload))
+        if url.endswith("/seed"):
+            return 0, '{"pairs":1,"subjects":0,"links":0}'
+        calls += 1
+        return 0, '{"final_text":"private synthetic answer"}'
+
+    gate._request_from_sidecar = request  # type: ignore[method-assign]
+    monkeypatch.setattr(gate_module, "_gateway_call_count", gateway_count)
+    receipts: dict[str, str] = {}
+
+    async def record(code: str, digest: str) -> None:
+        receipts[code] = digest
+
+    await gate._run_v13_runtime_observations(
+        audit_runtime=gate_module._AuditRuntime(
+            harness_base="http://harness:8080",
+            gateway_response_token="secret-a",
+            oracle_answer="secret-b",
+            gateway_state_file="/state/model-called",
+            tool_route="route",
+            tool_key=b"key",
+        ),
+        probe_container="gateway",
+        attempt_id=_ATTEMPT,
+        artifact_sha256="b" * 64,
+        image_id="sha256:" + "a" * 64,
+        bench_version=13,
+        deadline=None,
+        record=record,
+        include_runs=True,
+    )
+
+    assert set(receipts) == {
+        "health",
+        "ordinary_model_run",
+        "tool_selection_run",
+        "seed_memory_run",
+        "two_user_isolation",
+    }
+    assert all(len(digest) == 64 for digest in receipts.values())
+    assert len(requests) == 7
+    assert [url.rsplit("/", 1)[-1] for url, _ in requests] == [
+        "run",
+        "run",
+        "seed",
+        "run",
+        "seed",
+        "run",
+        "run",
+    ]
+    assert requests[1][1]["tool_endpoint"]
+    seeded_users = [
+        payload["user_id"] for url, payload in requests if url.endswith("/seed")
+    ]
+    assert len(set(seeded_users)) == 2
+    assert "private synthetic answer" not in repr(receipts)
+
+
+async def test_v13_runtime_observation_stops_at_failed_seed(
+    make_config: Callable[..., ScreenerConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = _gate_with(make_config(), _ok_run([]), tarball=_valid_tar())
+    calls = 0
+
+    def gateway_count(_path: str) -> int:
+        return calls
+
+    async def request(
+        _container: str, url: str, *, payload: dict[str, object], timeout: float
+    ) -> tuple[int, str]:
+        nonlocal calls
+        assert payload and timeout > 0
+        if url.endswith("/seed"):
+            return 22, "HTTP 500: secret"  # no memory or isolation receipt
+        calls += 1
+        return 0, '{"final_text":"ok"}'
+
+    gate._request_from_sidecar = request  # type: ignore[method-assign]
+    monkeypatch.setattr(gate_module, "_gateway_call_count", gateway_count)
+    receipts: list[str] = []
+
+    async def record(code: str, _digest: str) -> None:
+        receipts.append(code)
+
+    await gate._run_v13_runtime_observations(
+        audit_runtime=gate_module._AuditRuntime(
+            harness_base="http://harness:8080",
+            gateway_response_token="secret-a",
+            oracle_answer="secret-b",
+            gateway_state_file="/state/model-called",
+            tool_route="route",
+            tool_key=b"key",
+        ),
+        probe_container="gateway",
+        attempt_id=_ATTEMPT,
+        artifact_sha256="b" * 64,
+        image_id="sha256:" + "a" * 64,
+        bench_version=13,
+        deadline=None,
+        record=record,
+        include_runs=True,
+    )
+    assert receipts == ["health", "ordinary_model_run", "tool_selection_run"]
+
+
+async def test_v13_shadow_semantics_require_tool_and_user_specific_memory(
+    make_config: Callable[..., ScreenerConfig],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gate = _gate_with(make_config(), _ok_run([]), tarball=_valid_tar())
+    state_file = tmp_path / "model-called"
+    (tmp_path / "semantic-events").write_text("")
+    calls = 0
+    memories: dict[str, str] = {}
+
+    async def request(
+        _container: str, url: str, *, payload: dict[str, object], timeout: float
+    ) -> tuple[int, str]:
+        nonlocal calls
+        assert timeout > 0
+        if url.endswith("/seed"):
+            pairs = payload["pairs"]
+            assert isinstance(pairs, list) and isinstance(pairs[0], dict)
+            memories[str(payload["user_id"])] = str(pairs[0]["response"])
+            return 0, '{"pairs":1,"subjects":0,"links":0}'
+        calls += 1
+        config = json.loads((tmp_path / "semantic-probe.json").read_text())
+        events_file = tmp_path / "semantic-events"
+        if config["kind"] == "ordinary":
+            assert config["challenge_token"] in str(payload["user_input"])
+            with events_file.open("a") as stream:
+                stream.write(
+                    json.dumps(
+                        {"event": "challenge_seen", "probe_id": config["probe_id"]}
+                    )
+                    + "\n"
+                )
+        if config["kind"] == "memory":
+            with events_file.open("a") as stream:
+                for challenge in config["challenges"]:
+                    if challenge["challenge_token"] in str(payload["user_input"]):
+                        stream.write(
+                            json.dumps(
+                                {
+                                    "event": "challenge_seen",
+                                    "probe_id": challenge["probe_id"],
+                                }
+                            )
+                            + "\n"
+                        )
+        if payload.get("tools"):
+            with events_file.open("a") as stream:
+                stream.write(
+                    json.dumps(
+                        {"event": "challenge_seen", "probe_id": config["probe_id"]}
+                    )
+                    + "\n"
+                )
+                stream.write(
+                    json.dumps({"event": "emitted", "probe_id": config["probe_id"]})
+                    + "\n"
+                )
+                stream.write(
+                    json.dumps({"event": "executed", "probe_id": config["probe_id"]})
+                    + "\n"
+                )
+            return 0, json.dumps({"answer": config["result"]})
+        if "reference marker" in str(payload.get("user_input")):
+            return 0, json.dumps({"answer": memories[str(payload["user_id"])]})
+        return 0, json.dumps({"answer": config["response_token"]})
+
+    gate._request_from_sidecar = request  # type: ignore[method-assign]
+    monkeypatch.setattr(gate_module, "_gateway_call_count", lambda _path: calls)
+    receipts: dict[str, str] = {}
+
+    async def record(code: str, digest: str) -> None:
+        receipts[code] = digest
+
+    with caplog.at_level(logging.INFO):
+        await gate._run_v13_runtime_observations(
+            audit_runtime=gate_module._AuditRuntime(
+                harness_base="http://harness:8080",
+                gateway_response_token="secret-a",
+                oracle_answer="secret-b",
+                gateway_state_file=str(state_file),
+                tool_route="route",
+                tool_key=b"key",
+            ),
+            probe_container="gateway",
+            attempt_id=_ATTEMPT,
+            artifact_sha256="b" * 64,
+            image_id="sha256:" + "a" * 64,
+            bench_version=13,
+            deadline=None,
+            record=record,
+            include_runs=True,
+        )
+
+    decisions = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("v13 shadow semantic")
+    ]
+    assert len(decisions) == 4
+    assert all("status=pass" in message for message in decisions)
+    assert len(receipts) == 5
+    assert all(len(digest) == 64 for digest in receipts.values())
+    assert all(marker not in repr(decisions) for marker in memories.values())
+
+
+async def test_v13_shadow_observation_runs_only_after_policy_decision(
+    make_config: Callable[..., ScreenerConfig],
+    tmp_path: Path,
+) -> None:
+    tarball = _valid_tar()
+    gate = _gate_with(
+        make_config(v13_runtime_receipts_mode="shadow"),
+        _ok_run(),
+        tarball=tarball,
+    )
+    events: list[str] = []
+    original_evaluate = gate._policy.evaluate
+
+    async def evaluate(*args: Any, **kwargs: Any) -> ScreeningDecision:
+        events.append("policy")
+        return await original_evaluate(*args, **kwargs)
+
+    async def run_and_probe(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        return gate_module._StageResult(True, ""), gate_module._AuditRuntime(
+            harness_base="http://harness:8080",
+            gateway_response_token="secret-a",
+            oracle_answer="secret-b",
+            gateway_state_file="/state/model-called",
+            tool_route="route",
+            tool_key=b"key",
+        )
+
+    async def observe(*_args: Any, **_kwargs: Any) -> None:
+        events.append("shadow")
+
+    async def export_image(
+        image_id: str, *, image_ref: str, deadline: float | None
+    ) -> BuiltImageArtifact:
+        assert deadline is None
+        events.append("export")
+        path = tmp_path / "image.tar"
+        path.write_bytes(b"image")
+        return BuiltImageArtifact(
+            path=str(path),
+            sha256=hashlib.sha256(b"image").hexdigest(),
+            size_bytes=5,
+            image_id=image_id,
+            image_ref=image_ref,
+        )
+
+    async def publish_image(_image: BuiltImageArtifact) -> None:
+        events.append("publish")
+
+    gate._policy.evaluate = evaluate  # type: ignore[method-assign]
+    gate._run_and_probe = run_and_probe  # type: ignore[method-assign]
+    gate._run_v13_runtime_observations = observe  # type: ignore[method-assign]
+    gate._export_image = export_image  # type: ignore[method-assign]
+
+    async with gate._client:
+        decision = await gate.screen(
+            agent_id=_AGENT,
+            attempt_id=_ATTEMPT,
+            bench_version=13,
+            miner_hotkey=_MINER,
+            sha256=hashlib.sha256(tarball).hexdigest(),
+            download_url=_URL,
+            build_only=True,
+            policy_version=13,
+            publish_image=publish_image,
+            record_runtime_verification=lambda _code, _digest: asyncio.sleep(0),
+        )
+
+    assert decision.outcome == ScreeningOutcome.PASS
+    assert events == ["policy", "export", "publish", "shadow"]
+
+
+async def test_v13_shadow_timeout_does_not_change_decision(
+    make_config: Callable[..., ScreenerConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tarball = _valid_tar()
+    gate = _gate_with(
+        make_config(v13_runtime_receipts_mode="shadow"),
+        _ok_run(),
+        tarball=tarball,
+    )
+    events: list[str] = []
+
+    async def run_and_probe(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        return gate_module._StageResult(True, ""), gate_module._AuditRuntime(
+            harness_base="http://harness:8080",
+            gateway_response_token="secret-a",
+            oracle_answer="secret-b",
+            gateway_state_file="/state/model-called",
+            tool_route="route",
+            tool_key=b"key",
+        )
+
+    async def observe(*_args: Any, **_kwargs: Any) -> None:
+        events.append("started")
+        try:
+            await asyncio.sleep(1)
+        finally:
+            events.append("cancelled")
+
+    gate._run_and_probe = run_and_probe  # type: ignore[method-assign]
+    gate._run_v13_runtime_observations = observe  # type: ignore[method-assign]
+    monkeypatch.setattr(gate, "_lease_remaining", lambda _deadline: 30.01)
+    async with gate._client:
+        decision = await gate.screen(
+            agent_id=_AGENT,
+            attempt_id=_ATTEMPT,
+            bench_version=13,
+            miner_hotkey=_MINER,
+            sha256=hashlib.sha256(tarball).hexdigest(),
+            download_url=_URL,
+            build_only=True,
+            policy_version=13,
+            deadline=asyncio.get_running_loop().time() + 120,
+            record_runtime_verification=lambda _code, _digest: asyncio.sleep(0),
+        )
+
+    assert decision.outcome == ScreeningOutcome.PASS
+    assert events == ["started", "cancelled"]
+
+
+def test_runtime_receipt_rejects_unbound_evidence() -> None:
+    with pytest.raises(ValueError, match="invalid image ID"):
+        runtime_evidence_sha256(
+            check_code="health",
+            artifact_sha256="b" * 64,
+            image_id="a" * 64,
+            request_sha256s=[],
+            response_sha256s=[],
+            broker_calls=0,
+        )
 
 
 def test_gateway_state_is_owned_by_worker_and_appendable_by_rootless_uid() -> None:
@@ -72,6 +433,7 @@ def test_gateway_state_is_owned_by_worker_and_appendable_by_rootless_uid() -> No
         )
         assert staged_script.stat().st_mode & 0o777 == 0o444
         assert _gateway_call_count(state_file) == 0
+        assert (Path(state_dir) / "semantic-events").stat().st_mode & 0o777 == 0o622
     finally:
         shutil.rmtree(state_dir)
 
@@ -201,6 +563,7 @@ async def _screen(  # type: ignore[no-untyped-def]
     build_only=False,
     policy_only=False,
     policy_version=SCREENING_POLICY_VERSION,
+    record_archive_verification=None,
 ):
     return await gate.screen(
         agent_id=_AGENT,
@@ -213,6 +576,7 @@ async def _screen(  # type: ignore[no-untyped-def]
         build_only=build_only,
         policy_only=policy_only,
         policy_version=policy_version,
+        record_archive_verification=record_archive_verification,
     )
 
 
@@ -687,6 +1051,26 @@ async def test_default_v6_builds_and_health_checks_without_run(
     assert result.manifest_digest == CORE_ONLY_MANIFEST.digest
     assert any("http://harness:8080/health" in arg for call in calls for arg in call)
     assert not any("http://harness:8080/run" in arg for call in calls for arg in call)
+
+
+async def test_archive_receipt_follows_verified_contract_only(
+    make_config: Callable[..., ScreenerConfig],
+) -> None:
+    tarball = _valid_tar()
+    gate = _gate_with(make_config(), _ok_run(), tarball=tarball)
+    recorded: list[str] = []
+
+    async def record() -> None:
+        recorded.append("archive_sha")
+
+    async with gate._client:
+        await _screen(
+            gate,
+            hashlib.sha256(tarball).hexdigest(),
+            record_archive_verification=record,
+        )
+        await _screen(gate, "00" * 32, record_archive_verification=record)
+    assert recorded == ["archive_sha"]
 
 
 async def test_static_malicious_preflight_quarantines_before_docker(
@@ -2330,14 +2714,33 @@ async def test_private_challenge_keeps_a_usable_primary_observation(
 
 
 def test_with_tool_endpoint_fills_only_tool_declaring_requests() -> None:
-    from ditto_screener.gate import _TOOL_ENDPOINT, _with_tool_endpoint
+    from ditto_screener.fake_gateway import tool_capability
+    from ditto_screener.gate import _with_tool_endpoint
 
-    # Tool-declaring request with no endpoint: gets the reachable gateway sink.
-    filled = _with_tool_endpoint({"case_id": "c", "tools": [{"name": "search_web"}]})
-    assert filled["tool_endpoint"] == _TOOL_ENDPOINT
+    route = "aBc123_-aBc123_-aBc123_-"
+    key = bytes(range(32))
+
+    # The request has the scorer's route, case/user binding, and capability.
+    filled = _with_tool_endpoint(
+        {"case_id": "c0123456789abcdef", "tools": [{"name": "search_web"}]},
+        tool_route=route,
+        tool_key=key,
+    )
+    endpoint = urlsplit(filled["tool_endpoint"])
+    assert endpoint.netloc == "host.docker.internal:11436"
+    assert endpoint.path == f"/v1/tools/{route}/tool"
+    query = parse_qs(endpoint.query)
+    assert query == {
+        "cap": [tool_capability(key, "c0123456789abcdef", filled["user_id"])],
+        "case_id": ["c0123456789abcdef"],
+        "user_id": [filled["user_id"]],
+    }
+    assert len(filled["user_id"]) == 32
 
     # No tools: unchanged (no endpoint injected).
-    assert "tool_endpoint" not in _with_tool_endpoint({"case_id": "c"})
+    assert "tool_endpoint" not in _with_tool_endpoint(
+        {"case_id": "c"}, tool_route=route, tool_key=key
+    )
 
     # Explicit endpoint is preserved, not overwritten.
     kept = _with_tool_endpoint(
@@ -2345,13 +2748,15 @@ def test_with_tool_endpoint_fills_only_tool_declaring_requests() -> None:
             "case_id": "c",
             "tools": [{"name": "x"}],
             "tool_endpoint": "http://elsewhere/tool",
-        }
+        },
+        tool_route=route,
+        tool_key=key,
     )
     assert kept["tool_endpoint"] == "http://elsewhere/tool"
 
     # The input mapping is copied, never mutated.
     original = {"case_id": "c", "tools": [{"name": "x"}]}
-    _with_tool_endpoint(original)
+    _with_tool_endpoint(original, tool_route=route, tool_key=key)
     assert "tool_endpoint" not in original
 
 

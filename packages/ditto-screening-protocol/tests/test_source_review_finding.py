@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from importlib import metadata
+from typing import Literal
+from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ditto_screening_protocol import (
+    AdjudicationCompletionReceipt,
     AdjudicationRunDiagnostic,
     SourceReviewAdjudication,
     SourceReviewAuthorityTransition,
@@ -24,6 +27,7 @@ from ditto_screening_protocol import (
     SourceReviewObservationPayload,
     SourceReviewPassClause,
     SourceReviewScorerVisibleEffect,
+    completion_receipt_signing_message,
 )
 from ditto_screening_protocol.models import source_review_invariants_for_policy
 
@@ -753,6 +757,7 @@ def test_run_diagnostic_stays_out_of_the_signed_adjudication() -> None:
     }
     diagnostic = AdjudicationRunDiagnostic(
         error_class="HTTPStatusError",
+        failure_code="provider-http-error",
         escalation_code="adjudicator-failed",
         timeout_stage="response",
         http_status=503,
@@ -762,6 +767,27 @@ def test_run_diagnostic_stays_out_of_the_signed_adjudication() -> None:
         final_tool_call_returned=False,
         model="z-ai/glm-5.3-flash",
         provider="openrouter",
+        request_count=1,
+        request_attempts=[
+            {
+                "ordinal": 1,
+                "started_ms": 4,
+                "elapsed_ms": 38,
+                "stage": "event",
+                "stream_requested": True,
+                "prompt_bytes": 923,
+                "http_status": 200,
+                "headers_ms": 8,
+                "first_byte_ms": 11,
+                "last_byte_ms": 30,
+                "first_event_ms": 13,
+                "last_event_ms": 30,
+                "event_count": 2,
+                "wire_bytes": 650,
+                "upstream": "together",
+                "prompt": "source text ignored by schema",
+            }
+        ],
     )
     plain = SourceReviewAdjudication(**base)
     diagnosed = SourceReviewAdjudication(**base, run_diagnostic=diagnostic)
@@ -774,11 +800,14 @@ def test_run_diagnostic_stays_out_of_the_signed_adjudication() -> None:
         }
     )
     assert "exception" not in restored.model_dump(mode="json")
+    assert "prompt" not in restored.model_dump(mode="json")["request_attempts"][0]
     with pytest.raises(ValidationError):
         AdjudicationRunDiagnostic(
             elapsed_ms=1,
             model="the model replied with screening instructions",
         )
+    with pytest.raises(ValidationError):
+        AdjudicationRunDiagnostic(elapsed_ms=1, failure_code="private provider text")
     with pytest.raises(ValidationError, match="run diagnostic requires an escalation"):
         SourceReviewAdjudication(
             decision="clear",
@@ -789,6 +818,131 @@ def test_run_diagnostic_stays_out_of_the_signed_adjudication() -> None:
             prompt_revision="adjudicator-v3-policy-v13",
             run_diagnostic=AdjudicationRunDiagnostic(elapsed_ms=1),
         )
+
+
+def test_completion_receipt_is_text_free_and_does_not_change_signed_verdict() -> None:
+    base = {
+        "decision": "clear",
+        "reason": "The served model authors the graded response",
+        "clear_clause": "model_authors_graded_slot",
+        "citations": [SourceReviewCitation(path="src/main.rs", line=6)],
+        "model": "z-ai/glm-5.3-flash",
+        "prompt_revision": "adjudicator-v7-policy-v13",
+    }
+    receipt = AdjudicationCompletionReceipt.model_validate(
+        {
+            "elapsed_ms": 4300,
+            "first_tool_call_ms": 2000,
+            "first_tool_observation": "stream_delta",
+            "observed_model": "z-ai/glm-5.3-flash",
+            "gateway_provider": "openrouter",
+            "observed_upstream": "together",
+            "request_count": 1,
+            "final_request_prompt_bytes": 8000,
+            "final_request_wire_bytes": 700,
+            "final_request_event_count": 4,
+            "prompt_tokens": 200,
+            "completion_tokens": 80,
+            "tool_arguments": "private source and response text",
+        }
+    )
+    assert "tool_arguments" not in receipt.model_dump(mode="json")
+    plain = SourceReviewAdjudication(**base)
+    measured = SourceReviewAdjudication(**base, completion_receipt=receipt)
+    assert measured.canonical_digest() == plain.canonical_digest()
+    agent_id, attempt_id = uuid4(), uuid4()
+    message = completion_receipt_signing_message(
+        screener_hotkey="screener",
+        agent_id=agent_id,
+        attempt_id=attempt_id,
+        artifact_sha256="ab" * 32,
+        adjudication_digest=measured.canonical_digest(),
+        receipt=receipt,
+    )
+    assert message.startswith(b"ditto-screen-adjudication-completion:v1:")
+    assert message != completion_receipt_signing_message(
+        screener_hotkey="screener",
+        agent_id=agent_id,
+        attempt_id=uuid4(),
+        artifact_sha256="ab" * 32,
+        adjudication_digest=measured.canonical_digest(),
+        receipt=receipt,
+    )
+    assert message != completion_receipt_signing_message(
+        screener_hotkey="screener",
+        agent_id=agent_id,
+        attempt_id=attempt_id,
+        artifact_sha256="cd" * 32,
+        adjudication_digest=measured.canonical_digest(),
+        receipt=receipt,
+    )
+    assert message != completion_receipt_signing_message(
+        screener_hotkey="screener",
+        agent_id=agent_id,
+        attempt_id=attempt_id,
+        artifact_sha256="ab" * 32,
+        adjudication_digest=measured.canonical_digest(),
+        receipt=receipt.model_copy(update={"elapsed_ms": 4301}),
+    )
+    refused = SourceReviewAdjudication(
+        decision="escalate",
+        reason="Host could not verify every retained source lead",
+        escalation_code="adjudicator-evidence-incomplete",
+        model="z-ai/glm-5.3-flash",
+        prompt_revision="adjudicator-v7-policy-v13",
+        completion_receipt=receipt,
+    )
+    assert refused.completion_receipt == receipt
+    assert refused.canonical_digest() == refused.model_copy(
+        update={"completion_receipt": None}
+    ).canonical_digest()
+    with pytest.raises(ValidationError, match="requires a completed model call"):
+        SourceReviewAdjudication(
+            decision="escalate",
+            reason="Court failed",
+            escalation_code="adjudicator-failed",
+            model="z-ai/glm-5.3-flash",
+            prompt_revision="adjudicator-v7-policy-v13",
+            completion_receipt=receipt,
+        )
+    with pytest.raises(ValidationError, match="must be paired"):
+        AdjudicationCompletionReceipt(
+            elapsed_ms=1, first_tool_call_ms=1, request_count=1
+        )
+
+
+def test_response_bound_detail_is_safe_for_an_older_platform_consumer() -> None:
+    class OldDiagnostic(BaseModel):
+        model_config = ConfigDict(extra="ignore")
+
+        failure_code: Literal["response-too-large"]
+
+    current = AdjudicationRunDiagnostic(
+        elapsed_ms=1,
+        failure_code="response-too-large",
+        response_bound_kind="wire",
+    )
+    older = OldDiagnostic.model_validate(current.model_dump(mode="json"))
+    assert older.failure_code == "response-too-large"
+    assert "response_bound_kind" not in older.model_dump()
+
+
+def test_completion_ceiling_detail_is_safe_for_an_older_platform_consumer() -> None:
+    class OldDiagnostic(BaseModel):
+        model_config = ConfigDict(extra="ignore")
+
+        failure_code: Literal["stream-no-tool-call"]
+
+    current = AdjudicationRunDiagnostic(
+        elapsed_ms=100_000,
+        failure_code="stream-no-tool-call",
+        completion_tokens=16_000,
+        final_tool_call_returned=False,
+        completion_ceiling_reached=True,
+    )
+    older = OldDiagnostic.model_validate(current.model_dump(mode="json"))
+    assert older.failure_code == "stream-no-tool-call"
+    assert "completion_ceiling_reached" not in older.model_dump()
 
 
 def test_observation_decision_fields_are_bound_to_the_finding() -> None:

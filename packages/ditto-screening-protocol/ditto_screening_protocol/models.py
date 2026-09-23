@@ -1204,11 +1204,36 @@ class SourceReviewCitation(BaseModel):
     line: Annotated[int, Field(ge=1, le=10_000_000)]
 
 
+class AdjudicationRequestAttemptDiagnostic(BaseModel):
+    """Bounded, text-free timing for one automated-court model request."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    ordinal: Annotated[int, Field(ge=1, le=1_024)]
+    started_ms: Annotated[int, Field(ge=0, le=3_600_000)]
+    elapsed_ms: Annotated[int, Field(ge=0, le=3_600_000)]
+    stage: Literal["request", "headers", "bytes", "event", "complete"]
+    stream_requested: bool
+    prompt_bytes: Annotated[int, Field(ge=0, le=20_000_000)]
+    http_status: Annotated[int, Field(ge=100, le=599)] | None = None
+    headers_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    first_byte_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    last_byte_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    first_event_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    last_event_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    event_count: Annotated[int, Field(ge=0, le=100_000)] = 0
+    wire_bytes: Annotated[int, Field(ge=0, le=20_000_000)] = 0
+    upstream: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")] | None = (
+        None
+    )
+
+
 class AdjudicationRunDiagnostic(BaseModel):
     """Sanitized trace of one automated-court run that did not finish.
 
-    Operators need the failure class, stage, and provider status. The trace
-    never carries source, prompts, credentials, exception text, or model text.
+    Operators need the failure class, fixed subtype, stage, and provider
+    status. The trace never carries source, prompts, credentials, exception
+    text, or model text.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1216,6 +1241,30 @@ class AdjudicationRunDiagnostic(BaseModel):
     error_class: (
         Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9]{0,63}$")] | None
     ) = None
+    failure_code: (
+        Literal[
+            "completion-timeout",
+            "provider-http-error",
+            "provider-stream-error",
+            "provider-body-error",
+            "transport-error",
+            "stream-incomplete",
+            "stream-no-tool-call",
+            "stream-no-tool-progress",
+            "stream-invalid",
+            "response-too-large",
+            "response-json-invalid",
+            "tool-call-invalid",
+            "verdict-invalid",
+            "lease-budget",
+            "step-budget",
+            "response-invalid",
+        ]
+        | None
+    ) = None
+    """Fixed, text-free subtype of a court failure; null on older attempts."""
+    response_bound_kind: Literal["wire", "tool"] | None = None
+    """Which bounded response surface overflowed; old consumers ignore it."""
     escalation_code: (
         Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")] | None
     ) = None
@@ -1227,6 +1276,10 @@ class AdjudicationRunDiagnostic(BaseModel):
     prompt_tokens: Annotated[int, Field(ge=0, le=10_000_000)] | None = None
     completion_tokens: Annotated[int, Field(ge=0, le=10_000_000)] | None = None
     final_tool_call_returned: bool | None = None
+    completion_ceiling_reached: bool | None = None
+    """True only when a complete no-tool stream reports a length finish and
+    usage at the requested completion cap. Null when that cannot be proved.
+    """
     model: (
         Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")] | None
     ) = None
@@ -1245,6 +1298,50 @@ class AdjudicationRunDiagnostic(BaseModel):
     when it does not fit, so an upstream name is never free text. Null on a
     failure that produced no response to read it from.
     """
+    request_count: Annotated[int, Field(ge=0, le=1_024)] = 0
+    request_attempts: Annotated[
+        list[AdjudicationRequestAttemptDiagnostic], Field(max_length=32)
+    ] = Field(default_factory=list)
+    """Last 32 requests, oldest first; count includes any earlier requests."""
+
+
+class AdjudicationCompletionReceipt(BaseModel):
+    """Text-free measurements from a completed L4 tool-call run.
+
+    This is telemetry, not evidence for the clear/reject decision. The model
+    and upstream are observed response fields, so they stay null when a gateway
+    omits them; gateway_provider names the configured route actually called.
+    first_tool_call_ms is elapsed from the court run start to the first
+    substantive tool-call signal in the final model request. For buffered
+    responses this signal is only observable at complete-body receipt.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    elapsed_ms: Annotated[int, Field(ge=0, le=3_600_000)]
+    first_tool_call_ms: Annotated[int, Field(ge=0, le=3_600_000)] | None = None
+    first_tool_observation: Literal["stream_delta", "complete_body"] | None = None
+    observed_model: (
+        Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")] | None
+    ) = None
+    gateway_provider: (
+        Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")] | None
+    ) = None
+    observed_upstream: (
+        Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")] | None
+    ) = None
+    request_count: Annotated[int, Field(ge=0, le=1_024)]
+    final_request_prompt_bytes: Annotated[int, Field(ge=0, le=20_000_000)] | None = None
+    final_request_wire_bytes: Annotated[int, Field(ge=0, le=20_000_000)] | None = None
+    final_request_event_count: Annotated[int, Field(ge=0, le=100_000)] | None = None
+    prompt_tokens: Annotated[int, Field(ge=0, le=10_000_000)] | None = None
+    completion_tokens: Annotated[int, Field(ge=0, le=10_000_000)] | None = None
+
+    @model_validator(mode="after")
+    def validate_first_tool_observation(self) -> AdjudicationCompletionReceipt:
+        if (self.first_tool_call_ms is None) != (self.first_tool_observation is None):
+            raise ValueError("first tool timing and observation must be paired")
+        return self
 
 
 class SourceReviewAdjudication(BaseModel):
@@ -1284,6 +1381,10 @@ class SourceReviewAdjudication(BaseModel):
     """Operator metadata for an escalation. Excluded from ``canonical_digest``
     so a platform that has not yet learned the field still verifies the signed
     verdict."""
+    completion_receipt: AdjudicationCompletionReceipt | None = None
+    """Optional telemetry for a completed model call, including a host-refused
+    verdict. It does not establish completed policy verification. Excluded from
+    the canonical verdict digest for rolling-upgrade compatibility."""
 
     @model_validator(mode="after")
     def validate_decision_basis(self) -> SourceReviewAdjudication:
@@ -1314,17 +1415,38 @@ class SourceReviewAdjudication(BaseModel):
             raise ValueError("an escalation must name why the decision was refused")
         if self.run_diagnostic is not None and self.decision != "escalate":
             raise ValueError("adjudication run diagnostic requires an escalation")
+        if self.run_diagnostic is not None and self.completion_receipt is not None:
+            raise ValueError("adjudication failure and completion telemetry conflict")
+        if self.completion_receipt is not None and self.decision == "escalate":
+            # These refusals occur only after a complete L4 tool-call result
+            # reaches the host verifier. A provider/transport failure or an
+            # early host refusal must not be described as a completed call.
+            model_completed_refusals = {
+                "adjudicator-evidence-incomplete",
+                "uncited-decision",
+                "cited-unknown-member",
+                "cited-unread-source",
+                "inadmissible-citations",
+                "verdict-contract-failed",
+            }
+            if self.escalation_code not in model_completed_refusals:
+                raise ValueError(
+                    "adjudication completion receipt requires a completed model call"
+                )
         return self
 
     def canonical_digest(self) -> str:
         """Bind the court decision into the signed worker verdict.
 
-        ``run_diagnostic`` is operator metadata. Leaving it out keeps the
+        ``run_diagnostic`` and ``completion_receipt`` are operator metadata.
+        Leaving them out keeps the
         digest stable for verdicts signed before the field existed and for
         platforms that ignore unknown adjudication fields during a rollout.
         """
         payload = json.dumps(
-            self.model_dump(mode="json", exclude={"run_diagnostic"}),
+            self.model_dump(
+                mode="json", exclude={"run_diagnostic", "completion_receipt"}
+            ),
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -1492,6 +1614,10 @@ class ScreenResultRequest(BaseModel):
         ),
     ] = None
     adjudication: SourceReviewAdjudication | None = None
+    completion_receipt_signature: Annotated[
+        str | None, Field(pattern=_SIGNATURE_HEX_PATTERN)
+    ] = None
+    """Detached hotkey signature over exact-artifact L4 completion telemetry."""
     policy_version: Annotated[
         int,
         Field(
@@ -1708,11 +1834,19 @@ class ScreenResultRequest(BaseModel):
             raise ValueError(
                 "adjudication and adjudication_digest must travel together"
             )
+        if self.adjudication is None and self.completion_receipt_signature is not None:
+            raise ValueError("completion receipt signature requires adjudication")
         if self.adjudication is not None:
             if self.review_settings_revision is None:
                 raise ValueError("adjudication requires reviewer settings binding")
             if self.adjudication.canonical_digest() != self.adjudication_digest:
                 raise ValueError("adjudication does not match adjudication_digest")
+            if (self.adjudication.completion_receipt is None) != (
+                self.completion_receipt_signature is None
+            ):
+                raise ValueError(
+                    "completion receipt and its detached signature must travel together"
+                )
             if self.outcome not in {
                 ScreenResultOutcome.PASS,
                 ScreenResultOutcome.QUARANTINE,

@@ -12,6 +12,8 @@ import {
   fetchScreenedImageRebuild,
   fetchBenchmarkContractMigration,
   fetchScreeningFailureDiagnostic,
+  fetchAdjudicationAttempts,
+  fetchScreeningVerificationReadiness,
   fetchScreeningSubmission,
   fetchScreeningSubmissions,
   fetchScreeningFailureSummary,
@@ -816,6 +818,7 @@ describe('screening submission admin service', () => {
     ).resolves.toEqual({
       ...diagnostic,
       court_diagnostic: null,
+      court_completion_receipt: null,
     })
     expect(fetchMock).toHaveBeenCalledWith(
       `https://platform-api.heyditto.ai/api/v1/admin/screening-submissions/${agentId}/attempts/${attemptId}/failure-diagnostic`,
@@ -828,12 +831,55 @@ describe('screening submission admin service', () => {
     )
   })
 
+  it('reads a bounded text-free L4 cohort without filling missing success telemetry', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const item = {
+      agent_id: '90cb5697-cbc1-40f4-a27e-439a7986a054',
+      attempt_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      artifact_sha256: 'ab'.repeat(32),
+      policy_version: 13,
+      manifest_digest: 'cd'.repeat(32),
+      started_at: '2026-09-23T04:00:00Z',
+      finished_at: '2026-09-23T04:03:00Z',
+      attempt_status: 'passed',
+      adjudication_decision: 'clear',
+      review_settings_revision: 4,
+      review_settings_checksum: 'ef'.repeat(32),
+      configured_model: 'z-ai/glm-5.3-flash',
+      configured_timeout_seconds: 600,
+      configured_completion_ceiling: 2400,
+      observed_model: null,
+      observed_provider: null,
+      observed_upstream: null,
+      failure_code: null,
+      elapsed_ms: null,
+      first_tool_call_ms: null,
+      first_tool_observation: null,
+      request_count: null,
+      request_prompt_bytes: null,
+      request_wire_bytes: null,
+      request_event_count: null,
+      prompt_tokens: null,
+      completion_tokens: null,
+    }
+    const payload = { limit: 5, offset: 0, lookback_hours: 24, items: [item] }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchAdjudicationAttempts({ limit: 5, lookbackHours: 24 })).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://platform-api.heyditto.ai/api/v1/admin/screening-adjudication-attempts?limit=5&offset=0&lookback_hours=24',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
   it('passes a sanitized court diagnostic through and drops model text', async () => {
     process.env.DITTO_ADMIN_API_TOKEN = 'secret'
     const agentId = '90cb5697-cbc1-40f4-a27e-439a7986a054'
     const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const court = {
       error_class: 'ValueError',
+      failure_code: 'stream-no-tool-call',
       escalation_code: 'adjudicator-failed',
       timeout_stage: 'response',
       http_status: null,
@@ -843,6 +889,24 @@ describe('screening submission admin service', () => {
       final_tool_call_returned: true,
       model: 'z-ai/glm-5.3-flash',
       provider: 'openrouter',
+      request_count: 1,
+      request_attempts: [{
+        ordinal: 1,
+        started_ms: 4,
+        elapsed_ms: 38,
+        stage: 'event',
+        stream_requested: true,
+        prompt_bytes: 923,
+        http_status: 200,
+        headers_ms: 8,
+        first_byte_ms: 11,
+        last_byte_ms: 30,
+        first_event_ms: 13,
+        last_event_ms: 30,
+        event_count: 2,
+        wire_bytes: 650,
+        upstream: 'together',
+      }],
     }
     const diagnostic = {
       agent_id: agentId,
@@ -861,6 +925,10 @@ describe('screening submission admin service', () => {
       court_diagnostic: {
         ...court,
         exception: 'prompt text that must not be stored',
+        request_attempts: court.request_attempts.map((attempt) => ({
+          ...attempt,
+          prompt: 'source text that must not be stored',
+        })),
       },
     }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(diagnostic)))
@@ -873,7 +941,107 @@ describe('screening submission admin service', () => {
     ).resolves.toEqual({
       ...diagnostic,
       court_diagnostic: court,
+      court_completion_receipt: null,
     })
+  })
+
+  it('returns only typed successful L4 completion measurements', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const agentId = '90cb5697-cbc1-40f4-a27e-439a7986a054'
+    const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const receipt = {
+      elapsed_ms: 4300,
+      first_tool_call_ms: 2000,
+      first_tool_observation: 'stream_delta',
+      observed_model: 'z-ai/glm-5.3-flash',
+      gateway_provider: 'openrouter',
+      observed_upstream: 'together',
+      request_count: 1,
+      final_request_prompt_bytes: 8000,
+      final_request_wire_bytes: 700,
+      final_request_event_count: 4,
+      prompt_tokens: 200,
+      completion_tokens: 80,
+    }
+    const response = {
+      agent_id: agentId,
+      artifact_sha256: 'ab'.repeat(32),
+      agent_status: 'evaluating',
+      attempt_id: attemptId,
+      policy_version: 13,
+      attempt_status: 'passed',
+      started_at: '2026-09-23T04:00:00Z',
+      deadline: '2026-09-23T04:10:00Z',
+      finished_at: '2026-09-23T04:00:04Z',
+      reason: null,
+      reason_code: 'adjudicated-source-review-clear',
+      private_failure_detail: null,
+      private_failure_log_tail: null,
+      court_diagnostic: null,
+      court_completion_receipt: {
+        ...receipt,
+        tool_arguments: 'source text that must not leave Platform',
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(response)))
+    await expect(
+      fetchScreeningFailureDiagnostic({ agentId, attemptId }, 'reviewer@example.com'),
+    ).resolves.toEqual({
+      ...response,
+      court_completion_receipt: receipt,
+    })
+  })
+
+  it('reads exact v13 receipt absence without implying completed verification', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const agentId = '90cb5697-cbc1-40f4-a27e-439a7986a054'
+    const attemptId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const checks = Array.from({ length: 20 }, (_, index) => ({
+      check_code: `check_${index}`,
+      record_status: 'not_recorded',
+      receipt_count: 0,
+    }))
+    const payload = {
+      agent_id: agentId,
+      artifact_sha256: 'ab'.repeat(32),
+      attempt_id: attemptId,
+      policy_version: 13,
+      attempt_status: 'quarantined',
+      verified_image_sha256s: [],
+      verified_image_count: 0,
+      verified_images_truncated: false,
+      checks,
+      private_metamorphic_applicability: 'not_recorded',
+      receipts: [],
+      receipt_count: 0,
+      receipts_truncated: false,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      fetchScreeningVerificationReadiness({ agentId, attemptId }, 'peyton@omniaura.ai'),
+    ).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/screening-submissions/${agentId}/attempts/${attemptId}/verification-readiness`),
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'X-Admin-Actor': 'peyton@omniaura.ai' }),
+      }),
+    )
+    const withPrivatePackage = {
+      ...payload,
+      private_package: {
+        registration_status: 'registered_unverified',
+        prerequisites: [
+          { code: 'target_artifact_commitment', status: 'mechanically_verified' },
+          { code: 'protected_blueprint_bank', status: 'not_observed' },
+        ],
+        clear_authorized: false,
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(withPrivatePackage)))
+    await expect(
+      fetchScreeningVerificationReadiness({ agentId, attemptId }, 'peyton@omniaura.ai'),
+    ).resolves.toEqual(withPrivatePackage)
   })
 
   it('passes the payment coldkey through on a submission read', async () => {

@@ -38,10 +38,10 @@ import copy
 import json
 import logging
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import httpx
 from pydantic import ValidationError
@@ -58,6 +58,8 @@ from ditto_screening_protocol import (
     SCREENING_FLOOR_POLICY_VERSION,
     SCREENING_POLICY_VERSION,
     AdjudicationClearClause,
+    AdjudicationCompletionReceipt,
+    AdjudicationRequestAttemptDiagnostic,
     AdjudicationRunDiagnostic,
     SourceReviewAdjudication,
     SourceReviewCitation,
@@ -71,15 +73,21 @@ _ERROR_CLASS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}$")
 _PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
-def _clear_upstream() -> None:
-    """Forget the previous request's upstream before issuing the next one.
+def _clear_request_trace() -> None:
+    """Forget the previous request's metadata before issuing the next one.
 
     A failure with no readable response must leave the upstream unknown rather
     than inherit the last one that answered.
     """
     trace = _run_trace.get()
     if trace is not None:
+        trace.prompt_tokens = None
+        trace.completion_tokens = None
+        trace.final_tool_call_returned = None
+        trace.completion_ceiling_reached = None
+        trace.http_status = None
         trace.upstream = None
+        trace.observed_model = None
 
 
 def _observe_upstream(payload: object) -> None:
@@ -89,7 +97,7 @@ def _observe_upstream(payload: object) -> None:
     relayed inside an HTTP 200 is exactly the failure worth attributing to an
     upstream.
 
-    The trace spans a whole court run, so :func:`_clear_upstream` empties this
+    The trace spans a whole court run, so :func:`_clear_request_trace` empties this
     at the start of every request and retry. Without that, a step that answered
     from one upstream would still be named when a later step times out with no
     response at all, which blames an upstream for a call it never served.
@@ -97,9 +105,15 @@ def _observe_upstream(payload: object) -> None:
     trace = _run_trace.get()
     if trace is None or not isinstance(payload, dict):
         return
+    response_model = payload.get("model")
+    if isinstance(response_model, str) and _MODEL_RE.fullmatch(response_model):
+        trace.observed_model = response_model
     upstream = _upstream_slug(payload.get("provider"))
     if upstream is not None:
         trace.upstream = upstream
+        attempt = _current_request_trace()
+        if attempt is not None:
+            attempt.upstream = upstream
 
 
 def _upstream_slug(value: object) -> str | None:
@@ -119,6 +133,90 @@ def _upstream_slug(value: object) -> str | None:
 
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
 _RunStage = Literal["completion", "lease", "step-budget", "unavailable", "response"]
+_RequestStage = Literal["request", "headers", "bytes", "event", "complete"]
+
+
+def _elapsed_ms(started: float) -> int:
+    elapsed = int((asyncio.get_running_loop().time() - started) * 1000)
+    return min(max(elapsed, 0), 3_600_000)
+
+
+@dataclass
+class _RequestTrace:
+    """Only counts, durations, status and normalized upstream; never model data."""
+
+    ordinal: int
+    started: float
+    started_ms: int
+    stream_requested: bool
+    prompt_bytes: int
+    stage: _RequestStage = "request"
+    elapsed_ms: int = 0
+    http_status: int | None = None
+    headers_ms: int | None = None
+    first_byte_ms: int | None = None
+    last_byte_ms: int | None = None
+    first_event_ms: int | None = None
+    last_event_ms: int | None = None
+    event_count: int = 0
+    wire_bytes: int = 0
+    upstream: str | None = None
+    first_tool_delta_ms: int | None = None
+    first_tool_observation: Literal["stream_delta", "complete_body"] | None = None
+
+    def observe_bytes(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        now = _elapsed_ms(self.started)
+        if self.first_byte_ms is None:
+            self.first_byte_ms = now
+        self.last_byte_ms = now
+        self.wire_bytes = min(self.wire_bytes + len(chunk), 20_000_000)
+        if self.stage in {"request", "headers", "bytes"}:
+            self.stage = "bytes"
+
+    def observe_event(self) -> None:
+        now = _elapsed_ms(self.started)
+        if self.first_event_ms is None:
+            self.first_event_ms = now
+        self.last_event_ms = now
+        self.event_count = min(self.event_count + 1, 100_000)
+        self.stage = "event"
+
+    def diagnostic(self) -> AdjudicationRequestAttemptDiagnostic:
+        return AdjudicationRequestAttemptDiagnostic(
+            ordinal=self.ordinal,
+            started_ms=self.started_ms,
+            elapsed_ms=self.elapsed_ms,
+            stage=self.stage,
+            stream_requested=self.stream_requested,
+            prompt_bytes=self.prompt_bytes,
+            http_status=self.http_status,
+            headers_ms=self.headers_ms,
+            first_byte_ms=self.first_byte_ms,
+            last_byte_ms=self.last_byte_ms,
+            first_event_ms=self.first_event_ms,
+            last_event_ms=self.last_event_ms,
+            event_count=self.event_count,
+            wire_bytes=self.wire_bytes,
+            upstream=self.upstream,
+        )
+
+
+class _ObservedByteStream(httpx.AsyncByteStream):
+    """Observe raw response chunks without changing SSE parsing or payloads."""
+
+    def __init__(self, source: httpx.AsyncByteStream, attempt: _RequestTrace) -> None:
+        self._source = source
+        self._attempt = attempt
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._source:
+            self._attempt.observe_bytes(chunk)
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._source.aclose()
 
 
 @dataclass
@@ -129,14 +227,34 @@ class _RunTrace:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     final_tool_call_returned: bool | None = None
+    completion_ceiling_reached: bool | None = None
     http_status: int | None = None
     upstream: str | None = None
+    observed_model: str | None = None
+    request_count: int = 0
+    request_attempts: list[_RequestTrace] = field(default_factory=list)
 
 
 _run_trace: contextvars.ContextVar[_RunTrace | None] = contextvars.ContextVar(
     "adjudicator_run_trace",
     default=None,
 )
+
+
+def _current_request_trace() -> _RequestTrace | None:
+    trace = _run_trace.get()
+    return trace.request_attempts[-1] if trace and trace.request_attempts else None
+
+
+def _observe_first_tool_call(
+    source: Literal["stream_delta", "complete_body"],
+) -> None:
+    """Mark the first tool-call signal on this request without retaining data."""
+    request = _current_request_trace()
+    if request is not None and request.first_tool_delta_ms is None:
+        request.first_tool_delta_ms = _elapsed_ms(request.started)
+        request.first_tool_observation = source
+
 
 _SUPPORTED_POLICY_VERSIONS = tuple(
     range(SCREENING_FLOOR_POLICY_VERSION, SCREENING_POLICY_VERSION + 1)
@@ -152,7 +270,7 @@ def adjudicator_prompt_revision(policy_version: int) -> str:
             f"(implements {list(_SUPPORTED_POLICY_VERSIONS)})"
         )
     if policy_version == 13:
-        return "adjudicator-v6-policy-v13"
+        return "adjudicator-v7-policy-v13"
     return f"adjudicator-v4-policy-v{policy_version}"
 
 
@@ -176,11 +294,43 @@ _MAX_COMPLETION_TOKENS = 6_000
 _MAX_COMPLETION_REQUEST_SECONDS = 180.0
 _MAX_COMPLETION_REQUEST_ATTEMPTS = 2
 _MAX_COMPLETION_IDLE_SECONDS = 75.0
+# A court turn has no useful free-form output: if a healthy SSE
+# connection has not started any tool call after two minutes, stop that request
+# while the lease still has room for the existing single retry. This is below
+# the 180-second request wall but deliberately leaves ample time for reasoning.
+# It never turns partial text into a verdict. Successful first-tool timings are
+# not yet exposed by Backroom, so keep this conservative until calibrated.
+_MAX_COMPLETION_FIRST_TOOL_SECONDS = 120.0
 _MAX_COMPLETION_RESPONSE_BYTES = 512_000
+# SSE repeats JSON framing for every token, and a 16k-token completion can
+# exceed 2 MB of wire data even when its final tool call is small. This is a
+# streaming transport ceiling, not a license to retain more model arguments:
+# the separate 512 KB tool-data bound still applies.
+_MAX_COMPLETION_STREAM_BYTES = 8_000_000
+
+
+class CompletionWireTooLarge(ValueError):
+    """The gateway streamed too much framing/content for one court turn."""
+
+
+class CompletionToolTooLarge(ValueError):
+    """The actual model tool-call data exceeded the strict verdict bound."""
 
 
 class IncompleteStreamError(ValueError):
     """A transport ended before the gateway committed a complete response."""
+
+
+class ProviderStreamError(ValueError):
+    """A completed SSE frame explicitly reported a provider failure."""
+
+
+class ProviderBodyError(ValueError):
+    """A complete JSON body reported a retryable upstream failure."""
+
+
+class NoToolProgressError(TimeoutError):
+    """An active SSE response made no tool-call progress within its budget."""
 
 
 # Bounded by the repository tools themselves; this only caps how many of
@@ -194,6 +344,8 @@ _MAX_CITATIONS = 8
 # any note was recorded: L4 may inspect the archive then, because there is no
 # ledger for it to decide.
 _MAX_PRELOADED_LEDGER_LOCATIONS = 16
+_MAX_PRELOADED_CONFIG_GATES = 4
+_CONFIG_GATE_RE = re.compile(r"\bconfig\.([A-Z][A-Z0-9_]*)\b")
 _BUDGET_TERMINATED_REVIEW_CODES = frozenset(
     {
         "source-review-lease-budget-exhausted",
@@ -424,10 +576,50 @@ boundaries, inputs, outputs, and downstream authority. A null compact score
 field does not prove artifact-bound screening evidence is absent. A missing
 predefined verification artifact or failed platform review
 is not a proven integrity breach. If mandatory verification is incomplete, do
-not manufacture a clear or a violation; withhold submit_adjudication so the host
-retains an escalate processing state for the operator's eventual CLEAR/REJECT
-decision.
+not manufacture a clear or a violation; call request_operator_review so the
+host retains an escalate processing state for the operator's eventual
+CLEAR/REJECT decision.
 """.strip()
+
+
+def _policy_v13_base_prompt() -> str:
+    """Remove legacy directives that contradict v13's incomplete-review hold."""
+    replacements = (
+        (
+            "Your output is FINAL: a clear admits this\n"
+            "submission to scoring, a reject is terminal for it.",
+            "A clear admits this submission to scoring, a reject is terminal for it, "
+            "and request_operator_review keeps the submission held.",
+        ),
+        (
+            "When the evidence is genuinely mixed you must still choose, and the safe\n"
+            "choice is clear: a wrong reject bans an honest miner, while a "
+            "wrong clear\n"
+            "leaves a submission that the next review, the behavioural "
+            "oracle, and the\n"
+            "scored path all still get to catch. Reject only what you can prove "
+            "from lines\n"
+            "you read.",
+            "When the evidence is genuinely mixed or mandatory verification is "
+            "incomplete, call request_operator_review. Reject only what you can prove "
+            "from lines you read; clear only after the required verification "
+            "is complete.",
+        ),
+        (
+            "4. Call submit_adjudication exactly once.",
+            "4. Call submit_adjudication for a complete decision, or "
+            "request_operator_review when verification is incomplete.",
+        ),
+    )
+    prompt = _SYSTEM_PROMPT
+    for old, new in replacements:
+        if old not in prompt:
+            raise AssertionError("v13 adjudicator base prompt drifted")
+        prompt = prompt.replace(old, new, 1)
+    return prompt
+
+
+_POLICY_V13_BASE_PROMPT = _policy_v13_base_prompt()
 
 
 def _system_prompt(policy_version: int) -> str:
@@ -446,7 +638,7 @@ def _system_prompt(policy_version: int) -> str:
         )
     if policy_version == 13:
         return (
-            f"{_SYSTEM_PROMPT}\n\n{_POLICY_V11_PROMPT_TAIL}\n\n"
+            f"{_POLICY_V13_BASE_PROMPT}\n\n{_POLICY_V11_PROMPT_TAIL}\n\n"
             f"{_POLICY_V12_PROMPT_TAIL}\n\n{_POLICY_V13_PROMPT_TAIL}\n\n"
             f"{DECISION_PATH_GUIDANCE}"
         )
@@ -535,9 +727,24 @@ _TOOLS: list[dict[str, object]] = [
     },
 ]
 
-# ``submit_adjudication`` is the final (and only decision-only) tool above.
-# Keep the selected schema object rather than retyping a second contract.
+# Keep the selected verdict schema rather than retyping a second contract.
 _DECISION_ONLY_TOOLS = [_TOOLS[-1]]
+
+_OPERATOR_REVIEW_TOOL: dict[str, object] = {
+    "type": "function",
+    "function": {
+        "name": "request_operator_review",
+        "description": (
+            "Keep an incomplete or mixed policy-v13 review held for an operator."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"reason": {"type": "string", "maxLength": 8000}},
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def _adjudicator_tools_for_policy(
@@ -546,7 +753,14 @@ def _adjudicator_tools_for_policy(
     """Return a court schema restricted to the exact policy generation."""
 
     tools = copy.deepcopy(_DECISION_ONLY_TOOLS if decision_only else _TOOLS)
-    submit = tools[-1]["function"]
+    if policy_version >= 13:
+        tools.append(copy.deepcopy(_OPERATOR_REVIEW_TOOL))
+    submit = None
+    for tool in tools:
+        function = tool.get("function")
+        if isinstance(function, dict) and function.get("name") == "submit_adjudication":
+            submit = function
+            break
     assert isinstance(submit, dict)
     parameters = submit["parameters"]
     assert isinstance(parameters, dict)
@@ -608,6 +822,51 @@ def _failure_stage(error: BaseException) -> _RunStage:
     return "response"
 
 
+def _failure_code(error: BaseException) -> str:
+    """Classify only known local failure shapes; never persist exception text."""
+    if isinstance(error, (CompletionWireTooLarge, CompletionToolTooLarge)):
+        # Keep the old failure_code wire value so an older Platform deployment
+        # can still validate this observation during a rolling release.
+        return "response-too-large"
+    if isinstance(error, ProviderStreamError):
+        return "provider-stream-error"
+    if isinstance(error, ProviderBodyError):
+        return "provider-body-error"
+    if isinstance(error, IncompleteStreamError):
+        return "stream-incomplete"
+    if isinstance(error, NoToolProgressError):
+        return "stream-no-tool-progress"
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "completion-timeout"
+    if isinstance(error, httpx.HTTPStatusError):
+        return "provider-http-error"
+    if isinstance(error, (httpx.HTTPError, OSError)):
+        return "transport-error"
+    if isinstance(error, json.JSONDecodeError):
+        return "response-json-invalid"
+    if isinstance(error, ValueError):
+        message = str(error)
+        if message == "adjudicator model body was unusable":
+            return "provider-body-error"
+        if message == "adjudicator stream ended without a tool call":
+            return "stream-no-tool-call"
+        if message.startswith("adjudicator stream "):
+            return "stream-invalid"
+        if message.startswith("adjudicator exceeded lease budget"):
+            return "lease-budget"
+        if message.startswith("adjudicator exceeded step budget"):
+            return "step-budget"
+        if message.startswith("adjudicator decision ") or message.startswith(
+            "adjudicator reason "
+        ):
+            return "verdict-invalid"
+        if message.startswith("adjudicator arguments ") or message.startswith(
+            ("adjudicator tool call ", "adjudicator function call ")
+        ):
+            return "tool-call-invalid"
+    return "response-invalid"
+
+
 def _observe_completion(payload: object) -> None:
     """Record token counts and whether a final tool call was present.
 
@@ -635,6 +894,7 @@ def _observe_completion(payload: object) -> None:
     if not isinstance(calls, list) or not calls:
         trace.final_tool_call_returned = False
         return
+    _observe_first_tool_call("complete_body")
     trace.final_tool_call_returned = any(
         isinstance(call, dict)
         and isinstance(call.get("function"), dict)
@@ -713,7 +973,7 @@ def _finding_brief(finding: Mapping[str, object] | None) -> str:
 def _preload_ledger_evidence(
     repository: TarSourceRepository,
     notes: Sequence[Mapping[str, object]],
-) -> tuple[str, set[tuple[str, int]]]:
+) -> tuple[str, set[tuple[str, int]], bool]:
     """Return bounded source excerpts for the L4 decision-only path.
 
     L1/L2/L3's ledger gives exact leads. Asking L4 to rediscover an archive
@@ -726,6 +986,8 @@ def _preload_ledger_evidence(
     outputs: list[str] = []
     read_locations: set[tuple[str, int]] = set()
     requested: set[tuple[str, int]] = set()
+    config_gates: set[tuple[str, str]] = set()
+    incomplete_image_context = False
     for note in notes:
         path = note.get("path")
         line = note.get("line")
@@ -758,7 +1020,87 @@ def _preload_ledger_evidence(
         _record_reads(output, read_locations)
         if read_locations:
             outputs.append(output)
-    return "\n".join(outputs), read_locations
+            # A cited branch is not evidence that it runs. Include nearby
+            # defaults for simple config.FLAG gates in the one-turn court;
+            # otherwise the court sees the branch but cannot refute its
+            # reachability without discovery tools.
+            if note.get("kind") == "concern":
+                for symbol in _CONFIG_GATE_RE.findall(output):
+                    if len(config_gates) < _MAX_PRELOADED_CONFIG_GATES:
+                        config_gates.add((location[0], symbol))
+    if config_gates:
+        for cited_path, symbol in sorted(config_gates):
+            parent = cited_path.rpartition("/")[0]
+            candidates = [f"{parent}/config.py" if parent else "config.py"]
+            if "config.py" not in candidates:
+                candidates.append("config.py")
+            for config_path in candidates:
+                source = repository.member_text(config_path)
+                if source is None:
+                    continue
+                definition = next(
+                    (
+                        index
+                        for index, source_line in enumerate(source.splitlines(), 1)
+                        if re.match(rf"^\s*{re.escape(symbol)}\s*=", source_line)
+                    ),
+                    None,
+                )
+                if definition is None:
+                    continue
+                output = _execute_tool(
+                    repository,
+                    "read_file",
+                    {
+                        "path": config_path,
+                        "start_line": max(1, definition - 2),
+                        "end_line": definition + 2,
+                    },
+                )
+                _record_reads(output, read_locations)
+                outputs.append(output)
+                break
+        if repository.has_member("Dockerfile"):
+            # A later ENV, ARG, CMD, or ENTRYPOINT can enable a branch whose
+            # default is off. Do not let a one-turn court decide from a
+            # truncated image definition; its tools cannot fetch the tail.
+            dockerfile_lines = repository.line_count("Dockerfile")
+            incomplete_image_context = dockerfile_lines is None or dockerfile_lines > 40
+            output = _execute_tool(
+                repository,
+                "read_file",
+                {"path": "Dockerfile", "start_line": 1, "end_line": 40},
+            )
+            _record_reads(output, read_locations)
+            outputs.append(output)
+    return "\n".join(outputs), read_locations, incomplete_image_context
+
+
+def _has_unreviewed_lead(
+    notes: Sequence[Mapping[str, object]],
+    finding: Mapping[str, object] | None,
+    read_locations: set[tuple[str, int]],
+) -> bool:
+    """A decision-only court cannot clear a concern it was never shown."""
+    leads: list[Mapping[str, object]] = [
+        note for note in notes if note.get("kind") == "concern"
+    ]
+    if isinstance(finding, Mapping):
+        evidence = finding.get("evidence")
+        if isinstance(evidence, list):
+            leads.extend(item for item in evidence if isinstance(item, Mapping))
+    for lead in leads:
+        path = lead.get("path")
+        line = lead.get("line")
+        if (
+            not isinstance(path, str)
+            or not path
+            or not isinstance(line, int)
+            or isinstance(line, bool)
+            or (path.removeprefix("./"), line) not in read_locations
+        ):
+            return True
+    return False
 
 
 def _compacted_adjudicator_messages(
@@ -851,6 +1193,7 @@ class SourceReviewAdjudicator:
         decision_only = bool(notes) and (ledger_final or error_code is not None)
         preloaded_evidence = ""
         preloaded_reads: set[tuple[str, int]] = set()
+        unreviewed_concerns = False
         if not notes and error_code in _BUDGET_TERMINATED_REVIEW_CODES:
             # An upstream review consumed its discovery budget without
             # recording evidence. There is nothing for the court to decide;
@@ -864,9 +1207,25 @@ class SourceReviewAdjudicator:
                 policy_version=policy_version,
             )
         if decision_only:
-            preloaded_evidence, preloaded_reads = _preload_ledger_evidence(
-                repository, notes
-            )
+            (
+                preloaded_evidence,
+                preloaded_reads,
+                incomplete_image_context,
+            ) = _preload_ledger_evidence(repository, notes)
+            if incomplete_image_context:
+                return _escalate(
+                    "adjudicator-evidence-incomplete",
+                    "Automated adjudication could not inspect the full image "
+                    "configuration for a feature-gated concern; held for "
+                    "operator review",
+                    model=self._model,
+                    notes=note_count,
+                    policy_version=policy_version,
+                )
+            # The ledger can retain 48 notes but the one-turn court preloads
+            # only 16 distinct locations. A later concern must not disappear
+            # behind that bound while an earlier excerpt supports a CLEAR.
+            unreviewed_concerns = _has_unreviewed_lead(notes, finding, preloaded_reads)
             if not preloaded_evidence:
                 # The upstream layers retained a ledger but no usable source
                 # evidence. There is nothing for a court to decide; do not
@@ -903,14 +1262,16 @@ class SourceReviewAdjudicator:
                 httpx.HTTPError,
                 json.JSONDecodeError,
             ) as error:
-                # Class and stage only. Exception text can echo a prompt or
-                # provider body, so it stays out of the persisted diagnostic.
+                # Fixed class, stage, and subtype only. Exception text can
+                # echo a prompt or provider body, so never persist it.
                 logger.warning(
-                    "adjudication failed model=%s upstream=%s cause=%s stage=%s",
+                    "adjudication failed model=%s upstream=%s cause=%s "
+                    "stage=%s code=%s",
                     self._model,
                     trace.upstream,
                     type(error).__name__,
                     _failure_stage(error),
+                    _failure_code(error),
                 )
                 result = _escalate(
                     "adjudicator-failed",
@@ -927,15 +1288,57 @@ class SourceReviewAdjudicator:
                         escalation_code="adjudicator-failed",
                     ),
                 )
-            return self._certify(
+            result = self._certify(
                 verdict,
                 repository=repository,
                 read_locations=read_locations,
                 notes=note_count,
                 policy_version=policy_version,
+                unreviewed_concerns=unreviewed_concerns,
+            )
+            receipt = self._completion_receipt(trace)
+            return (
+                result.model_copy(update={"completion_receipt": receipt})
+                if receipt is not None
+                else result
             )
         finally:
             _run_trace.reset(token)
+
+    def _completion_receipt(
+        self, trace: _RunTrace
+    ) -> AdjudicationCompletionReceipt | None:
+        """Build bounded, text-free telemetry for a completed court decision."""
+        request = trace.request_attempts[-1] if trace.request_attempts else None
+        first_tool_ms = (
+            min(request.started_ms + request.first_tool_delta_ms, 3_600_000)
+            if request is not None and request.first_tool_delta_ms is not None
+            else None
+        )
+        try:
+            return AdjudicationCompletionReceipt(
+                elapsed_ms=min(_elapsed_ms(trace.started), 3_600_000),
+                first_tool_call_ms=first_tool_ms,
+                first_tool_observation=(
+                    request.first_tool_observation if request else None
+                ),
+                observed_model=trace.observed_model,
+                gateway_provider=(
+                    self._inference_provider
+                    if _PROVIDER_RE.fullmatch(self._inference_provider)
+                    else None
+                ),
+                observed_upstream=trace.upstream,
+                request_count=min(trace.request_count, 1_024),
+                final_request_prompt_bytes=request.prompt_bytes if request else None,
+                final_request_wire_bytes=request.wire_bytes if request else None,
+                final_request_event_count=request.event_count if request else None,
+                prompt_tokens=trace.prompt_tokens,
+                completion_tokens=trace.completion_tokens,
+            )
+        except ValidationError:
+            logger.warning("adjudication completion telemetry was not attachable")
+            return None
 
     def _with_diagnostic(
         self,
@@ -976,6 +1379,7 @@ class SourceReviewAdjudicator:
         try:
             return AdjudicationRunDiagnostic(
                 error_class=error_class,
+                failure_code=_failure_code(error),
                 escalation_code=escalation_code,
                 timeout_stage=_failure_stage(error),
                 http_status=http_status,
@@ -983,9 +1387,21 @@ class SourceReviewAdjudicator:
                 prompt_tokens=trace.prompt_tokens,
                 completion_tokens=trace.completion_tokens,
                 final_tool_call_returned=trace.final_tool_call_returned,
+                completion_ceiling_reached=trace.completion_ceiling_reached,
                 model=model,
                 provider=provider,
                 upstream=trace.upstream,
+                request_count=min(trace.request_count, 1_024),
+                request_attempts=[
+                    attempt.diagnostic() for attempt in trace.request_attempts[-32:]
+                ],
+                response_bound_kind=(
+                    "wire"
+                    if isinstance(error, CompletionWireTooLarge)
+                    else "tool"
+                    if isinstance(error, CompletionToolTooLarge)
+                    else None
+                ),
             )
         except ValidationError:
             logger.warning(
@@ -1003,6 +1419,7 @@ class SourceReviewAdjudicator:
         read_locations: set[tuple[str, int]],
         notes: int,
         policy_version: int,
+        unreviewed_concerns: bool = False,
     ) -> SourceReviewAdjudication:
         """Refuse any decision the host cannot verify against the archive.
 
@@ -1010,10 +1427,28 @@ class SourceReviewAdjudicator:
         decision itself is cheap to check: the citations have to exist, have to
         be code, and have to be locations this adjudicator actually opened.
         """
+        if verdict.decision == "escalate":
+            return _escalate(
+                "adjudicator-evidence-incomplete",
+                "Automated adjudication could not complete mandatory verification; "
+                "held for operator review",
+                model=self._model,
+                notes=notes,
+                policy_version=policy_version,
+            )
         if not verdict.citations:
             return _escalate(
                 "uncited-decision",
                 "Automated adjudication cited no source; held for operator review",
+                model=self._model,
+                notes=notes,
+                policy_version=policy_version,
+            )
+        if verdict.decision == "clear" and unreviewed_concerns:
+            return _escalate(
+                "adjudicator-evidence-incomplete",
+                "Automated adjudication did not receive every retained source "
+                "lead; held for operator review",
                 model=self._model,
                 notes=notes,
                 policy_version=policy_version,
@@ -1130,8 +1565,12 @@ class SourceReviewAdjudicator:
     ) -> tuple[_Verdict, set[tuple[str, int]]]:
         decision_only_instruction = (
             "\nThe host preloaded the exact source excerpts for the retained "
-            "ledger. Decide from those excerpts now. Discovery tools are disabled; "
-            "call submit_adjudication exactly once."
+            "ledger, plus bounded configuration evidence for simple feature "
+            "gates. A disabled default does not establish whether an external "
+            "runtime override exists. Decide from those excerpts now. "
+            "Discovery tools are disabled; "
+            "call submit_adjudication for a complete decision, or "
+            "request_operator_review if evidence remains incomplete."
             if decision_only
             else ""
         )
@@ -1199,10 +1638,39 @@ class SourceReviewAdjudicator:
                         }
                     )
                     continue
+                # All calls in one assistant message are chosen before any
+                # tool result is returned. A verdict in that same batch must
+                # not gain credit for a sibling read_file/search result that
+                # the model had not seen when it made the decision. Nor may a
+                # duplicate verdict silently settle by whichever came first.
+                if len(tool_calls) != 1 and (
+                    decision_only
+                    or any(
+                        isinstance(call, dict)
+                        and isinstance(call.get("function"), dict)
+                        and call["function"].get("name")
+                        in {"submit_adjudication", "request_operator_review"}
+                        for call in tool_calls
+                    )
+                ):
+                    raise ValueError(
+                        "adjudicator terminal decision must be the sole call "
+                        "in its turn"
+                    )
                 for call in tool_calls:
                     call_id, name, arguments = _tool_call(call)
                     if name == "submit_adjudication":
                         return _verdict_from(arguments), read_locations
+                    if name == "request_operator_review" and policy_version >= 13:
+                        reason = arguments.get("reason")
+                        if not isinstance(reason, str) or not reason.strip():
+                            raise ValueError(
+                                "adjudicator operator review has no reason"
+                            )
+                        return (
+                            _Verdict("escalate", reason.strip(), None, None, ()),
+                            read_locations,
+                        )
                     if decision_only:
                         raise ValueError(
                             "decision-only adjudicator requested source discovery"
@@ -1250,9 +1718,10 @@ class SourceReviewAdjudicator:
             # router returns a misleading 404.
             "max_tokens": self._max_completion_tokens,
             "provider": {
-                # Preserve the same model and strict privacy/tool contract,
-                # while allowing the router to fail over between compatible
-                # healthy providers instead of timing out behind one endpoint.
+                # Preserve the strict privacy/tool contract and allow fallback.
+                # Do not force throughput sorting: this is a required-tool
+                # request, so the router's tool-call-quality ordering matters
+                # more than raw output speed.
                 "allow_fallbacks": True,
                 "data_collection": "deny",
                 "require_parameters": True,
@@ -1263,7 +1732,23 @@ class SourceReviewAdjudicator:
             _MAX_COMPLETION_REQUEST_SECONDS,
         )
         for attempt in range(_MAX_COMPLETION_REQUEST_ATTEMPTS):
-            _clear_upstream()
+            _clear_request_trace()
+            trace = _run_trace.get()
+            request_trace = None
+            if trace is not None:
+                trace.request_count += 1
+                request_trace = _RequestTrace(
+                    ordinal=min(trace.request_count, 1_024),
+                    started=asyncio.get_running_loop().time(),
+                    started_ms=_elapsed_ms(trace.started),
+                    stream_requested=bool(request["stream"]),
+                    prompt_bytes=min(
+                        len(json.dumps(messages, ensure_ascii=False).encode("utf-8")),
+                        20_000_000,
+                    ),
+                )
+                trace.request_attempts.append(request_trace)
+                del trace.request_attempts[:-32]
             try:
                 async with asyncio.timeout(effective_timeout):
                     async with client.stream(
@@ -1279,6 +1764,12 @@ class SourceReviewAdjudicator:
                             read=min(effective_timeout, _MAX_COMPLETION_IDLE_SECONDS),
                         ),
                     ) as response:
+                        if request_trace is not None:
+                            request_trace.headers_ms = _elapsed_ms(
+                                request_trace.started
+                            )
+                            request_trace.http_status = response.status_code
+                            request_trace.stage = "headers"
                         # Older OpenAI-compatible gateways may reject SSE
                         # outright. Preserve the previously working buffered
                         # path once, without interpreting any response body as
@@ -1295,8 +1786,32 @@ class SourceReviewAdjudicator:
                             if trace is not None and 100 <= response.status_code <= 599:
                                 trace.http_status = response.status_code
                             response.raise_for_status()
-                        payload = await _completion_stream_payload(response)
-            except (TimeoutError, httpx.TransportError, IncompleteStreamError):
+                        if request_trace is not None:
+                            response.stream = _ObservedByteStream(
+                                cast(httpx.AsyncByteStream, response.stream),
+                                request_trace,
+                            )
+                        payload = await _completion_stream_payload(
+                            response,
+                            requested_max_tokens=self._max_completion_tokens,
+                            first_tool_deadline_seconds=(
+                                _MAX_COMPLETION_FIRST_TOOL_SECONDS
+                            ),
+                        )
+                        if request_trace is not None:
+                            request_trace.stage = "complete"
+                        _observe_upstream(payload)
+                        if _retryable_model_error_type(payload) is not None:
+                            raise ProviderBodyError(
+                                "adjudicator model body was unusable"
+                            )
+            except (
+                TimeoutError,
+                httpx.TransportError,
+                IncompleteStreamError,
+                ProviderStreamError,
+                ProviderBodyError,
+            ):
                 if attempt + 1 == _MAX_COMPLETION_REQUEST_ATTEMPTS:
                     raise
                 logger.warning(
@@ -1304,14 +1819,19 @@ class SourceReviewAdjudicator:
                     self._model,
                 )
                 continue
+            finally:
+                if request_trace is not None:
+                    request_trace.elapsed_ms = _elapsed_ms(request_trace.started)
             break
-        _observe_upstream(payload)
-        if _retryable_model_error_type(payload) is not None:
-            raise ValueError("adjudicator model body was unusable")
         return _assistant_message(payload)
 
 
-async def _completion_stream_payload(response: httpx.Response) -> object:
+async def _completion_stream_payload(
+    response: httpx.Response,
+    *,
+    requested_max_tokens: int | None = None,
+    first_tool_deadline_seconds: float | None = None,
+) -> object:
     """Assemble one bounded OpenAI-compatible streamed tool-call response.
 
     A few compatible gateways return a regular JSON response despite
@@ -1322,9 +1842,26 @@ async def _completion_stream_payload(response: httpx.Response) -> object:
         body = bytearray()
         async for chunk in response.aiter_bytes():
             body.extend(chunk)
-            if len(body) > _MAX_COMPLETION_RESPONSE_BYTES:
-                raise ValueError("adjudicator completion exceeded response bound")
-        return json.loads(body)
+            if len(body) > _MAX_COMPLETION_STREAM_BYTES:
+                raise CompletionWireTooLarge(
+                    "adjudicator completion exceeded response bound"
+                )
+        payload = json.loads(body)
+        if isinstance(payload, dict):
+            choices = payload.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                message = choices[0].get("message")
+                if isinstance(message, dict):
+                    buffered_calls = message.get("tool_calls")
+                    if (
+                        buffered_calls is not None
+                        and len(json.dumps(buffered_calls).encode("utf-8"))
+                        > _MAX_COMPLETION_RESPONSE_BYTES
+                    ):
+                        raise CompletionToolTooLarge(
+                            "adjudicator completion exceeded response bound"
+                        )
+        return payload
 
     calls: dict[int, dict[str, object]] = {}
     usage: object = None
@@ -1332,10 +1869,24 @@ async def _completion_stream_payload(response: httpx.Response) -> object:
     finish_reason: object = None
     data_lines: list[str] = []
     total_bytes = 0
+    retained_bytes = 0
     done = False
+    stream_started = asyncio.get_running_loop().time()
+    saw_tool_piece = False
+
+    def require_tool_progress() -> None:
+        # Check every line as well as completed data events. SSE comments and
+        # other non-data heartbeats still keep the socket read timeout alive.
+        if (
+            not saw_tool_piece
+            and first_tool_deadline_seconds is not None
+            and asyncio.get_running_loop().time() - stream_started
+            >= first_tool_deadline_seconds
+        ):
+            raise NoToolProgressError("adjudicator stream made no tool progress")
 
     def consume_event() -> bool:
-        nonlocal usage, model, finish_reason
+        nonlocal usage, model, finish_reason, retained_bytes, saw_tool_piece
         if not data_lines:
             return False
         data = "\n".join(data_lines)
@@ -1345,9 +1896,13 @@ async def _completion_stream_payload(response: httpx.Response) -> object:
         event = json.loads(data)
         if not isinstance(event, dict):
             raise ValueError("adjudicator stream event is not an object")
+        request_trace = _current_request_trace()
+        if request_trace is not None:
+            request_trace.observe_event()
         _observe_upstream(event)
+        require_tool_progress()
         if event.get("error"):
-            raise ValueError("adjudicator stream returned a provider error")
+            raise ProviderStreamError("adjudicator stream returned a provider error")
         model = event.get("model") or model
         usage = event.get("usage") or usage
         choices = event.get("choices")
@@ -1360,19 +1915,42 @@ async def _completion_stream_payload(response: httpx.Response) -> object:
         delta = choice.get("delta") or {}
         if not isinstance(delta, dict):
             raise ValueError("adjudicator stream delta is invalid")
-        for piece in delta.get("tool_calls") or []:
+        tool_pieces = delta.get("tool_calls") or []
+        for piece in tool_pieces:
             if not isinstance(piece, dict) or not isinstance(piece.get("index"), int):
                 raise ValueError("adjudicator stream tool index is invalid")
             index = piece["index"]
             if index < 0 or index >= 32:
                 raise ValueError("adjudicator stream tool index exceeded bound")
-            call = calls.setdefault(index, {"type": "function", "function": {}})
-            for key in ("id", "type"):
-                if key in piece:
-                    call[key] = piece[key]
             fragment = piece.get("function") or {}
             if not isinstance(fragment, dict):
                 raise ValueError("adjudicator stream function is invalid")
+            if any(
+                isinstance(fragment.get(key), str) and fragment[key].strip()
+                for key in ("name", "arguments")
+            ):
+                # An index or ID-only shell is not evidence that the model
+                # started a function call; keep the budget active for it.
+                saw_tool_piece = True
+                _observe_first_tool_call("stream_delta")
+            call = calls.setdefault(index, {"type": "function", "function": {}})
+            for key in ("id", "type"):
+                if key in piece:
+                    if not isinstance(piece[key], str):
+                        raise ValueError("adjudicator stream tool field is invalid")
+                    # These are replacement fields, unlike function argument
+                    # fragments below. Some compatible gateways repeat the
+                    # call ID in every delta. Bound stored tool data, not the
+                    # sum of IDs that were overwritten and discarded.
+                    previous = call.get(key)
+                    if isinstance(previous, str):
+                        retained_bytes -= len(previous.encode("utf-8"))
+                    retained_bytes += len(piece[key].encode("utf-8"))
+                    if retained_bytes > _MAX_COMPLETION_RESPONSE_BYTES:
+                        raise CompletionToolTooLarge(
+                            "adjudicator completion exceeded response bound"
+                        )
+                    call[key] = piece[key]
             function = call["function"]
             if not isinstance(function, dict):
                 raise ValueError("adjudicator stream function is invalid")
@@ -1381,13 +1959,27 @@ async def _completion_stream_payload(response: httpx.Response) -> object:
                 if value is not None:
                     if not isinstance(value, str):
                         raise ValueError("adjudicator stream function field is invalid")
+                    if key == "name" and function.get("name") == value:
+                        # Some compatible gateways repeat the full function
+                        # name in each delta rather than sending only new
+                        # characters. An exact repeat is not a name fragment
+                        # and does not add retained tool data.
+                        continue
+                    retained_bytes += len(value.encode("utf-8"))
+                    if retained_bytes > _MAX_COMPLETION_RESPONSE_BYTES:
+                        raise CompletionToolTooLarge(
+                            "adjudicator completion exceeded response bound"
+                        )
                     function[key] = str(function.get(key) or "") + value
         return False
 
     async for line in response.aiter_lines():
+        require_tool_progress()
         total_bytes += len(line.encode("utf-8")) + 1
-        if total_bytes > _MAX_COMPLETION_RESPONSE_BYTES:
-            raise ValueError("adjudicator completion exceeded response bound")
+        if total_bytes > _MAX_COMPLETION_STREAM_BYTES:
+            raise CompletionWireTooLarge(
+                "adjudicator completion exceeded response bound"
+            )
         if not line:
             if consume_event():
                 done = True
@@ -1399,6 +1991,23 @@ async def _completion_stream_payload(response: httpx.Response) -> object:
     if not done:
         raise IncompleteStreamError("adjudicator stream ended before [DONE]")
     if not calls:
+        _observe_completion(
+            {"usage": usage, "choices": [{"message": {"tool_calls": []}}]}
+        )
+        trace = _run_trace.get()
+        if trace is not None:
+            completion_tokens = (
+                _token_count(usage.get("completion_tokens"))
+                if isinstance(usage, dict)
+                else None
+            )
+            if (
+                finish_reason == "length"
+                and completion_tokens is not None
+                and requested_max_tokens is not None
+                and completion_tokens >= requested_max_tokens
+            ):
+                trace.completion_ceiling_reached = True
         raise ValueError("adjudicator stream ended without a tool call")
     return {
         "model": model,
@@ -1443,9 +2052,16 @@ def _assistant_message(payload: object) -> dict[str, object]:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise ValueError("adjudicator response has no choice")
+    finish_reason = choices[0].get("finish_reason")
+    if finish_reason is not None and finish_reason not in ("tool_calls", "stop"):
+        raise ValueError("adjudicator completion was not terminal")
     message = choices[0].get("message")
     if not isinstance(message, dict):
         raise ValueError("adjudicator response has no message")
+    if message.get("tool_calls"):
+        # Buffered gateways may include unused text next to the tool call.
+        # Do not carry that text into the next request's conversation history.
+        return {**message, "content": None}
     return message
 
 
@@ -1540,6 +2156,11 @@ def build_adjudicator(config: object) -> SourceReviewAdjudicator | None:
     mode = str(getattr(config, "adjudicator_mode", "off"))
     if mode == "off":
         return None
+    l4_completion_tokens = getattr(config, "adjudicator_max_completion_tokens", None)
+    if l4_completion_tokens is None:
+        l4_completion_tokens = getattr(
+            config, "l2_max_completion_tokens", _MAX_COMPLETION_TOKENS
+        )
     return SourceReviewAdjudicator(
         api_key_file=getattr(config, "source_review_api_key_file", None),
         base_url=str(getattr(config, "source_review_base_url", "")),
@@ -1549,11 +2170,7 @@ def build_adjudicator(config: object) -> SourceReviewAdjudicator | None:
         model=str(getattr(config, "adjudicator_model", _DEFAULT_MODEL)),
         timeout_seconds=float(getattr(config, "adjudicator_timeout_seconds", 600.0)),
         max_steps=int(getattr(config, "adjudicator_max_steps", _MAX_STEPS)),
-        # Review settings expose a single, audited completion ceiling for the
-        # paid deep-review path.  The court used to ignore it and silently
-        # retain its 6k constructor default, even when the canary explicitly
-        # granted 16k.  L4 is a consumer of that same bounded budget.
-        max_completion_tokens=int(
-            getattr(config, "l2_max_completion_tokens", _MAX_COMPLETION_TOKENS)
-        ),
+        # Existing revisions inherit L2's cap. An explicit operator revision
+        # may bound L4 separately without changing L2's reasoning budget.
+        max_completion_tokens=int(cast(int | str, l4_completion_tokens)),
     )
