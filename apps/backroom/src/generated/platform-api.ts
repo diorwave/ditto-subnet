@@ -1293,6 +1293,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/inference-failure-taxonomy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Inference Failure Taxonomy
+         * @description Recent chat/embedding outcomes by model, gateway, route, and error code.
+         *
+         *     ``/admin/inference-runtime-metrics`` already reports failures per lane per
+         *     window; this splits the same bounded windows by the dimensions an upstream
+         *     rate-limit burst actually moves. Counts and identifiers only.
+         */
+        get: operations["get_inference_failure_taxonomy_api_v1_admin_inference_failure_taxonomy_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/inference-routes": {
         parameters: {
             query?: never;
@@ -19214,6 +19238,104 @@ export interface components {
             /** Token Budget */
             token_budget?: number | null;
         };
+        /**
+         * InferenceFailureGroup
+         * @description One (window, lane, model, gateway, route, error code) bucket.
+         */
+        InferenceFailureGroup: {
+            /** Calls */
+            calls: number;
+            /** Canceled */
+            canceled: number;
+            /** Completed */
+            completed: number;
+            /** Failed */
+            failed: number;
+            /**
+             * Gateway
+             * @enum {string}
+             */
+            gateway: "openrouter" | "reliable" | "direct" | "ditto-router";
+            /** Model */
+            model: string;
+            /** Openrouter Attempts Max */
+            openrouter_attempts_max: number;
+            /**
+             * Request Kind
+             * @enum {string}
+             */
+            request_kind: "chat" | "embedding";
+            /**
+             * Route Basis
+             * @enum {string}
+             */
+            route_basis: "confirmed_selected" | "last_attempted" | "configured" | "router_internal" | "unknown" | "unrecognized";
+            /** Share Of Settled Calls */
+            share_of_settled_calls: number;
+            /** Terminal Error Code */
+            terminal_error_code: string | null;
+            /** Timed Out */
+            timed_out: number;
+            /** Upstream Http Status */
+            upstream_http_status: number | null;
+            /** Upstream Route */
+            upstream_route: string | null;
+            /** Window Seconds */
+            window_seconds: number;
+        };
+        /**
+         * InferenceFailureLaneWindow
+         * @description Lane totals for one window, counted independently of the group cap.
+         */
+        InferenceFailureLaneWindow: {
+            /** Calls */
+            calls: number;
+            /** Canceled */
+            canceled: number;
+            /** Completed */
+            completed: number;
+            /** Failed */
+            failed: number;
+            /** Failure Share */
+            failure_share: number;
+            /** Groups Returned */
+            groups_returned: number;
+            /** Groups Total */
+            groups_total: number;
+            /** Groups Truncated */
+            groups_truncated: boolean;
+            /** In Flight */
+            in_flight: number;
+            /** Rate Limited Failures */
+            rate_limited_failures: number;
+            /**
+             * Request Kind
+             * @enum {string}
+             */
+            request_kind: "chat" | "embedding";
+            /** Settled */
+            settled: number;
+            /** Timed Out */
+            timed_out: number;
+            /** Window Seconds */
+            window_seconds: number;
+        };
+        /** InferenceFailureTaxonomy */
+        InferenceFailureTaxonomy: {
+            /** Group Limit */
+            group_limit: number;
+            /** Groups */
+            groups: components["schemas"]["InferenceFailureGroup"][];
+            /** Lanes */
+            lanes: components["schemas"]["InferenceFailureLaneWindow"][];
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Window Seconds */
+            window_seconds: number[];
+        };
         /** InferenceGrantOffer */
         InferenceGrantOffer: {
             /** Allowed Models */
@@ -34696,6 +34818,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InferenceConcurrencySettingsRevision"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_inference_failure_taxonomy_api_v1_admin_inference_failure_taxonomy_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InferenceFailureTaxonomy"];
                 };
             };
             /** @description Validation Error */

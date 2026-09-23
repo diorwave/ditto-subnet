@@ -169,6 +169,7 @@ describe('Backroom MCP tools', () => {
         'get_inference_concurrency_settings',
         'get_inference_runtime_metrics',
         'get_source_review_queue_slo',
+        'get_inference_failure_taxonomy',
         'list_inference_traces',
         'download_inference_trace',
         'peek_inference_trace',
@@ -354,7 +355,9 @@ describe('Backroom MCP tools', () => {
     // The two V13 clock tools and bounded, default-off replay control bring
     // the measured catalog just above 142 KB. The infra-retry and ordinary
     // source-review queue-age SLO reads add two bounded catalog entries.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(145_200)
+    // The hosted-inference failure taxonomy adds one no-input read tool whose
+    // one-line catalog entry is its whole payload cost.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(146_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -376,8 +379,8 @@ describe('Backroom MCP tools', () => {
     // The infra-retry read summary lands at 25,990, so the bound moves to 26_200.
     expect(descriptions.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
       // Includes the V13 clock, independent replay, infra-retry, and ordinary
-      // source-review queue-age SLO read summaries.
-      27_000,
+      // source-review queue-age SLO and failure-taxonomy route_basis summaries.
+      27_500,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
@@ -3307,6 +3310,105 @@ describe('Backroom MCP tools', () => {
       overdue_count: null,
       p95_exceeds_threshold: null,
     })
+
+    await client.close()
+    await server.close()
+  })
+
+  it('reads the failure taxonomy and keeps an unknown route unknown', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      Response.json({
+        observed_at: '2026-09-22T18:20:30Z',
+        window_seconds: [60, 300, 900, 3600],
+        group_limit: 40,
+        lanes: [
+          {
+            window_seconds: 300,
+            request_kind: 'chat',
+            calls: 903,
+            settled: 903,
+            completed: 694,
+            failed: 209,
+            canceled: 0,
+            in_flight: 0,
+            timed_out: 0,
+            rate_limited_failures: 209,
+            failure_share: 0.2315,
+            groups_total: 3,
+            groups_returned: 3,
+            groups_truncated: false,
+          },
+        ],
+        groups: [
+          {
+            window_seconds: 300,
+            request_kind: 'chat',
+            model: 'openai/gpt-oss-20b',
+            gateway: 'openrouter',
+            upstream_route: 'Groq',
+            route_basis: 'last_attempted',
+            terminal_error_code: 'upstream_http_429',
+            upstream_http_status: 429,
+            calls: 180,
+            completed: 0,
+            failed: 180,
+            canceled: 0,
+            timed_out: 0,
+            openrouter_attempts_max: 1,
+            share_of_settled_calls: 0.1993,
+          },
+          {
+            window_seconds: 300,
+            request_kind: 'chat',
+            model: 'openai/gpt-oss-20b',
+            gateway: 'openrouter',
+            upstream_route: null,
+            route_basis: 'unknown',
+            terminal_error_code: 'upstream_http_429',
+            upstream_http_status: 429,
+            calls: 29,
+            completed: 0,
+            failed: 29,
+            canceled: 0,
+            timed_out: 0,
+            openrouter_attempts_max: 1,
+            share_of_settled_calls: 0.0321,
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+
+    const response = await client.callTool({
+      name: 'get_inference_failure_taxonomy',
+      arguments: {},
+    })
+
+    expect(response.isError).not.toBe(true)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'https://platform-api.heyditto.ai/api/v1/admin/inference-failure-taxonomy',
+    )
+    const taxonomy = readJsonResult(response) as {
+      lanes: { rate_limited_failures: number }[]
+      groups: { upstream_route: string | null; route_basis: string }[]
+    }
+    expect(taxonomy.lanes[0]).toMatchObject({
+      failed: 209,
+      rate_limited_failures: 209,
+      failure_share: 0.2315,
+    })
+    // The attributable half names its route; the rest stays explicitly unknown
+    // rather than borrowing the route of the calls that did report one.
+    expect(taxonomy.groups.map((group) => group.route_basis)).toEqual([
+      'last_attempted',
+      'unknown',
+    ])
+    expect(taxonomy.groups[1]?.upstream_route).toBeNull()
+    expect(
+      taxonomy.groups.some((group) => group.route_basis === 'confirmed_selected'),
+    ).toBe(false)
 
     await client.close()
     await server.close()

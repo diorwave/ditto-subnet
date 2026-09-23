@@ -227,6 +227,7 @@ import {
   parseContinualRetestSettingsControl,
   setContinualRetestSettingsInputSchema,
   inferenceConcurrencySettingsControlSchema,
+  inferenceFailureTaxonomySchema,
   inferenceRuntimeMetricsSchema,
   sourceReviewQueueSloSchema,
   queuePolicySettingsControlSchema,
@@ -1305,6 +1306,7 @@ export async function restoreScoredScreeningSnapshot(rawInput: unknown, actor: s
 
 const INFERENCE_CONCURRENCY_SETTINGS_PATH = '/api/v1/admin/inference-concurrency-settings'
 const INFERENCE_RUNTIME_METRICS_PATH = '/api/v1/admin/inference-runtime-metrics'
+const INFERENCE_FAILURE_TAXONOMY_PATH = '/api/v1/admin/inference-failure-taxonomy'
 const INFERENCE_TRACES_PATH = '/api/v1/admin/traces'
 const RUNTIME_PROFILES_PATH = '/api/v1/admin/runtime-profiles'
 
@@ -1320,6 +1322,13 @@ const SOURCE_REVIEW_QUEUE_SLO_PATH = '/api/v1/admin/source-review-queue-slo'
 export async function fetchSourceReviewQueueSlo() {
   const payload = await platformAdminRequest(SOURCE_REVIEW_QUEUE_SLO_PATH)
   return sourceReviewQueueSloSchema.parse(payload)
+}
+
+export async function fetchInferenceFailureTaxonomy() {
+  const payload = await platformAdminRequest(INFERENCE_FAILURE_TAXONOMY_PATH, {
+    timeoutMs: 30_000,
+  })
+  return inferenceFailureTaxonomySchema.parse(payload)
 }
 
 export async function fetchInferenceTraceObjects(rawInput: unknown) {

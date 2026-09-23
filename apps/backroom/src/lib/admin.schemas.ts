@@ -2299,6 +2299,76 @@ export const inferenceRuntimeMetricsSchema = z.object({
   ),
 })
 
+// Which door the call went through, derived by the platform from the lane and
+// `fallback_phase`: chat phase 0 is the OpenRouter aggregate route and phase 1
+// the reserved `reliable` route; on the embedding lane phase 0 is the direct
+// provider call and phase 1 the OpenRouter fallback. `ditto-router` is the
+// dogfood lane, which picks its own upstream and never reports it.
+const inferenceGatewaySchema = z.enum(['openrouter', 'reliable', 'direct', 'ditto-router'])
+
+// How much the ledger actually knows about `upstream_route`. ONLY
+// `confirmed_selected` means "this upstream served the call": it is the single
+// selected endpoint parsed out of router metadata on a COMPLETED chat row.
+// `last_attempted` is the last upstream a FAILED chat row was sent to, which is
+// evidence and not a route. `configured` is the relay's pinned embedding
+// provider, stamped before the call and never observed. The remaining three
+// always arrive with `upstream_route: null` -- `router_internal` (the Ditto
+// Router chose and did not say), `unknown` (the column was NULL, the usual case
+// for a failure whose provider returned no metadata), and `unrecognized` (a
+// value was present but was not a plain bounded identifier, so the platform
+// refused to render it).
+const inferenceRouteBasisSchema = z.enum([
+  'confirmed_selected',
+  'last_attempted',
+  'configured',
+  'router_internal',
+  'unknown',
+  'unrecognized',
+])
+
+export const inferenceFailureTaxonomySchema = z.object({
+  observed_at: z.string(),
+  window_seconds: z.array(z.number().int().positive()),
+  group_limit: z.number().int().positive(),
+  lanes: z.array(
+    z.object({
+      window_seconds: z.number().int().positive(),
+      request_kind: inferenceRequestKindSchema,
+      calls: z.number().int().nonnegative(),
+      settled: z.number().int().nonnegative(),
+      completed: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative(),
+      canceled: z.number().int().nonnegative(),
+      in_flight: z.number().int().nonnegative(),
+      timed_out: z.number().int().nonnegative(),
+      rate_limited_failures: z.number().int().nonnegative(),
+      failure_share: z.number().nonnegative(),
+      groups_total: z.number().int().nonnegative(),
+      groups_returned: z.number().int().nonnegative(),
+      groups_truncated: z.boolean(),
+    }),
+  ),
+  groups: z.array(
+    z.object({
+      window_seconds: z.number().int().positive(),
+      request_kind: inferenceRequestKindSchema,
+      model: z.string(),
+      gateway: inferenceGatewaySchema,
+      upstream_route: z.string().nullable(),
+      route_basis: inferenceRouteBasisSchema,
+      terminal_error_code: z.string().nullable(),
+      upstream_http_status: z.number().int().nullable(),
+      calls: z.number().int().nonnegative(),
+      completed: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative(),
+      canceled: z.number().int().nonnegative(),
+      timed_out: z.number().int().nonnegative(),
+      openrouter_attempts_max: z.number().int().nonnegative(),
+      share_of_settled_calls: z.number().nonnegative(),
+    }),
+  ),
+})
+
 export const runtimeProfileCaptureInputSchema = z
   .object({
     target: runtimeProfileTargetSchema,
