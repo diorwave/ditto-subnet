@@ -1,7 +1,7 @@
 """Append-only operator grants that resume missing v13 mandatory verification.
 
 Revision ID: 7b1c4e92da06
-Revises: 7b62d9c083f1
+Revises: 7f5e3a91bc42
 Create Date: 2026-09-23
 
 Four policy-v13 holds are blocked by automated court failures that establish
@@ -23,7 +23,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision: str = "7b1c4e92da06"
-down_revision: str | Sequence[str] | None = "7b62d9c083f1"
+down_revision: str | Sequence[str] | None = "7f5e3a91bc42"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
