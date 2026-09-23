@@ -1024,6 +1024,93 @@ def test_decisive_preflight_still_flags_targeted_wallet_reads() -> None:
     assert "data_exfiltration" in {item["category"] for item in findings}
 
 
+def test_decisive_preflight_allows_injected_endpoint_and_timeout_config() -> None:
+    """Endpoint and timeout configuration is not cross-user access.
+
+    Reproduces the #2099 hold class (observed on Sky v1) with sanitized,
+    representative configuration: no miner source is reproduced here. Two
+    ordinary shapes combined into a 100%-confidence pre-build quarantine --
+    `/host` inside the `http://host.docker.internal` authority satisfied the
+    filesystem-path role, and a declared `read_timeout` field satisfied the
+    access-effect role on a bare `\\w*` match. Neither is a read of another
+    user's data, and the hold landed before build, runtime-isolation, and tool
+    checks could run.
+    """
+    findings = find_decisive_malicious_source(
+        [
+            (
+                "src/inference/config.rs",
+                "use std::time::Duration;\n"
+                "pub struct InferenceConfig {\n"
+                "    pub base_url: String,\n"
+                "    pub read_timeout: Duration,\n"
+                "    pub write_timeout: Duration,\n"
+                "}\n"
+                "impl InferenceConfig {\n"
+                "    pub fn from_env() -> Self {\n"
+                '        let base_url = std::env::var("DITTO_INFERENCE_BASE_URL")\n'
+                "            .unwrap_or_else(|_| "
+                '"http://host.docker.internal:11434/v1".to_string());\n'
+                "        let read_timeout = Duration::from_secs(600);\n"
+                "        let write_timeout = Duration::from_secs(30);\n"
+                "        Self { base_url, read_timeout, write_timeout }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                "src/runtime.py",
+                "import os\n"
+                'BASE_URL = os.environ.get("DITTO_INFERENCE_BASE_URL",\n'
+                '                          "http://host.docker.internal:8000/v1")\n'
+                "READ_TIMEOUT_SECONDS = 600.0\n"
+                "def client():\n"
+                "    return OpenAiChatClient(base_url=BASE_URL,\n"
+                "                            read_timeout=READ_TIMEOUT_SECONDS)\n",
+            ),
+        ]
+    )
+
+    assert findings == []
+
+
+def test_decisive_preflight_still_flags_a_served_cross_user_read() -> None:
+    """A served read of another principal's files stays decisive.
+
+    The narrowing above removes a URL authority and a config field name; it
+    must not remove the shape the rule exists for. Each fixture reaches a real
+    filesystem location belonging to another user through a real read/walk
+    call, which is the S1 cross-user-access bar.
+    """
+    for path, source in (
+        (
+            "src/served/handler.rs",
+            'let other = request.query("peer_user");\n'
+            'let target = format!("/home/{}/.ditto/memory.json", other);\n'
+            "let borrowed = std::fs::read_to_string(&target)?;\n"
+            "Response::text(borrowed)\n",
+        ),
+        (
+            "src/harvest.rs",
+            'let base = "/Users/";\n'
+            "for entry in walkdir::WalkDir::new(base) {\n"
+            "    collected.push(entry?.path().to_path_buf());\n"
+            "}\n",
+        ),
+        (
+            "src/runtime.py",
+            'TARGET = "file:///home/otheruser/.ditto/memory.db"\n'
+            'blob = open(TARGET.removeprefix("file://"), "rb").read()\n',
+        ),
+        (
+            "src/escape.rs",
+            'let host_copy = "/proc/1/root/home/other/notes";\n'
+            "let body = std::fs::read(host_copy)?;\n",
+        ),
+    ):
+        findings = find_decisive_malicious_source([(path, source)])
+        assert "cross_user_access" in {item["category"] for item in findings}, path
+
+
 def test_decisive_malicious_preflight_ignores_inert_regression_material() -> None:
     findings = find_decisive_malicious_source(
         [

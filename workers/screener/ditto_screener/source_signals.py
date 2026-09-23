@@ -739,13 +739,36 @@ _STATIC_MALICIOUS_RULES = (
         "cross_user_access",
         "cross-user-host-access",
         (
+            # Cross-user access means another principal's FILESYSTEM location is
+            # reached, so the target role must be a path. The authority of a
+            # remote URL is not one: `"http://host.docker.internal:11434/v1"` is
+            # how a container reaches an injected inference endpoint, and
+            # `/host` inside `//host.docker.internal` matched this role, which
+            # held Sky v1 before any build, runtime-isolation, or tool check ran
+            # (#2099). ``_static_role_search_text`` therefore blanks remote URLs
+            # for this role. `file://` URLs stay visible: those *are* filesystem
+            # locations.
             _Role(
                 "cross-user-path",
                 _words(r"(?:/root(?:/|\b)|/home/|/Users/|/proc/1/root|/host(?:/|\b))"),
             ),
+            # An access EFFECT is an operation, not any identifier that begins
+            # with one of these verbs. A bare `\w*` match made
+            # `pub read_timeout: Duration` -- a declared timeout field, with no
+            # call at all -- the second half of the same false hold. So require
+            # call or macro syntax, which is exactly the bar
+            # `source_causality._READ` already applies to PROVE a cross-user
+            # access sink: the pre-build lead can no longer be raised in a shape
+            # the causal engine could never confirm. `*_timeout` / `*_deadline`
+            # is excluded even in call position, because the builder method
+            # `client.read_timeout(..)` configures a deadline rather than
+            # reading anyone's data.
             _Role(
                 "access-effect",
-                _words(r"\b(?:read|open|scan|walk|glob|copy|write|remove|upload)\w*\b"),
+                _words(
+                    r"\b(?:read|open|scan|walk|glob|copy|write|remove|upload)"
+                    r"(?!\w*(?:timeout|deadline)s?\b)\w*(?:\s*::\s*\w+)*\s*[!(]"
+                ),
             ),
         ),
     ),
@@ -2020,6 +2043,23 @@ def _aggregate_fingerprint(
     return [_fingerprint_finding(fingerprint, locations)]
 
 
+# Terminates on quotes, whitespace, and the bracket/separator characters that
+# end a URL literal in source, so a real path on the same line stays visible.
+_REMOTE_URL = re.compile(
+    r"(?<![\w.])(?!file://)[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"`,;)\]}>]*"
+)
+
+
+def mask_remote_urls(line: str) -> str:
+    """Blank `scheme://...` URLs, preserving layout, except `file://` URLs.
+
+    A remote URL's authority and path describe an endpoint, not a filesystem
+    location on this host, so no filesystem-path role may be satisfied by one.
+    `file://` is exempt because a file URL genuinely names a local path.
+    """
+    return _REMOTE_URL.sub(lambda match: " " * len(match.group(0)), line)
+
+
 def _static_role_search_text(
     role_name: str, source_line: str, executable_line: str
 ) -> str:
@@ -2030,7 +2070,13 @@ def _static_role_search_text(
     prompt or response literal are inert, however, and must not turn a static
     lead into a 100%-confidence pre-build quarantine. Preserve command payloads
     only when the surrounding line invokes a process-execution API.
+
+    The cross-user path role additionally ignores remote URLs: a network
+    authority is not another user's filesystem location, so an injected
+    inference endpoint must not read as one.
     """
+    if role_name == "cross-user-path":
+        return mask_remote_urls(source_line)
     if not role_name.endswith("effect") or _COMMAND_EXECUTION_EFFECT.search(
         source_line
     ):
@@ -2337,5 +2383,6 @@ __all__ = [
     "find_source_review_leads",
     "is_executable_source_path",
     "mask_comments",
+    "mask_remote_urls",
     "source_path_priority",
 ]
