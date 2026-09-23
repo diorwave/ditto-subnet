@@ -35,6 +35,7 @@ from ditto.db.models import (
     ScreenerNode,
     ScreeningAttempt,
     ScreeningQuarantine,
+    ScreeningVerificationEvent,
     ScreeningVerificationRecovery,
 )
 from ditto_screening_protocol import (
@@ -121,6 +122,7 @@ async def _seed_hold(
     extra_attempt_hotkeys: tuple[str, ...] = (),
     name: str = "held-artifact",
     version: int = 1,
+    attempt_artifact_sha256: str | None = None,
 ) -> tuple[UUID, UUID, UUID]:
     """Seed one quarantined v13 submission and return its ids."""
     agent_id = uuid4()
@@ -154,6 +156,7 @@ async def _seed_hold(
                 ScreeningAttempt(
                     attempt_id=attempt_id if index == 0 else uuid4(),
                     agent_id=agent_id,
+                    artifact_sha256=attempt_artifact_sha256 if index == 0 else None,
                     screener_hotkey=hotkey,
                     policy_version=SCREENING_POLICY_VERSION,
                     status="quarantined" if index == 0 else "failed",
@@ -1129,3 +1132,327 @@ class TestVerificationRecoveryResult:
         assert row.outcome == "verification_incomplete"
         assert row.failure_domain == "platform"
         await _assert_hold_intact(session_maker, agent_id)
+
+
+_CLAIM_URL = "/api/v1/screener/verification-recovery/claim"
+
+_IDENTITY_CHANGES = {
+    # identity changed after authorization -> the reason the guard must report
+    "artifact_sha": "artifact_sha_changed",
+    "quarantine_resolved": "quarantine_resolved",
+    "quarantine_replaced": "quarantine_replaced",
+    "image_digest": "screened_image_changed",
+    "image_cleared": "screened_image_changed",
+    "policy_version": "policy_version_changed",
+    "manifest_digest": "policy_manifest_changed",
+}
+
+
+async def _change_identity(
+    maker: async_sessionmaker[AsyncSession],
+    *,
+    agent_id: UUID,
+    quarantine_id: UUID,
+    identity: str,
+) -> None:
+    """Move exactly one guarded identity, as production would between calls."""
+    now = datetime.now(UTC)
+    async with maker() as session, session.begin():
+        agent = await session.get(Agent, agent_id)
+        quarantine = await session.get(ScreeningQuarantine, quarantine_id)
+        assert agent is not None
+        assert quarantine is not None
+        if identity == "artifact_sha":
+            agent.sha256 = "55" * 32
+        elif identity == "image_digest":
+            agent.screened_image_sha256 = "77" * 32
+        elif identity == "image_cleared":
+            # The explicit-null case: the grant pinned an image and none is
+            # pinned now. None must not compare equal to the granted digest.
+            agent.screened_image_sha256 = None
+            agent.screened_image_size_bytes = None
+            agent.screened_image_id = None
+            agent.screened_image_ref = None
+            agent.screened_image_upload_id = None
+            agent.screened_image_verified_at = None
+        elif identity == "policy_version":
+            quarantine.policy_version = SCREENING_POLICY_VERSION + 1
+        elif identity == "manifest_digest":
+            quarantine.manifest_digest = "88" * 32
+        elif identity in {"quarantine_resolved", "quarantine_replaced"}:
+            quarantine.status = "resolved"
+            quarantine.resolved_at = now
+            quarantine.resolved_by = "backroom:test-operator"
+            quarantine.resolution = "release"
+            quarantine.resolution_reason = "operator resolved the hold"
+            if identity == "quarantine_replaced":
+                await session.flush()
+                replacement_attempt = uuid4()
+                session.add(
+                    ScreeningAttempt(
+                        attempt_id=replacement_attempt,
+                        agent_id=agent_id,
+                        screener_hotkey=_FLEET_HOTKEY,
+                        policy_version=SCREENING_POLICY_VERSION,
+                        status="quarantined",
+                        started_at=now - timedelta(minutes=2),
+                        deadline=now + timedelta(minutes=8),
+                        finished_at=now,
+                        reason_code="adjudicated-source-review-escalate",
+                    )
+                )
+                await session.flush()
+                session.add(
+                    ScreeningQuarantine(
+                        quarantine_id=uuid4(),
+                        agent_id=agent_id,
+                        attempt_id=replacement_attempt,
+                        screener_hotkey=_FLEET_HOTKEY,
+                        policy_version=SCREENING_POLICY_VERSION,
+                        manifest_digest=_MANIFEST_DIGEST,
+                        reason_code="adjudicated-source-review-escalate",
+                        status="active",
+                        created_at=now,
+                    )
+                )
+        else:  # pragma: no cover - test table guard
+            raise AssertionError(identity)
+
+
+async def _grant_and_audit(
+    maker: async_sessionmaker[AsyncSession], agent_id: UUID
+) -> tuple[ScreeningVerificationRecovery, list[ScreeningVerificationEvent]]:
+    async with maker() as session:
+        row = await session.scalar(
+            select(ScreeningVerificationRecovery).where(
+                ScreeningVerificationRecovery.agent_id == agent_id
+            )
+        )
+        assert row is not None
+        events = list(
+            (
+                await session.scalars(
+                    select(ScreeningVerificationEvent)
+                    .where(ScreeningVerificationEvent.recovery_id == row.recovery_id)
+                    .order_by(
+                        ScreeningVerificationEvent.created_at.asc(),
+                        ScreeningVerificationEvent.event_id.asc(),
+                    )
+                )
+            ).all()
+        )
+    return row, events
+
+
+class TestVerificationRecoveryIdentityGuards:
+    """Every authorized identity is re-verified under lock at claim and report.
+
+    Peyton's review on #2122: a grant must not dispatch, or release its hidden
+    challenge, after the hold is resolved or replaced or the screened image,
+    policy version, or manifest moves; and a report about moved identities must
+    never be applied.
+    """
+
+    async def _authorize(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> tuple[UUID, UUID]:
+        _configure(app)
+        agent_id, attempt_id, quarantine_id = await _seed_hold(session_maker)
+        await _seed_independent_worker(session_maker)
+        _install_db(app, session_maker)
+        granted = await client.post(
+            _recovery_url(agent_id),
+            headers=_ADMIN_HEADERS,
+            json=_grant_body(attempt_id=attempt_id, quarantine_id=quarantine_id),
+        )
+        assert granted.status_code == 200, granted.text
+        return agent_id, quarantine_id
+
+    @pytest.mark.parametrize(("identity", "reason"), list(_IDENTITY_CHANGES.items()))
+    async def test_identity_moved_before_claim_is_never_dispatched(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+        identity: str,
+        reason: str,
+    ) -> None:
+        agent_id, quarantine_id = await self._authorize(app, client, session_maker)
+        await _change_identity(
+            session_maker,
+            agent_id=agent_id,
+            quarantine_id=quarantine_id,
+            identity=identity,
+        )
+
+        claim = await client.post(_CLAIM_URL, headers=_SECOND_HEADERS)
+        again = await client.post(_CLAIM_URL, headers=_SECOND_HEADERS)
+        readiness = await client.get(_readiness_url(agent_id), headers=_ADMIN_HEADERS)
+
+        assert claim.status_code == 200, claim.text
+        assert claim.json() is None
+        assert again.json() is None
+        row, events = await _grant_and_audit(session_maker, agent_id)
+        assert row.state == "canceled"
+        assert row.claimed_by is None
+        assert row.claimed_at is None
+        assert row.dispatch_deadline is None
+        assert row.outcome is None
+        assert [event.event for event in events] == [
+            "authorized",
+            "canceled_stale_identity",
+        ]
+        assert events[-1].detail is not None
+        assert events[-1].detail["stage"] == "claim"
+        assert events[-1].detail["reason"] == reason
+        # No response and no audit row ever carried the hidden randomness.
+        assert row.challenge_seed_sealed not in claim.text
+        assert row.challenge_seed_sealed not in readiness.text
+        assert "challenge_seed" not in readiness.text
+        for event in events:
+            assert row.challenge_seed_sealed not in str(event.detail)
+
+    @pytest.mark.parametrize(("identity", "reason"), list(_IDENTITY_CHANGES.items()))
+    async def test_identity_moved_before_report_is_rejected_as_stale(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+        identity: str,
+        reason: str,
+    ) -> None:
+        agent_id, quarantine_id = await self._authorize(app, client, session_maker)
+        claimed = await client.post(_CLAIM_URL, headers=_SECOND_HEADERS)
+        assert claimed.status_code == 200, claimed.text
+        claim = claimed.json()
+        assert claim is not None
+        await _change_identity(
+            session_maker,
+            agent_id=agent_id,
+            quarantine_id=quarantine_id,
+            identity=identity,
+        )
+
+        report = await client.post(
+            f"/api/v1/screener/verification-recovery/{claim['recovery_id']}/result",
+            headers=_SECOND_HEADERS,
+            json={
+                "outcome": "verification_complete",
+                "completed_checks": claim["outstanding_checks"],
+                "refuted_leads": ["I5"],
+            },
+        )
+        readiness = await client.get(_readiness_url(agent_id), headers=_ADMIN_HEADERS)
+
+        assert report.status_code == 409, report.text
+        assert report.json()["message"] == (
+            f"verification recovery identity changed: {reason}"
+        )
+        row, events = await _grant_and_audit(session_maker, agent_id)
+        # Recorded as rejected evidence, never applied.
+        assert row.state == "canceled"
+        assert row.outcome is None
+        assert row.failure_domain is None
+        assert row.completed_checks is None
+        assert row.refuted_leads is None
+        assert [event.event for event in events] == [
+            "authorized",
+            "dispatched",
+            "report_rejected_stale",
+        ]
+        detail = events[-1].detail
+        assert detail is not None
+        assert detail["stage"] == "report"
+        assert detail["reason"] == reason
+        assert detail["rejected_report"]["outcome"] == "verification_complete"
+        assert detail["rejected_report"]["refuted_leads"] == ["I5"]
+        body = readiness.json()
+        assert "completed" not in {check["state"] for check in body["mandatory_checks"]}
+        assert {rule["state"] for rule in body["integrity_rules"]} == {NOT_RECORDED}
+        assert body["agent_status"] == AgentStatus.QUARANTINED
+        assert claim["challenge_seed"] not in readiness.text
+        assert claim["challenge_seed"] not in str(detail)
+
+    async def test_unchanged_identities_still_dispatch_and_accept(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        agent_id, _quarantine_id = await self._authorize(app, client, session_maker)
+
+        claimed = await client.post(_CLAIM_URL, headers=_SECOND_HEADERS)
+        claim = claimed.json()
+        assert claim is not None
+        report = await client.post(
+            f"/api/v1/screener/verification-recovery/{claim['recovery_id']}/result",
+            headers=_SECOND_HEADERS,
+            json={
+                "outcome": "verification_complete",
+                "completed_checks": claim["outstanding_checks"],
+            },
+        )
+
+        assert report.status_code == 200, report.text
+        assert report.json()["recovery"]["state"] == "completed"
+        assert report.json()["decision_recorded"] is False
+        row, events = await _grant_and_audit(session_maker, agent_id)
+        assert row.state == "completed"
+        assert [event.event for event in events] == [
+            "authorized",
+            "dispatched",
+            "reported",
+        ]
+        await _assert_hold_intact(session_maker, agent_id)
+
+    async def test_a_pinned_attempt_for_other_bytes_cannot_be_granted(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """The attempt's immutable pinned SHA (#2149) outranks the agent row."""
+        _configure(app)
+        agent_id, attempt_id, quarantine_id = await _seed_hold(
+            session_maker, attempt_artifact_sha256="66" * 32
+        )
+        _install_db(app, session_maker)
+
+        response = await client.post(
+            _recovery_url(agent_id),
+            headers=_ADMIN_HEADERS,
+            json=_grant_body(attempt_id=attempt_id, quarantine_id=quarantine_id),
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["message"] == "screening attempt artifact changed"
+        async with session_maker() as session:
+            assert await session.scalar(select(ScreeningVerificationRecovery)) is None
+
+    async def test_a_matching_pinned_attempt_dispatches(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _configure(app)
+        agent_id, attempt_id, quarantine_id = await _seed_hold(
+            session_maker, attempt_artifact_sha256=_SHA256
+        )
+        await _seed_independent_worker(session_maker)
+        _install_db(app, session_maker)
+
+        granted = await client.post(
+            _recovery_url(agent_id),
+            headers=_ADMIN_HEADERS,
+            json=_grant_body(attempt_id=attempt_id, quarantine_id=quarantine_id),
+        )
+        claimed = await client.post(_CLAIM_URL, headers=_SECOND_HEADERS)
+
+        assert granted.status_code == 200, granted.text
+        assert granted.json()["audit"][0]["detail"]["attempt_artifact_pinned"] is True
+        assert claimed.json() is not None
+        assert claimed.json()["artifact_sha256"] == _SHA256

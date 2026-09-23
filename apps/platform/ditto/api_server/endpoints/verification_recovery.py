@@ -634,6 +634,26 @@ async def authorize_verification_recovery(
             raise HTTPException(status_code=409, detail="screening quarantine changed")
         if quarantine.attempt_id != payload.expected_attempt_id:
             raise HTTPException(status_code=409, detail="screening attempt changed")
+        source_attempt = await session.scalar(
+            select(ScreeningAttempt)
+            .where(
+                ScreeningAttempt.attempt_id == payload.expected_attempt_id,
+                ScreeningAttempt.agent_id == agent_id,
+            )
+            .with_for_update()
+        )
+        if source_attempt is None:
+            raise HTTPException(status_code=409, detail="screening attempt changed")
+        # The attempt's pinned SHA (#2149) is the authoritative record of which
+        # bytes the failed verification ran against, and a trigger keeps it
+        # immutable. Legacy attempts carry NULL and fall back to the agent row.
+        if (
+            source_attempt.artifact_sha256 is not None
+            and source_attempt.artifact_sha256 != agent.sha256
+        ):
+            raise HTTPException(
+                status_code=409, detail="screening attempt artifact changed"
+            )
         if quarantine.policy_version != payload.expected_policy_version:
             raise HTTPException(status_code=409, detail="screening policy changed")
         if quarantine.manifest_digest != payload.expected_manifest_digest:
@@ -762,6 +782,9 @@ async def authorize_verification_recovery(
                     "independent_worker_required": (
                         recovery.independent_worker_required
                     ),
+                    "attempt_artifact_pinned": (
+                        source_attempt.artifact_sha256 is not None
+                    ),
                 },
                 now=now,
             )
@@ -800,6 +823,111 @@ async def authorize_verification_recovery(
     return response
 
 
+async def _lock_guarded_identities(
+    session: AsyncSession, agent_id: UUID
+) -> tuple[Agent | None, ScreeningQuarantine | None]:
+    """Row-lock the agent and its active quarantine, in the authorization order.
+
+    Authorization locks agent -> quarantine -> grant. Claim and report take the
+    same order so the three writers cannot deadlock on one another, and so no
+    guarded identity can move between the check and the dispatch or apply."""
+    agent = await session.scalar(
+        select(Agent).where(Agent.agent_id == agent_id).with_for_update()
+    )
+    active = await session.scalar(
+        select(ScreeningQuarantine)
+        .where(
+            ScreeningQuarantine.agent_id == agent_id,
+            ScreeningQuarantine.status == "active",
+        )
+        .with_for_update()
+    )
+    return agent, active
+
+
+async def _stale_identity(
+    session: AsyncSession,
+    row: ScreeningVerificationRecovery,
+    *,
+    agent: Agent | None,
+    active: ScreeningQuarantine | None,
+) -> dict[str, object] | None:
+    """Return why the grant no longer binds the current artifact, or None.
+
+    Every identity the grant was authorized against is re-read under lock: the
+    artifact SHA (agent row, plus the source attempt's immutable pinned SHA from
+    #2149 when present), the active quarantine and that it is still the same
+    unresolved hold, the screened-image digest including an explicit null, the
+    policy version, and the policy manifest digest. The detail carries only
+    identifiers and digests; it never carries challenge material."""
+    if agent is None:
+        return {"reason": "agent_missing"}
+    if agent.sha256 != row.artifact_sha256:
+        return {
+            "reason": "artifact_sha_changed",
+            "expected": row.artifact_sha256,
+            "observed": agent.sha256,
+        }
+    source_attempt = await session.get(ScreeningAttempt, row.source_attempt_id)
+    if source_attempt is None:
+        return {"reason": "source_attempt_missing"}
+    if (
+        source_attempt.artifact_sha256 is not None
+        and source_attempt.artifact_sha256 != row.artifact_sha256
+    ):
+        return {
+            "reason": "attempt_artifact_mismatch",
+            "expected": row.artifact_sha256,
+            "observed": source_attempt.artifact_sha256,
+        }
+    if active is None:
+        granted = await session.get(ScreeningQuarantine, row.quarantine_id)
+        return {
+            "reason": "quarantine_resolved",
+            "expected": str(row.quarantine_id),
+            "observed_status": granted.status if granted is not None else None,
+            "observed_resolution": (
+                granted.resolution if granted is not None else None
+            ),
+        }
+    if (
+        active.quarantine_id != row.quarantine_id
+        or active.attempt_id != row.source_attempt_id
+    ):
+        return {
+            "reason": "quarantine_replaced",
+            "expected": str(row.quarantine_id),
+            "observed": str(active.quarantine_id),
+        }
+    if agent.screened_image_sha256 != row.image_digest:
+        return {
+            "reason": "screened_image_changed",
+            "expected": row.image_digest,
+            "observed": agent.screened_image_sha256,
+        }
+    if active.policy_version != row.policy_version:
+        return {
+            "reason": "policy_version_changed",
+            "expected": row.policy_version,
+            "observed": active.policy_version,
+        }
+    if active.manifest_digest != row.manifest_digest:
+        return {
+            "reason": "policy_manifest_changed",
+            "expected": row.manifest_digest,
+            "observed": active.manifest_digest,
+        }
+    if (
+        active.finding_digest is not None
+        or active.reason_code not in NON_DECISIVE_V13_REASON_CODES
+    ):
+        return {
+            "reason": "hold_no_longer_verification_gap",
+            "observed_reason_code": active.reason_code,
+        }
+    return None
+
+
 @screener_router.post(
     "/verification-recovery/claim",
     response_model=ScreenerVerificationRecoveryClaim | None,
@@ -812,39 +940,61 @@ async def claim_verification_recovery(
 
     Returns null when nothing is authorized for this worker. A worker that
     already attempted the artifact is skipped while the grant requires an
-    independent one, and a grant whose artifact moved since authorization is
-    canceled rather than dispatched."""
+    independent one. Before anything is dispatched, the agent, its active
+    quarantine, and the grant are row-locked and every authorized identity is
+    re-verified; a grant whose artifact, hold, screened image, policy version,
+    or manifest moved is canceled with the reason in its audit, and its hidden
+    challenge randomness is never released."""
     now = datetime.now(UTC)
     async with session.begin():
-        candidates = list(
-            (
-                await session.scalars(
-                    select(ScreeningVerificationRecovery)
-                    .where(ScreeningVerificationRecovery.state == "queued")
-                    .order_by(
-                        ScreeningVerificationRecovery.created_at.asc(),
-                        ScreeningVerificationRecovery.recovery_id.asc(),
-                    )
-                    .with_for_update(skip_locked=True)
+        candidates = (
+            await session.execute(
+                select(
+                    ScreeningVerificationRecovery.recovery_id,
+                    ScreeningVerificationRecovery.agent_id,
+                    ScreeningVerificationRecovery.independent_worker_required,
+                    ScreeningVerificationRecovery.excluded_screener_hotkeys,
                 )
-            ).all()
-        )
-        for row in candidates:
-            if row.independent_worker_required and screener_hotkey in set(
-                row.excluded_screener_hotkeys
-            ):
+                .where(ScreeningVerificationRecovery.state == "queued")
+                .order_by(
+                    ScreeningVerificationRecovery.created_at.asc(),
+                    ScreeningVerificationRecovery.recovery_id.asc(),
+                )
+            )
+        ).all()
+        for recovery_id, agent_id, independent, excluded in candidates:
+            if independent and screener_hotkey in set(excluded):
                 continue
-            agent = await session.get(Agent, row.agent_id)
-            if agent is None or agent.sha256 != row.artifact_sha256:
+            agent, active = await _lock_guarded_identities(session, agent_id)
+            row = await session.scalar(
+                select(ScreeningVerificationRecovery)
+                .where(
+                    ScreeningVerificationRecovery.recovery_id == recovery_id,
+                    ScreeningVerificationRecovery.state == "queued",
+                )
+                .with_for_update(skip_locked=True)
+            )
+            if row is None:
+                # Claimed or canceled by a concurrent caller since the scan.
+                continue
+            stale = await _stale_identity(session, row, agent=agent, active=active)
+            if stale is not None:
                 row.state = "canceled"
                 row.updated_at = now
                 _append_event(
                     session,
                     recovery_id=row.recovery_id,
-                    event="canceled_artifact_changed",
+                    event="canceled_stale_identity",
                     actor=screener_hotkey,
-                    detail={"expected_sha256": row.artifact_sha256},
+                    detail={"stage": "claim", **stale},
                     now=now,
+                )
+                logger.warning(
+                    "verification recovery canceled at claim recovery_id=%s "
+                    "agent_id=%s reason=%s",
+                    row.recovery_id,
+                    row.agent_id,
+                    stale["reason"],
                 )
                 continue
             row.state = "dispatched"
@@ -901,7 +1051,10 @@ async def report_verification_recovery(
     """Record what the replay proved. It never decides the hold.
 
     A complete report must cover every check the grant authorized; an incomplete
-    one must name its failure domain. Either way the agent's status and the
+    one must name its failure domain. The same locked identity guards as the
+    claim run first: a report about an artifact, hold, screened image, policy
+    version, or manifest that has since moved is kept in the audit as rejected
+    stale evidence and never applied. Either way the agent's status and the
     quarantine are untouched, so a failed or partial replay cannot become a
     clearance and cannot become a V1/V2/V3 rejection."""
     unknown_checks = sorted(
@@ -939,6 +1092,16 @@ async def report_verification_recovery(
     refusal: str | None = None
     response: ScreenerVerificationRecoveryResultResponse | None = None
     async with session.begin():
+        grant_agent_id = await session.scalar(
+            select(ScreeningVerificationRecovery.agent_id).where(
+                ScreeningVerificationRecovery.recovery_id == recovery_id
+            )
+        )
+        if grant_agent_id is None:
+            raise HTTPException(
+                status_code=404, detail="verification recovery not found"
+            )
+        agent, active = await _lock_guarded_identities(session, grant_agent_id)
         row = await session.scalar(
             select(ScreeningVerificationRecovery)
             .where(ScreeningVerificationRecovery.recovery_id == recovery_id)
@@ -962,10 +1125,33 @@ async def report_verification_recovery(
             if row.dispatch_deadline is not None
             else None
         )
-        agent = await session.scalar(
-            select(Agent).where(Agent.agent_id == row.agent_id).with_for_update()
-        )
-        if deadline is not None and now > deadline:
+        stale = await _stale_identity(session, row, agent=agent, active=active)
+        if stale is not None:
+            # Evidence about bytes, a hold, an image, or a policy that is no
+            # longer the one under review is recorded as a rejected report and
+            # never applied: no outcome, no completed checks, no refuted leads.
+            row.state = "canceled"
+            row.updated_at = now
+            _append_event(
+                session,
+                recovery_id=row.recovery_id,
+                event="report_rejected_stale",
+                actor=screener_hotkey,
+                detail={
+                    "stage": "report",
+                    **stale,
+                    "rejected_report": {
+                        "outcome": payload.outcome,
+                        "failure_domain": payload.failure_domain,
+                        "completed_checks": sorted(set(payload.completed_checks)),
+                        "refuted_leads": sorted(set(payload.refuted_leads)),
+                        "detail_code": payload.detail_code,
+                    },
+                },
+                now=now,
+            )
+            refusal = f"verification recovery identity changed: {stale['reason']}"
+        elif deadline is not None and now > deadline:
             # A lapsed lease is an incomplete platform-domain replay, not a
             # ruling and not a fresh retry: another replay needs a new grant.
             row.state = "failed"
@@ -982,19 +1168,8 @@ async def report_verification_recovery(
                 now=now,
             )
             refusal = "verification recovery lease expired"
-        elif agent is None or agent.sha256 != row.artifact_sha256:
-            row.state = "canceled"
-            row.updated_at = now
-            _append_event(
-                session,
-                recovery_id=row.recovery_id,
-                event="canceled_artifact_changed",
-                actor=screener_hotkey,
-                detail={"expected_sha256": row.artifact_sha256},
-                now=now,
-            )
-            refusal = "artifact identity changed"
         else:
+            assert agent is not None  # _stale_identity refuses a missing agent
             completed = sorted(set(payload.completed_checks))
             if payload.outcome == "verification_complete" and not set(
                 row.outstanding_checks
