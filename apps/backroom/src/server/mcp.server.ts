@@ -654,7 +654,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_agent_scores:
     'Read accepted validator scores for one agent and benchmark version, with exact seeds and aggregates. Defaults to the current applicable benchmark.',
   get_continual_retest_diagnostic:
-    'Read one exact agent UUID current owner-family scoring and continual retest cohort reason, including raw and folded seed membership. Changes nothing.',
+    'Read one exact agent UUID current owner-family scoring, sample counts, cutoff and tie-band comparison, continual retest cohort reason, and whether a validator could claim it now. Changes nothing.',
   get_validator_slot_settings:
     'Read effective validator slot and disk policy plus optional newest-first revision history. A validator advertising more slots than the cap is not an underutilized host. historyLimit defaults to 0.',
   get_validator_fleet:
@@ -1705,7 +1705,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Explain exact agent continual retest admission',
       description:
-        'Read one exact submission UUID: canonical and official scores, owner generations, raw/folded seed IDs, cohort position and policy, ticket counts, seed anchor, and admission reason. This snapshot does not grant work. Seed IDs are exact decimal strings. Requires backroom:read.',
+        'Read one exact submission UUID: canonical and official composites with sample counts and completed-wave depth, the same-owner representative and the comparison that selected it, raw/folded seed IDs, membership in the raw wave, folded emission set and resolved cohort with the cutoff/tie-band comparison and exclusion reason, seed anchor, retest tickets with the latest result, and claimability (scheduled round, catch-up, spare capacity, idle gate). A negative cohort_cutoff.gap on an agent that is still out of the cohort means the exclusion is structural owner suppression, not a score it failed. Outstanding work is a count; no confirmation dataset, prompt, or answer key is returned. This snapshot does not grant work. Seed IDs are exact decimal strings. Requires backroom:read.',
       inputSchema: continualRetestDiagnosticInputSchema,
       annotations: toolAnnotations('read'),
     },

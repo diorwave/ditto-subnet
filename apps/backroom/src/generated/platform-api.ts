@@ -158,7 +158,9 @@ export interface paths {
          * @description Explain one UUID's current admission with the scheduler's own fold.
          *
          *     This reads accepted score evidence and current policy. It cannot issue a
-         *     ticket, override an exclusion, or change the leaderboard.
+         *     ticket, override an exclusion, or change the leaderboard. Confirmation
+         *     datasets, prompts, and answer keys are never returned, and outstanding work
+         *     is reported as a count rather than a seed list.
          */
         get: operations["continual_retest_diagnostic_api_v1_admin_agents__agent_id__continual_retest_diagnostic_get"];
         put?: never;
@@ -7847,12 +7849,33 @@ export interface components {
             agent_id: string;
             /** Agent Status */
             agent_status: string;
+            /**
+             * Aggregate Mode
+             * @default fleet_ready
+             * @enum {string}
+             */
+            aggregate_mode: "disabled" | "fleet_ready" | "enabled";
             /** Canonical Composite */
             canonical_composite: number | null;
+            /**
+             * Canonical Sample Count
+             * @default 0
+             */
+            canonical_sample_count: number;
+            claim?: components["schemas"]["RetestClaimability"] | null;
+            /** @default {} */
+            cohort_cutoff: components["schemas"]["RetestCutoffComparison"];
             /** Cohort Position */
             cohort_position: number | null;
             /** Cohort Size */
             cohort_size: number;
+            /**
+             * Completed Wave Depth
+             * @default 0
+             */
+            completed_wave_depth: number;
+            /** Composite Stderr */
+            composite_stderr?: number | null;
             /** Configured Cohort Size */
             configured_cohort_size: number;
             /** Configured Max Size */
@@ -7864,6 +7887,8 @@ export interface components {
             eligibility_mode: "fixed" | "statistical";
             /** Eligibility Z */
             eligibility_z: number;
+            /** @default {} */
+            emission_cutoff: components["schemas"]["RetestCutoffComparison"];
             /** Family */
             family: components["schemas"]["RetestFamilyMember"][];
             /** Folded Confirmation Seeds */
@@ -7881,22 +7906,74 @@ export interface components {
             in_retest_cohort: boolean;
             /** Is Same Owner Challenger */
             is_same_owner_challenger: boolean;
+            /** Latest Confirmation Composite */
+            latest_confirmation_composite?: number | null;
+            /** Latest Confirmation Recorded At */
+            latest_confirmation_recorded_at?: string | null;
+            /** Latest Ticket Failure Reason */
+            latest_ticket_failure_reason?: string | null;
+            /** Latest Ticket Status */
+            latest_ticket_status?: string | null;
+            /** Latest Ticket Updated At */
+            latest_ticket_updated_at?: string | null;
+            /** Latest Ticket Validator Hotkey */
+            latest_ticket_validator_hotkey?: string | null;
+            /**
+             * Ledger Eligible
+             * @default false
+             */
+            ledger_eligible: boolean;
             /** Official Composite */
             official_composite: number | null;
+            /**
+             * Official Sample Count
+             * @default 0
+             */
+            official_sample_count: number;
+            /** Owner Key */
+            owner_key?: string | null;
             /** Owner Representative Id */
             owner_representative_id: string | null;
+            /**
+             * Raw Confirmation Depth
+             * @default 0
+             */
+            raw_confirmation_depth: number;
             /** Raw Confirmation Seeds */
             raw_confirmation_seeds: string[];
+            /** Representative Canonical Composite */
+            representative_canonical_composite?: number | null;
+            /** Representative Margin */
+            representative_margin?: number | null;
+            /** Representative Official Composite */
+            representative_official_composite?: number | null;
+            /**
+             * Representative Selection
+             * @default none
+             * @enum {string}
+             */
+            representative_selection: "self" | "official_composite" | "efficiency_tiebreak" | "newest_generation" | "agent_id_tiebreak" | "none";
             /** Seed Anchor Block */
             seed_anchor_block: number | null;
             /** Seed Anchor Champion Id */
             seed_anchor_champion_id: string | null;
             /** Seed Anchor Pinned */
             seed_anchor_pinned: boolean | null;
+            /**
+             * Terminal Ticket Count
+             * @default 0
+             */
+            terminal_ticket_count: number;
             /** Ticket Status Counts */
             ticket_status_counts: {
                 [key: string]: number;
             };
+            /**
+             * Wave Membership
+             * @default participants
+             * @enum {string}
+             */
+            wave_membership: "strict" | "participants" | "per_agent";
         };
         /** AdminContinualRetestSettingsRequest */
         AdminContinualRetestSettingsRequest: {
@@ -24895,6 +24972,69 @@ export interface components {
             /** Score Count */
             score_count: number;
         };
+        /**
+         * RetestClaimability
+         * @description Whether a validator polling now could lease this exact agent.
+         *
+         *     A projection of the issuance lane's own predicates, in the order the lane
+         *     evaluates them. Reading it never issues, reserves, or reprioritizes work.
+         */
+        RetestClaimability: {
+            /** Champion Agent Id */
+            champion_agent_id: string | null;
+            /** Champion Crown Block */
+            champion_crown_block: number | null;
+            /** Claimable Seed Available */
+            claimable_seed_available: boolean;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "claimable" | "lane_disabled" | "not_in_cohort" | "chain_unavailable" | "round_not_due" | "newer_canonical_work_pending" | "no_pending_seeds" | "all_pending_seeds_leased" | "another_member_less_covered";
+            /** Idle Retests Enabled */
+            idle_retests_enabled: boolean;
+            /** In Catchup Set */
+            in_catchup_set: boolean;
+            /** Lane Enabled */
+            lane_enabled: boolean;
+            /** Latest Block */
+            latest_block: number | null;
+            /** Least Covered Admitted */
+            least_covered_admitted: boolean | null;
+            /** Live Lease Count */
+            live_lease_count: number;
+            /** Newer Canonical Work Pending */
+            newer_canonical_work_pending: boolean;
+            /** Pending Seed Count */
+            pending_seed_count: number;
+            /** Route Position */
+            route_position: number | null;
+            /**
+             * Route Priority
+             * @enum {string}
+             */
+            route_priority: "champion" | "catchup" | "emission" | "extended" | "not_routed";
+            /** Scheduled Round */
+            scheduled_round: boolean | null;
+            /** Spare Capacity Window */
+            spare_capacity_window: boolean;
+        };
+        /**
+         * RetestCutoffComparison
+         * @description One cutoff this agent was measured against, with the arithmetic.
+         */
+        RetestCutoffComparison: {
+            /** Agent Id */
+            agent_id?: string | null;
+            /** Composite */
+            composite?: number | null;
+            /** Gap */
+            gap?: number | null;
+            /** Tie Band */
+            tie_band?: number | null;
+            /** Within Tie Band */
+            within_tie_band?: boolean | null;
+        };
         /** RetestFamilyMember */
         RetestFamilyMember: {
             /**
@@ -24904,6 +25044,20 @@ export interface components {
             agent_id: string;
             /** Canonical Composite */
             canonical_composite: number;
+            /**
+             * Canonical Sample Count
+             * @default 0
+             */
+            canonical_sample_count: number;
+            /**
+             * Completed Wave Depth
+             * @default 0
+             */
+            completed_wave_depth: number;
+            /** Effective Composite */
+            effective_composite?: number | null;
+            /** First Seen */
+            first_seen?: string | null;
             /** Official Composite */
             official_composite: number;
             /** Representative */

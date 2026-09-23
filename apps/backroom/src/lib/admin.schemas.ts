@@ -7340,6 +7340,52 @@ export const continualRetestDiagnosticInputSchema = z.object({
   agentId: z.string().uuid(),
 })
 
+// One cutoff the agent was measured against. A negative `gap` with the agent
+// still outside the cohort is the signature of a structural exclusion (owner
+// suppression) rather than a score it failed to reach.
+export const retestCutoffComparisonSchema = z.object({
+  agent_id: z.string().uuid().nullable().default(null),
+  composite: z.number().nullable().default(null),
+  gap: z.number().nullable().default(null),
+  tie_band: z.number().nonnegative().nullable().default(null),
+  within_tie_band: z.boolean().nullable().default(null),
+})
+
+// The issuance lane's own gates, in the order the lane evaluates them.
+// Outstanding work is a COUNT: seed values stay server-side.
+export const retestClaimabilitySchema = z.object({
+  lane_enabled: z.boolean(),
+  latest_block: z.number().int().nonnegative().nullable(),
+  champion_agent_id: z.string().uuid().nullable(),
+  champion_crown_block: z.number().int().nonnegative().nullable(),
+  scheduled_round: z.boolean().nullable(),
+  spare_capacity_window: z.boolean(),
+  idle_retests_enabled: z.boolean(),
+  in_catchup_set: z.boolean(),
+  route_priority: z.enum(['champion', 'catchup', 'emission', 'extended', 'not_routed']),
+  route_position: z.number().int().positive().nullable(),
+  pending_seed_count: z.number().int().nonnegative(),
+  claimable_seed_available: z.boolean(),
+  live_lease_count: z.number().int().nonnegative(),
+  newer_canonical_work_pending: z.boolean(),
+  least_covered_admitted: z.boolean().nullable(),
+  decision: z.enum([
+    'claimable', 'lane_disabled', 'not_in_cohort', 'chain_unavailable',
+    'round_not_due', 'newer_canonical_work_pending', 'no_pending_seeds',
+    'all_pending_seeds_leased', 'another_member_less_covered',
+  ]),
+})
+
+// A platform that predates the cutoff comparison returns neither object; the
+// empty comparison keeps the console reading "not measured" rather than "tied".
+const emptyRetestCutoff = {
+  agent_id: null,
+  composite: null,
+  gap: null,
+  tie_band: null,
+  within_tie_band: null,
+}
+
 export const continualRetestDiagnosticSchema = z.object({
   generated_at: z.string(),
   agent_id: z.string().uuid(),
@@ -7353,6 +7399,10 @@ export const continualRetestDiagnosticSchema = z.object({
     canonical_composite: z.number().min(0).max(1),
     official_composite: z.number().min(0),
     representative: z.boolean(),
+    effective_composite: z.number().min(0).nullable().default(null),
+    canonical_sample_count: z.number().int().nonnegative().default(0),
+    completed_wave_depth: z.number().int().nonnegative().default(0),
+    first_seen: z.string().nullable().default(null),
   })),
   // int63 seeds must remain decimal strings across the JSON/JavaScript boundary.
   raw_confirmation_seeds: z.array(z.string().regex(/^(0|[1-9][0-9]*)$/)),
@@ -7376,6 +7426,33 @@ export const continualRetestDiagnosticSchema = z.object({
     'in_cohort', 'same_owner_challenger', 'owner_suppressed',
     'outside_cohort', 'not_current_finalized_ledger',
   ]),
+  ledger_eligible: z.boolean().default(false),
+  canonical_sample_count: z.number().int().nonnegative().default(0),
+  completed_wave_depth: z.number().int().nonnegative().default(0),
+  official_sample_count: z.number().int().nonnegative().default(0),
+  raw_confirmation_depth: z.number().int().nonnegative().default(0),
+  composite_stderr: z.number().nonnegative().nullable().default(null),
+  aggregate_mode: z.enum(['disabled', 'fleet_ready', 'enabled']).default('fleet_ready'),
+  wave_membership: z.enum(['strict', 'participants', 'per_agent']).default('participants'),
+  owner_key: z.string().nullable().default(null),
+  representative_canonical_composite: z.number().min(0).max(1).nullable().default(null),
+  representative_official_composite: z.number().min(0).nullable().default(null),
+  // Positive means this generation is BEHIND its owner's representative.
+  representative_margin: z.number().nullable().default(null),
+  representative_selection: z.enum([
+    'self', 'official_composite', 'efficiency_tiebreak',
+    'newest_generation', 'agent_id_tiebreak', 'none',
+  ]).default('none'),
+  cohort_cutoff: retestCutoffComparisonSchema.default(() => emptyRetestCutoff),
+  emission_cutoff: retestCutoffComparisonSchema.default(() => emptyRetestCutoff),
+  claim: retestClaimabilitySchema.nullable().default(null),
+  latest_ticket_status: z.string().nullable().default(null),
+  latest_ticket_validator_hotkey: z.string().nullable().default(null),
+  latest_ticket_updated_at: z.string().nullable().default(null),
+  latest_ticket_failure_reason: z.string().nullable().default(null),
+  terminal_ticket_count: z.number().int().nonnegative().default(0),
+  latest_confirmation_composite: z.number().min(0).max(1).nullable().default(null),
+  latest_confirmation_recorded_at: z.string().nullable().default(null),
 })
 
 export const scoreLeaderboardInputSchema = z.object({
