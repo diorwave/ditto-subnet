@@ -2,6 +2,49 @@
 
 <!-- version list -->
 
+## v0.291.0 (2026-09-23)
+
+### Features
+
+- **screener**: Observe bounded V13 runtime semantics
+  ([#2147](https://github.com/ditto-assistant/ditto-subnet/pull/2147),
+  [`97d741b`](https://github.com/ditto-assistant/ditto-subnet/commit/97d741b731c0e04be8e58dfc1de11da760ba9e2e))
+
+
+## v0.290.1 (2026-09-23)
+
+### Bug Fixes
+
+- **screener**: Use tool-quality routing for adjudication
+  ([#2150](https://github.com/ditto-assistant/ditto-subnet/pull/2150),
+  [`938ea0a`](https://github.com/ditto-assistant/ditto-subnet/commit/938ea0aa6f94ee5a052412e157d851529e8b8ee2))
+
+### Documentation
+
+- **skills**: Add browser-based Discord miner triage
+  ([#2143](https://github.com/ditto-assistant/ditto-subnet/pull/2143),
+  [`9fae617`](https://github.com/ditto-assistant/ditto-subnet/commit/9fae61743f005987d4a28e082c362d46d36b36f9))
+
+
+## v0.290.0 (2026-09-23)
+
+### Bug Fixes
+
+- **platform**: Honor node scope in screener settings status
+  ([#2146](https://github.com/ditto-assistant/ditto-subnet/pull/2146),
+  [`d84108a`](https://github.com/ditto-assistant/ditto-subnet/commit/d84108a1fc376151667d778eb2cd3a3d5b9ab5c6))
+
+- **screener**: Classify L4 completion ceiling without verdict
+  ([#2144](https://github.com/ditto-assistant/ditto-subnet/pull/2144),
+  [`246e889`](https://github.com/ditto-assistant/ditto-subnet/commit/246e889f89f43fbedceb7f318df771df7c2814f8))
+
+### Features
+
+- **screener**: Record bounded v13 runtime observations
+  ([#2145](https://github.com/ditto-assistant/ditto-subnet/pull/2145),
+  [`03b38f5`](https://github.com/ditto-assistant/ditto-subnet/commit/03b38f543db4e6bedecd7fb56f13fad56c79ad94))
+
+
 ## v0.289.0 (2026-09-23)
 
 ### Features
