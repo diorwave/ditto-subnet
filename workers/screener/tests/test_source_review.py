@@ -1101,6 +1101,13 @@ def test_decisive_preflight_still_flags_a_served_cross_user_read() -> None:
             'TARGET = "file:///home/otheruser/.ditto/memory.db"\n'
             'blob = open(TARGET.removeprefix("file://"), "rb").read()\n',
         ),
+        # URL schemes are case-insensitive, so an upper-case file URL names the
+        # same local path and must not be masked as a remote endpoint.
+        (
+            "src/served/upper.py",
+            'TARGET = "FILE:///home/other/.ditto/memory.db"\n'
+            'blob = open(TARGET.removeprefix("FILE://"), "rb").read()\n',
+        ),
         (
             "src/escape.rs",
             'let host_copy = "/proc/1/root/home/other/notes";\n'

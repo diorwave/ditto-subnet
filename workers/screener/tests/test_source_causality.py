@@ -256,6 +256,28 @@ def test_file_url_to_another_home_still_proves_cross_user_flow() -> None:
     assert "cross_user_access" in _decisive_categories(source)
 
 
+def test_upper_case_file_url_to_another_home_still_proves_cross_user_flow() -> None:
+    """Schemes are case-insensitive, so `FILE://` is exempt from masking too."""
+    source = (
+        'let target = "FILE:///home/other/.ditto/memory.db";\n'
+        'let body = read(target.trim_start_matches("FILE://"));\n'
+    )
+
+    assert "cross_user_access" in _decisive_categories(source)
+
+
+def test_upper_case_remote_endpoint_is_still_masked() -> None:
+    """An upper-case remote scheme is an endpoint, not a filesystem path."""
+    source = (
+        'let base_url = "HTTP://host.docker.internal:11434/v1".to_string();\n'
+        "let read_timeout = Duration::from_secs(600);\n"
+        "let client = InferenceClient::new(base_url, read_timeout);\n"
+    )
+
+    assert "cross_user_access" not in _decisive_categories(source)
+    assert "cross_user_access" not in _advisory_categories(source)
+
+
 def test_cross_user_path_and_unrelated_read_is_not_flow() -> None:
     source = 'let other = "/root/private";\nread("/tmp/public");'
     assert "cross_user_access" not in _decisive_categories(source)

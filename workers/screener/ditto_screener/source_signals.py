@@ -2045,8 +2045,12 @@ def _aggregate_fingerprint(
 
 # Terminates on quotes, whitespace, and the bracket/separator characters that
 # end a URL literal in source, so a real path on the same line stays visible.
+# URL schemes are case-insensitive (RFC 3986 §3.1), so the pattern and the
+# `file://` exemption are too: `FILE://` names a local path exactly as
+# `file://` does, and masking it would blank a real filesystem target.
 _REMOTE_URL = re.compile(
-    r"(?<![\w.])(?!file://)[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"`,;)\]}>]*"
+    r"(?<![\w.])(?!file://)[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"`,;)\]}>]*",
+    re.IGNORECASE,
 )
 
 
