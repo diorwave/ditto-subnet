@@ -6997,7 +6997,18 @@ export type AthReviewKind = z.infer<typeof athReviewKindSchema>
 export const copyReviewOriginalSchema = z.object({
   review_kind: athReviewKindSchema.default('copy'),
   duplicate_of: z.string().uuid().nullable(),
+  // Why the submission is under review RIGHT NOW. For a hold that was reopened
+  // after its resolution was withdrawn this is the reconsideration reason, not
+  // the withdrawn prose -- a pending appeal must never read as a live finding.
+  // The superseded text moves to the fields below and stays readable.
   reason: z.string().nullable(),
+  // Nullish defaults throughout: a platform that predates the reopen
+  // projection simply reports the original hold, which is what it meant.
+  reason_source: z.enum(['original_hold', 'reconsideration']).nullish().default('original_hold'),
+  superseded_reason: z.string().nullish().default(null),
+  superseded_resolution: copyReviewResolutionSchema.nullish().default(null),
+  superseded_resolution_reason: z.string().nullish().default(null),
+  superseded_at: z.string().nullish().default(null),
   policy_version: z.number().int(),
   fingerprint_versions: z.record(
     z.string(),

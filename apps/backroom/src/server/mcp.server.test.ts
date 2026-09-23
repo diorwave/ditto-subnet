@@ -357,7 +357,11 @@ describe('Backroom MCP tools', () => {
     // source-review queue-age SLO reads add two bounded catalog entries.
     // The hosted-inference failure taxonomy adds one no-input read tool whose
     // one-line catalog entry is its whole payload cost.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(146_000)
+    // The reopened-hold reason contract adds ~460 bytes across the queue and
+    // get_ath_review: which of `hold.reason` / `superseded_*` is the CURRENT
+    // reason and which is withdrawn history. That is a correctness rule for
+    // anything that quotes a reason back to a miner, not a tutorial.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(147_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -379,8 +383,9 @@ describe('Backroom MCP tools', () => {
     // The infra-retry read summary lands at 25,990, so the bound moves to 26_200.
     expect(descriptions.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
       // Includes the V13 clock, independent replay, infra-retry, and ordinary
-      // source-review queue-age SLO and failure-taxonomy route_basis summaries.
-      27_500,
+      // source-review queue-age SLO, failure taxonomy route_basis, and
+      // reopened-hold reason summaries.
+      28_000,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
@@ -5236,6 +5241,88 @@ describe('Backroom MCP tools', () => {
         }),
       }),
     )
+
+    await client.close()
+    await server.close()
+  })
+
+  it('shows a reopened hold its reconsideration reason and the rejection it withdrew', async () => {
+    // lets_635 v1: an I5 rejection was withdrawn as unsupported and the review
+    // guard-reopened, but the queue kept publishing the withdrawn REJECT prose
+    // as the live `hold.reason`, so a pending appeal read as a standing
+    // violation finding. The platform now projects the current reason and
+    // labels the prior decision; the tool must carry both through compaction.
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const rejectProse = 'Reject under policy v13 for I5: benchmark-shaped answer assembly'
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        items: [
+          {
+            review_id: '89af175c-2471-4a5b-b4a7-e495cfad8d22',
+            agent_id: 'a8437894-71ec-4a5a-a618-1757ab53806e',
+            miner_hotkey: '5Lets635',
+            miner_coldkey: null,
+            agent_name: 'lets_635',
+            agent_version: 1,
+            submitted_at: '2026-09-20T00:00:00Z',
+            status: 'pending',
+            agent_status: 'ath_pending_review',
+            opened_at: '2026-09-23T05:36:00Z',
+            resolved_at: null,
+            resolved_by: null,
+            resolution: null,
+            resolution_reason: null,
+            original: {
+              review_kind: 'deferred_source_review',
+              duplicate_of: null,
+              reason: 'I5 rejection withdrawn as unsupported; reconsidering under v13',
+              reason_source: 'reconsideration',
+              superseded_reason: 'Deferred source review qualified this submission for I5',
+              superseded_resolution: 'reject',
+              superseded_resolution_reason: rejectProse,
+              superseded_at: '2026-09-23T05:36:00Z',
+              policy_version: 13,
+              fingerprint_versions: {},
+              reference_provenance: 'corpus',
+              backfilled: false,
+            },
+          },
+        ],
+        count: 1,
+        limit: 50,
+        offset: 0,
+        review_kind: null,
+        generation: 'all',
+        active_bench_version: 13,
+        rollout_bench_version: null,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    const response = await client.callTool({
+      name: 'get_screening_review_queue',
+      arguments: {},
+    })
+
+    expect(response.isError).not.toBe(true)
+    const queue = readJsonResult(response) as {
+      items: Array<Record<string, unknown>>
+      items_shared?: Record<string, unknown>
+    }
+    const hold = {
+      ...(queue.items_shared?.hold as Record<string, unknown> | undefined),
+      ...(queue.items[0]?.hold as Record<string, unknown> | undefined),
+    }
+    expect(hold.reason).toBe('I5 rejection withdrawn as unsupported; reconsidering under v13')
+    expect(hold.reason_source).toBe('reconsideration')
+    expect(hold.superseded_resolution).toBe('reject')
+    expect(hold.superseded_resolution_reason).toBe(rejectProse)
+    expect(hold.superseded_reason).toBe(
+      'Deferred source review qualified this submission for I5',
+    )
+    // The withdrawn finding is never the active reason on a pending row.
+    expect(hold.reason).not.toBe(rejectProse)
+    expect(queue.items[0]?.resolution ?? null).toBeNull()
 
     await client.close()
     await server.close()

@@ -206,6 +206,10 @@ from ditto.api_models.validator_capabilities import (
 from ditto.api_models.validator_slot_settings import ValidatorSlotSettings
 from ditto.api_models.validator_updater import ValidatorUpdaterStatus
 from ditto.api_server.artifact_audit import client_ip, request_detail
+from ditto.api_server.ath_review_state import (
+    DEFAULT_OPEN_REASON,
+    derive_ath_review_lifecycle,
+)
 from ditto.api_server.bench import CURRENT_BENCH_VERSION, is_bench_version_retired
 from ditto.api_server.benchmark_rollout import rolling_qualification_blockers
 from ditto.api_server.continual_retest_settings import (
@@ -6005,36 +6009,19 @@ async def _ath_review_public_snapshot(
 
     snapshots: dict[UUID, _PublicAthReviewSnapshot] = {}
     for review in reviews:
-        latest = latest_actions.get(review.review_id)
-        if review.status == "pending":
-            if latest is not None and latest.action == "reopen":
-                event: Literal["opened", "reopened", "cleared", "rejected"] = "reopened"
-                reason = latest.reason
-                event_at = latest.created_at
-            else:
-                event = "opened"
-                reason = review.original_reason or "Submission routed to ATH review."
-                event_at = review.opened_at
-            opened_at = review.reopened_at or review.opened_at
-        else:
-            resolution = review.resolution or (latest.action if latest else None)
-            event = "rejected" if resolution == "reject" else "cleared"
-            reason = (
-                review.resolution_reason
-                or (latest.reason if latest is not None else None)
-                or "ATH review resolved."
-            )
-            event_at = review.resolved_at or (
-                latest.created_at if latest is not None else review.opened_at
-            )
-            opened_at = review.reopened_at or review.opened_at
+        # Shared with the operator queue and audit projections, so a reopened
+        # hold reads the same on every surface. Only the newest action is
+        # loaded here: the public page never shows what a reopen withdrew, so
+        # it does not pay for the full ledger.
+        lifecycle = derive_ath_review_lifecycle(
+            review, latest_action=latest_actions.get(review.review_id)
+        )
         snapshots[review.agent_id] = _PublicAthReviewSnapshot(
-            event=event,
-            reason=reason,
-            event_at=event_at,
-            opened_at=opened_at,
-            original_reason=review.original_reason
-            or "Submission routed to ATH review.",
+            event=lifecycle.event,
+            reason=lifecycle.reason,
+            event_at=lifecycle.event_at,
+            opened_at=lifecycle.opened_at,
+            original_reason=review.original_reason or DEFAULT_OPEN_REASON,
             original_duplicate_of=review.original_duplicate_of,
         )
 

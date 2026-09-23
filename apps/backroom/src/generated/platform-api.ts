@@ -8915,6 +8915,12 @@ export interface components {
             policy_version: number;
             /** Reason */
             reason: string | null;
+            /**
+             * Reason Source
+             * @default original_hold
+             * @enum {string}
+             */
+            reason_source: "original_hold" | "reconsideration";
             /** Reference Provenance */
             reference_provenance: string;
             /**
@@ -8923,6 +8929,14 @@ export interface components {
              * @enum {string}
              */
             review_kind: "copy" | "benchmark_overfit" | "deferred_source_review" | "anomalous_score";
+            /** Superseded At */
+            superseded_at?: string | null;
+            /** Superseded Reason */
+            superseded_reason?: string | null;
+            /** Superseded Resolution */
+            superseded_resolution?: ("clear" | "reject") | null;
+            /** Superseded Resolution Reason */
+            superseded_resolution_reason?: string | null;
         };
         /** AdminCopyReviewItem */
         AdminCopyReviewItem: {

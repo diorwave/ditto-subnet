@@ -6937,6 +6937,15 @@ class TestPublicActivity:
         assert entry["review_original_reason"] == original_reason
         assert "Same-owner lineage verified" not in response.text
         assert "operator@example.com" not in response.text
+        # The operator projection labels what a reopen withdrew; the public
+        # page must not widen to carry those fields.
+        assert not {
+            "reason_source",
+            "superseded_reason",
+            "superseded_resolution",
+            "superseded_resolution_reason",
+            "superseded_at",
+        } & set(entry)
 
     async def test_activity_projects_resolution_reason_for_resolved_review(
         self,
