@@ -4211,6 +4211,69 @@ CREATE TABLE public.screening_retry_overrides (
 
 
 --
+-- Name: screening_verification_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.screening_verification_events (
+    event_id uuid NOT NULL,
+    recovery_id uuid NOT NULL,
+    event text NOT NULL,
+    actor text NOT NULL,
+    detail jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_screening_verification_events_screening_verification_adaf CHECK (((length(TRIM(BOTH FROM actor)) >= 1) AND (length(TRIM(BOTH FROM actor)) <= 120)))
+);
+
+
+--
+-- Name: screening_verification_recoveries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.screening_verification_recoveries (
+    recovery_id uuid NOT NULL,
+    agent_id uuid NOT NULL,
+    quarantine_id uuid NOT NULL,
+    source_attempt_id uuid NOT NULL,
+    artifact_sha256 text NOT NULL,
+    policy_version integer NOT NULL,
+    manifest_digest text NOT NULL,
+    image_digest text,
+    expected_score_count integer NOT NULL,
+    expected_attempt_count integer NOT NULL,
+    outstanding_checks jsonb NOT NULL,
+    reused_evidence jsonb NOT NULL,
+    challenge_commitment text NOT NULL,
+    challenge_manifest_version integer NOT NULL,
+    challenge_seed_sealed text NOT NULL,
+    independent_worker_required boolean DEFAULT false NOT NULL,
+    excluded_screener_hotkeys jsonb NOT NULL,
+    state text DEFAULT 'queued'::text NOT NULL,
+    claimed_by text,
+    claimed_at timestamp with time zone,
+    dispatch_deadline timestamp with time zone,
+    outcome text,
+    failure_domain text,
+    completed_checks jsonb,
+    refuted_leads jsonb,
+    reason text NOT NULL,
+    actor text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_293e CHECK (((failure_domain IS NULL) OR (failure_domain = ANY (ARRAY['artifact'::text, 'submission'::text, 'platform'::text, 'provider'::text])))),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_32f5 CHECK ((state = ANY (ARRAY['queued'::text, 'dispatched'::text, 'completed'::text, 'failed'::text, 'canceled'::text]))),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_3540 CHECK ((challenge_manifest_version > 0)),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_4e0a CHECK ((length(TRIM(BOTH FROM reason)) >= 8)),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_5abe CHECK ((((state = 'completed'::text) AND (outcome = 'verification_complete'::text)) OR ((state = 'failed'::text) AND (outcome = 'verification_incomplete'::text) AND (failure_domain IS NOT NULL)) OR ((state = ANY (ARRAY['queued'::text, 'dispatched'::text, 'canceled'::text])) AND (outcome IS NULL)))),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_5fd1 CHECK ((length(artifact_sha256) = 64)),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_6c24 CHECK (((expected_score_count >= 0) AND (expected_attempt_count >= 0))),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_78c7 CHECK ((policy_version > 0)),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_97db CHECK (((outcome IS NULL) OR (outcome = ANY (ARRAY['verification_complete'::text, 'verification_incomplete'::text])))),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_b105 CHECK (((length(TRIM(BOTH FROM actor)) >= 1) AND (length(TRIM(BOTH FROM actor)) <= 120))),
+    CONSTRAINT ck_screening_verification_recoveries_screening_verifica_f813 CHECK (((state <> 'queued'::text) OR ((claimed_by IS NULL) AND (claimed_at IS NULL))))
+);
+
+
+--
 -- Name: source_emission_collector_cursors; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6583,6 +6646,22 @@ ALTER TABLE ONLY public.screener_shadow_reviews
 
 
 --
+-- Name: screening_verification_events pk_screening_verification_events; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_events
+    ADD CONSTRAINT pk_screening_verification_events PRIMARY KEY (event_id);
+
+
+--
+-- Name: screening_verification_recoveries pk_screening_verification_recoveries; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_recoveries
+    ADD CONSTRAINT pk_screening_verification_recoveries PRIMARY KEY (recovery_id);
+
+
+--
 -- Name: source_emission_collector_cursors pk_source_emission_collector_cursors; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6940,6 +7019,14 @@ ALTER TABLE ONLY public.screening_retry_overrides
 
 ALTER TABLE ONLY public.screening_retry_overrides
     ADD CONSTRAINT screening_retry_overrides_pkey PRIMARY KEY (override_id);
+
+
+--
+-- Name: screening_verification_recoveries screening_verification_recoveries_attempt_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_recoveries
+    ADD CONSTRAINT screening_verification_recoveries_attempt_key UNIQUE (source_attempt_id);
 
 
 --
@@ -8051,6 +8138,34 @@ CREATE UNIQUE INDEX screening_quarantines_one_active_agent_idx ON public.screeni
 --
 
 CREATE INDEX screening_retry_overrides_agent_created_idx ON public.screening_retry_overrides USING btree (agent_id, created_at, override_id);
+
+
+--
+-- Name: screening_verification_events_recovery_created_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX screening_verification_events_recovery_created_idx ON public.screening_verification_events USING btree (recovery_id, created_at, event_id);
+
+
+--
+-- Name: screening_verification_recoveries_agent_created_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX screening_verification_recoveries_agent_created_idx ON public.screening_verification_recoveries USING btree (agent_id, created_at, recovery_id);
+
+
+--
+-- Name: screening_verification_recoveries_one_open_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX screening_verification_recoveries_one_open_idx ON public.screening_verification_recoveries USING btree (agent_id) WHERE (state = ANY (ARRAY['queued'::text, 'dispatched'::text]));
+
+
+--
+-- Name: screening_verification_recoveries_queued_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX screening_verification_recoveries_queued_idx ON public.screening_verification_recoveries USING btree (created_at) WHERE (state = 'queued'::text);
 
 
 --
@@ -9224,6 +9339,38 @@ ALTER TABLE ONLY public.screener_fanout_shadow_reviews
 
 ALTER TABLE ONLY public.screener_fanout_shadow_reviews
     ADD CONSTRAINT fk_screener_fanout_shadow_reviews_settings_revision_scr_a1a2 FOREIGN KEY (settings_revision) REFERENCES public.screener_review_settings_revisions(revision) ON DELETE RESTRICT;
+
+
+--
+-- Name: screening_verification_events fk_screening_verification_events_recovery_id_screening__5e21; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_events
+    ADD CONSTRAINT fk_screening_verification_events_recovery_id_screening__5e21 FOREIGN KEY (recovery_id) REFERENCES public.screening_verification_recoveries(recovery_id) ON DELETE CASCADE;
+
+
+--
+-- Name: screening_verification_recoveries fk_screening_verification_recoveries_agent_id_agents; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_recoveries
+    ADD CONSTRAINT fk_screening_verification_recoveries_agent_id_agents FOREIGN KEY (agent_id) REFERENCES public.agents(agent_id) ON DELETE CASCADE;
+
+
+--
+-- Name: screening_verification_recoveries fk_screening_verification_recoveries_quarantine_id_scre_029c; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_recoveries
+    ADD CONSTRAINT fk_screening_verification_recoveries_quarantine_id_scre_029c FOREIGN KEY (quarantine_id) REFERENCES public.screening_quarantines(quarantine_id) ON DELETE CASCADE;
+
+
+--
+-- Name: screening_verification_recoveries fk_screening_verification_recoveries_source_attempt_id__64de; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_recoveries
+    ADD CONSTRAINT fk_screening_verification_recoveries_source_attempt_id__64de FOREIGN KEY (source_attempt_id) REFERENCES public.screening_attempts(attempt_id) ON DELETE CASCADE;
 
 
 --

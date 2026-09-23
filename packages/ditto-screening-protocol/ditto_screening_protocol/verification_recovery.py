@@ -88,7 +88,7 @@ alias must be collapsed onto it rather than maintained separately.
 class MandatoryVerificationCheck(BaseModel):
     """One published mandatory-verification obligation."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     check_id: str
     """Stable snake_case identifier used by every surface and stored record."""
@@ -228,7 +228,7 @@ finding belongs to the misconduct path instead.
 class PublishedRetryDefaults(BaseModel):
     """The published "Retry and deadline procedure" recommended defaults."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     artifact_failure_retries: int
     provider_failure_retries: int
