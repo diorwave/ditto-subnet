@@ -701,4 +701,38 @@ describe('MCP scope challenges', () => {
       'scope="backroom:read backroom:artifact:read"',
     )
   })
+
+  it('recognizes the verification-recovery pair as a plain read and a write', async () => {
+    // The readiness ledger exposes no miner source and no challenge content, so
+    // it stays a plain read; authorizing the replay is a production mutation.
+    const readiness = new Request('https://backroom.dittobench.ai/mcp', {
+      method: 'POST',
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'get_verification_readiness',
+          arguments: { agentId: '4bd43a0c-f8d4-4298-9b84-e7e75c6a6574' },
+        },
+      }),
+    })
+    const resume = new Request('https://backroom.dittobench.ai/mcp', {
+      method: 'POST',
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'resume_artifact_verification',
+          arguments: { agentId: '4bd43a0c-f8d4-4298-9b84-e7e75c6a6574' },
+        },
+      }),
+    })
+
+    expect(await callsWriteTool(readiness)).toBe(false)
+    expect(await requiredScopesForRequest(readiness)).toEqual([])
+    expect(await callsWriteTool(resume)).toBe(true)
+    expect(await requiredScopesForRequest(resume)).toEqual([BACKROOM_WRITE_SCOPE])
+  })
 })

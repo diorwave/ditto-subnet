@@ -106,6 +106,7 @@ from ditto.api_server.endpoints import (
     admin_validation_retry_router,
     admin_validator_slot_settings_router,
     admin_validator_weights_router,
+    admin_verification_recovery_router,
     attestation_router,
     ditto_callback_challenge_router,
     feedback_track_router,
@@ -122,6 +123,7 @@ from ditto.api_server.endpoints import (
     retrieval_router,
     scoring_router,
     screener_router,
+    screener_verification_recovery_router,
     upload_router,
     validator_coding_certification_leases_router,
     validator_coding_certification_router,
@@ -739,6 +741,11 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     app.include_router(admin_lease_revocations_router, prefix="/api/v1")
     app.include_router(admin_owner_router, prefix="/api/v1")
     app.include_router(admin_quarantine_router, prefix="/api/v1")
+    # Verification readiness and the bounded v13 recovery replay. The admin read
+    # and write live beside the quarantine controls they complement; the screener
+    # lease/report pair is a separate router on the screener prefix.
+    app.include_router(admin_verification_recovery_router, prefix="/api/v1")
+    app.include_router(screener_verification_recovery_router, prefix="/api/v1")
     app.include_router(admin_validation_retry_router, prefix="/api/v1")
     app.include_router(admin_retirement_router, prefix="/api/v1")
     app.include_router(admin_validator_slot_settings_router, prefix="/api/v1")

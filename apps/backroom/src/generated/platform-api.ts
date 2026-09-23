@@ -2502,6 +2502,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/screening-submissions/{agent_id}/verification-readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Verification Readiness
+         * @description Report what this exact artifact has proved and what is still missing.
+         *
+         *     Reading changes nothing: it does not clear, reject, rescreen, or queue any
+         *     work, and it never reports an unrecorded check as passed.
+         */
+        get: operations["get_verification_readiness_api_v1_admin_screening_submissions__agent_id__verification_readiness_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/screening-submissions/{agent_id}/verification-recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Authorize Verification Recovery
+         * @description Authorize exactly one replay of the outstanding mandatory verification.
+         *
+         *     Every pinned identity is a compare-and-swap guard, so a stale operator view
+         *     cannot authorize work against an artifact, image, policy, or attempt that
+         *     has since moved. The hold is untouched: this grants verification work, not a
+         *     decision, and a completed replay still needs the published decision record.
+         */
+        post: operations["authorize_verification_recovery_api_v1_admin_screening_submissions__agent_id__verification_recovery_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/submission-deposit-address": {
         parameters: {
             query?: never;
@@ -5590,6 +5638,56 @@ export interface paths {
         get: operations["get_submission_source_review_source_api_v1_screener_submission_source_reviews__review_id__source_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/screener/verification-recovery/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Claim Verification Recovery
+         * @description Lease at most one operator-authorized verification replay.
+         *
+         *     Returns null when nothing is authorized for this worker. A worker that
+         *     already attempted the artifact is skipped while the grant requires an
+         *     independent one, and a grant whose artifact moved since authorization is
+         *     canceled rather than dispatched.
+         */
+        post: operations["claim_verification_recovery_api_v1_screener_verification_recovery_claim_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/screener/verification-recovery/{recovery_id}/result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Report Verification Recovery
+         * @description Record what the replay proved. It never decides the hold.
+         *
+         *     A complete report must cover every check the grant authorized; an incomplete
+         *     one must name its failure domain. Either way the agent's status and the
+         *     quarantine are untouched, so a failed or partial replay cannot become a
+         *     clearance and cannot become a V1/V2/V3 rejection.
+         */
+        post: operations["report_verification_recovery_api_v1_screener_verification_recovery__recovery_id__result_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -11609,6 +11707,122 @@ export interface components {
             effective: components["schemas"]["EffectiveValidatorSlotSettings"];
             /** History */
             history: components["schemas"]["ValidatorSlotSettingsRevision"][];
+        };
+        /**
+         * AdminVerificationReadiness
+         * @description Read-only verification readiness for one exact submission.
+         *
+         *     Answers, for the exact committed artifact: which pinned identities bind a
+         *     decision, which published mandatory checks and I1-I8 / S1-S3 rules have a
+         *     recorded outcome, which remain outstanding, what the last court failure was,
+         *     which workers attempted it, what the published retry defaults say, and
+         *     whether a recovery grant exists. It is never a clearance and never a
+         *     rejection.
+         */
+        AdminVerificationReadiness: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Agent Status */
+            agent_status: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Attempts */
+            attempts: components["schemas"]["VerificationWorkerAttempt"][];
+            /** Attempts Recorded */
+            attempts_recorded: number;
+            /** Distinct Workers */
+            distinct_workers: number;
+            evidence_bindings: components["schemas"]["VerificationEvidenceBindings"];
+            /** Evidence Sources */
+            evidence_sources: string[];
+            finalizer: components["schemas"]["VerificationFinalizerRead"];
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Has Established Finding */
+            has_established_finding: boolean;
+            /** Integrity Rules */
+            integrity_rules: components["schemas"]["VerificationRuleState"][];
+            /** Is Non Decisive Hold */
+            is_non_decisive_hold: boolean;
+            last_court_failure: components["schemas"]["VerificationCourtFailure"] | null;
+            /** Mandatory Checks */
+            mandatory_checks: components["schemas"]["VerificationCheckState"][];
+            /** Opaque Roles */
+            opaque_roles: components["schemas"]["VerificationRuleState"][];
+            /** Outstanding Mandatory Checks */
+            outstanding_mandatory_checks: string[];
+            /** Policy Version */
+            policy_version: number;
+            /** Private Paired Required */
+            private_paired_required: boolean | null;
+            published_retry_defaults: components["schemas"]["PublishedRetryDefaults"];
+            /** Quarantine Id */
+            quarantine_id: string | null;
+            /** Quarantine Reason Code */
+            quarantine_reason_code: string | null;
+            /** Quarantine Status */
+            quarantine_status: string | null;
+            recovery: components["schemas"]["VerificationRecoveryView"] | null;
+            /** Recovery Audit */
+            recovery_audit: components["schemas"]["VerificationAuditEvent"][];
+            /** Security Rules */
+            security_rules: components["schemas"]["VerificationRuleState"][];
+        };
+        /**
+         * AdminVerificationRecoveryRequest
+         * @description Compare-and-swap guards for authorizing one verification replay.
+         */
+        AdminVerificationRecoveryRequest: {
+            /**
+             * Confirmation
+             * @constant
+             */
+            confirmation: "RESUME MANDATORY VERIFICATION ON THIS ARTIFACT";
+            /** Expected Attempt Count */
+            expected_attempt_count: number;
+            /**
+             * Expected Attempt Id
+             * Format: uuid
+             */
+            expected_attempt_id: string;
+            /** Expected Image Digest */
+            expected_image_digest?: string | null;
+            /** Expected Manifest Digest */
+            expected_manifest_digest: string;
+            /** Expected Policy Version */
+            expected_policy_version: number;
+            /**
+             * Expected Quarantine Id
+             * Format: uuid
+             */
+            expected_quarantine_id: string;
+            /** Expected Score Count */
+            expected_score_count: number;
+            /** Expected Sha256 */
+            expected_sha256: string;
+            /** Reason */
+            reason: string;
+        };
+        /**
+         * AdminVerificationRecoveryResponse
+         * @description The created (or idempotently replayed) grant, with its audit.
+         */
+        AdminVerificationRecoveryResponse: {
+            /** Agent Status */
+            agent_status: string;
+            /** Audit */
+            audit: components["schemas"]["VerificationAuditEvent"][];
+            /** Idempotent */
+            idempotent: boolean;
+            /** Quarantine Status */
+            quarantine_status: string;
+            recovery: components["schemas"]["VerificationRecoveryView"];
         };
         /**
          * AdvanceScoredPolicyRescreenRequest
@@ -24629,6 +24843,26 @@ export interface components {
             vector_digest: string;
         };
         /**
+         * PublishedRetryDefaults
+         * @description The published "Retry and deadline procedure" recommended defaults.
+         */
+        PublishedRetryDefaults: {
+            /** Artifact Failure Retries */
+            artifact_failure_retries: number;
+            /** Enforced */
+            enforced: boolean;
+            /** Independent Worker Required For Platform Or Provider */
+            independent_worker_required_for_platform_or_provider: boolean;
+            /** Maximum Verification Window Hours */
+            maximum_verification_window_hours: number;
+            /** Platform Failure Retries */
+            platform_failure_retries: number;
+            /** Provenance */
+            provenance: string;
+            /** Provider Failure Retries */
+            provider_failure_retries: number;
+        };
+        /**
          * QueuePolicySettings
          * @description The complete, hot-swappable validator-queue policy.
          *
@@ -27139,6 +27373,88 @@ export interface components {
              * @enum {string}
              */
             source: "platform" | "cache" | "bootstrap";
+        };
+        /**
+         * ScreenerVerificationRecoveryClaim
+         * @description What the claiming screener receives, including the private randomness.
+         */
+        ScreenerVerificationRecoveryClaim: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Challenge Commitment */
+            challenge_commitment: string;
+            /** Challenge Manifest Version */
+            challenge_manifest_version: number;
+            /** Challenge Seed */
+            challenge_seed: string;
+            /** Claimed By */
+            claimed_by: string;
+            /**
+             * Dispatch Deadline
+             * Format: date-time
+             */
+            dispatch_deadline: string;
+            /** Image Digest */
+            image_digest: string | null;
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Outstanding Checks */
+            outstanding_checks: string[];
+            /** Policy Version */
+            policy_version: number;
+            /**
+             * Recovery Id
+             * Format: uuid
+             */
+            recovery_id: string;
+            /** Reused Evidence */
+            reused_evidence: string[];
+        };
+        /**
+         * ScreenerVerificationRecoveryResultRequest
+         * @description A worker's report about the replay it actually performed.
+         */
+        ScreenerVerificationRecoveryResultRequest: {
+            /**
+             * Completed Checks
+             * @default []
+             */
+            completed_checks: string[];
+            /** Detail Code */
+            detail_code?: string | null;
+            /** Failure Domain */
+            failure_domain?: ("artifact" | "submission" | "platform" | "provider") | null;
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "verification_complete" | "verification_incomplete";
+            /**
+             * Refuted Leads
+             * @default []
+             */
+            refuted_leads: string[];
+        };
+        /**
+         * ScreenerVerificationRecoveryResultResponse
+         * @description The recorded result, restating that no ruling followed from it.
+         */
+        ScreenerVerificationRecoveryResultResponse: {
+            /** Agent Status */
+            agent_status: string;
+            /**
+             * Decision Recorded
+             * @constant
+             */
+            decision_recorded: false;
+            /** Quarantine Status */
+            quarantine_status: string;
+            recovery: components["schemas"]["VerificationRecoveryView"];
         };
         /**
          * ShadowReviewObservationRequest
@@ -30031,6 +30347,245 @@ export interface components {
             validator_uid: number;
             /** Weights */
             weights?: components["schemas"]["PublicChainWeight"][];
+        };
+        /**
+         * VerificationAuditEvent
+         * @description One append-only audit row for a recovery grant.
+         */
+        VerificationAuditEvent: {
+            /** Actor */
+            actor: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Detail */
+            detail: {
+                [key: string]: unknown;
+            } | null;
+            /** Event */
+            event: string;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            event_id: string;
+        };
+        /**
+         * VerificationCheckState
+         * @description One published mandatory check and what the store actually holds.
+         */
+        VerificationCheckState: {
+            /** Check Id */
+            check_id: string;
+            /**
+             * Lane
+             * @enum {string}
+             */
+            lane: "artifact" | "runtime" | "private_paired" | "review";
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "not_recorded" | "completed" | "outstanding" | "refuted";
+            /** Title */
+            title: string;
+        };
+        /**
+         * VerificationCourtFailure
+         * @description The last automated-court failure on this hold.
+         *
+         *     Reuses the sanitized ``AdjudicationRunDiagnostic`` trace shipped by #2095
+         *     and #2102 instead of introducing a second court-failure shape.
+         */
+        VerificationCourtFailure: {
+            /** Attempt Id */
+            attempt_id: string | null;
+            diagnostic: components["schemas"]["AdjudicationRunDiagnostic"] | null;
+            /** Reason Code */
+            reason_code: string | null;
+            /** Stage */
+            stage: string | null;
+        };
+        /**
+         * VerificationEvidenceBindings
+         * @description The exact identities earlier evidence would have to match to be reused.
+         *
+         *     One field per bound identity in policy v13's "Exact-artifact scope" that can
+         *     be expressed as a digest. ``policy_digest`` is the manifest digest bound
+         *     into the screener's signed verdict, which is the same value #2115 reports
+         *     under that name.
+         */
+        VerificationEvidenceBindings: {
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Challenge Manifest Digest */
+            challenge_manifest_digest: string;
+            /** Image Digest */
+            image_digest: string;
+            /** Opaque Manifest Digest */
+            opaque_manifest_digest: string;
+            /** Policy Digest */
+            policy_digest: string;
+            /** Verification Profile Digest */
+            verification_profile_digest: string;
+        };
+        /**
+         * VerificationFinalizerRead
+         * @description The effective artifact deadline, read from the finalizer surface.
+         *
+         *     This ledger deliberately does **not** compute a deadline. The effective
+         *     finalizer/deadline read is #2100 / #2115's
+         *     ``get_screening_verification_state``; the field names here match it so one
+         *     vocabulary survives. Until that surface is deployed, ``finalizer_state`` is
+         *     ``not_configured`` and ``verification_deadline`` is null. The screening
+         *     attempt lease deadline is reported separately and is not the verification
+         *     deadline.
+         */
+        VerificationFinalizerRead: {
+            /** Attempt Deadline */
+            attempt_deadline: string | null;
+            /** Deadline Provenance */
+            deadline_provenance: string | null;
+            /** Finalizer Reason */
+            finalizer_reason: string;
+            /**
+             * Finalizer State
+             * @enum {string}
+             */
+            finalizer_state: "pending" | "ready" | "finalized" | "not_configured";
+            /**
+             * Source
+             * @constant
+             */
+            source: "screening_verification_state";
+            /** Verification Deadline */
+            verification_deadline: string | null;
+        };
+        /**
+         * VerificationRecoveryView
+         * @description One append-only recovery grant, with the challenge kept private.
+         */
+        VerificationRecoveryView: {
+            /** Actor */
+            actor: string;
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Challenge Commitment */
+            challenge_commitment: string;
+            /** Challenge Manifest Version */
+            challenge_manifest_version: number;
+            /** Claimed At */
+            claimed_at: string | null;
+            /** Claimed By */
+            claimed_by: string | null;
+            /** Completed Checks */
+            completed_checks: string[] | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Dispatch Deadline */
+            dispatch_deadline: string | null;
+            /** Excluded Screener Hotkeys */
+            excluded_screener_hotkeys: string[];
+            /** Failure Domain */
+            failure_domain: ("artifact" | "submission" | "platform" | "provider") | null;
+            /** Image Digest */
+            image_digest: string | null;
+            /** Independent Worker Required */
+            independent_worker_required: boolean;
+            /** Manifest Digest */
+            manifest_digest: string;
+            /** Outcome */
+            outcome: ("verification_complete" | "verification_incomplete") | null;
+            /** Outstanding Checks */
+            outstanding_checks: string[];
+            /** Policy Version */
+            policy_version: number;
+            /**
+             * Quarantine Id
+             * Format: uuid
+             */
+            quarantine_id: string;
+            /** Reason */
+            reason: string;
+            /**
+             * Recovery Id
+             * Format: uuid
+             */
+            recovery_id: string;
+            /** Refuted Leads */
+            refuted_leads: string[] | null;
+            /** Reused Evidence */
+            reused_evidence: string[];
+            /**
+             * Source Attempt Id
+             * Format: uuid
+             */
+            source_attempt_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "queued" | "dispatched" | "completed" | "failed" | "canceled";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * VerificationRuleState
+         * @description One I1-I8 / S1-S3 decision, or an opaque role's evidence state.
+         */
+        VerificationRuleState: {
+            /** Private Tests Required */
+            private_tests_required?: boolean | null;
+            /** Rule Id */
+            rule_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "not_recorded" | "completed" | "outstanding" | "refuted";
+        };
+        /**
+         * VerificationWorkerAttempt
+         * @description One recorded screening attempt on this artifact, with its worker.
+         */
+        VerificationWorkerAttempt: {
+            /**
+             * Attempt Id
+             * Format: uuid
+             */
+            attempt_id: string;
+            /** Failure Provider */
+            failure_provider: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Policy Version */
+            policy_version: number;
+            /** Reason Code */
+            reason_code: string | null;
+            /** Screener Hotkey */
+            screener_hotkey: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Status */
+            status: string;
         };
         /** WeightConsensusObservation */
         WeightConsensusObservation: {
@@ -34932,6 +35487,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminSourceSearchResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_verification_readiness_api_v1_admin_screening_submissions__agent_id__verification_readiness_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminVerificationReadiness"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    authorize_verification_recovery_api_v1_admin_screening_submissions__agent_id__verification_recovery_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminVerificationRecoveryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminVerificationRecoveryResponse"];
                 };
             };
             /** @description Validation Error */
@@ -40298,6 +40925,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubmissionSourceReviewSourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    claim_verification_recovery_api_v1_screener_verification_recovery_claim_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-screener-hotkey"?: string | null;
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScreenerVerificationRecoveryClaim"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    report_verification_recovery_api_v1_screener_verification_recovery__recovery_id__result_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-screener-hotkey"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                recovery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScreenerVerificationRecoveryResultRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScreenerVerificationRecoveryResultResponse"];
                 };
             };
             /** @description Validation Error */

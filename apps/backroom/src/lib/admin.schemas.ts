@@ -8215,3 +8215,203 @@ export const confirmationSeedAnchorsInputSchema = z.object({
 export type ConfirmationSeedAnchorList = z.infer<
   typeof confirmationSeedAnchorListSchema
 >
+
+// --- Policy-v13 verification readiness and bounded recovery replay (#2117) ---
+//
+// The readiness ledger is a read: it reports what the artifact-bound stores
+// actually hold, with `not_recorded` for anything they do not. The recovery
+// write authorizes exactly one replay on the unchanged committed artifact and
+// can never clear, reject, or rule on the hold.
+
+type GeneratedVerificationReadiness =
+  PlatformComponents['schemas']['AdminVerificationReadiness']
+type GeneratedVerificationRecoveryResponse =
+  PlatformComponents['schemas']['AdminVerificationRecoveryResponse']
+
+export const RESUME_VERIFICATION_CONFIRMATION =
+  'RESUME MANDATORY VERIFICATION ON THIS ARTIFACT'
+
+/** A 64-hex digest, or the explicit unknown-evidence sentinel. Never null: a
+ * null would let a reader treat missing evidence as inapplicable. */
+export const verificationDigestSchema = z.union([
+  z.string().regex(/^[0-9a-f]{64}$/),
+  z.literal('not_recorded'),
+])
+
+export const verificationEvidenceStateSchema = z.enum([
+  'not_recorded',
+  'completed',
+  'outstanding',
+  'refuted',
+])
+
+export const verificationFailureDomainSchema = z.enum([
+  'artifact',
+  'submission',
+  'platform',
+  'provider',
+])
+
+export const verificationCheckStateSchema = z.object({
+  check_id: z.string(),
+  ordinal: z.number().int().positive(),
+  lane: z.enum(['artifact', 'runtime', 'private_paired', 'review']),
+  title: z.string(),
+  state: verificationEvidenceStateSchema,
+})
+
+export const verificationRuleStateSchema = z.object({
+  rule_id: z.string(),
+  state: verificationEvidenceStateSchema,
+  private_tests_required: z.boolean().nullish().default(null),
+})
+
+export const verificationEvidenceBindingsSchema = z.object({
+  artifact_sha256: verificationDigestSchema,
+  image_digest: verificationDigestSchema,
+  policy_digest: verificationDigestSchema,
+  opaque_manifest_digest: verificationDigestSchema,
+  verification_profile_digest: verificationDigestSchema,
+  challenge_manifest_digest: verificationDigestSchema,
+})
+
+export const verificationCourtFailureSchema = z.object({
+  attempt_id: z.string().uuid().nullable(),
+  reason_code: z.string().nullable(),
+  stage: z.string().nullable(),
+  diagnostic: adjudicationRunDiagnosticSchema.nullable(),
+})
+
+export const verificationWorkerAttemptSchema = z.object({
+  attempt_id: z.string().uuid(),
+  screener_hotkey: z.string(),
+  policy_version: z.number().int().positive(),
+  status: z.string(),
+  reason_code: z.string().nullable(),
+  failure_provider: z.string().nullable(),
+  started_at: z.string(),
+  finished_at: z.string().nullable(),
+})
+
+export const publishedRetryDefaultsSchema = z.object({
+  artifact_failure_retries: z.number().int().nonnegative(),
+  provider_failure_retries: z.number().int().nonnegative(),
+  platform_failure_retries: z.number().int().nonnegative(),
+  independent_worker_required_for_platform_or_provider: z.boolean(),
+  maximum_verification_window_hours: z.number().int().positive(),
+  provenance: z.string(),
+  enforced: z.boolean(),
+})
+
+/** Mirrors #2115's finalizer vocabulary. This surface never computes a
+ * deadline; `get_screening_verification_state` owns the effective read. */
+export const verificationFinalizerReadSchema = z.object({
+  finalizer_state: z.enum(['pending', 'ready', 'finalized', 'not_configured']),
+  finalizer_reason: z.string(),
+  verification_deadline: z.string().nullable(),
+  deadline_provenance: z.string().nullable(),
+  attempt_deadline: z.string().nullable(),
+  source: z.literal('screening_verification_state'),
+})
+
+export const verificationRecoveryViewSchema = z.object({
+  recovery_id: z.string().uuid(),
+  agent_id: z.string().uuid(),
+  quarantine_id: z.string().uuid(),
+  source_attempt_id: z.string().uuid(),
+  artifact_sha256: z.string(),
+  policy_version: z.number().int().positive(),
+  manifest_digest: z.string(),
+  image_digest: z.string().nullable(),
+  state: z.enum(['queued', 'dispatched', 'completed', 'failed', 'canceled']),
+  outstanding_checks: z.array(z.string()),
+  reused_evidence: z.array(z.string()),
+  // Only the commitment. The hidden randomness itself is released to the
+  // claiming screener and never reaches an operator surface.
+  challenge_commitment: z.string().regex(/^[0-9a-f]{64}$/),
+  challenge_manifest_version: z.number().int().positive(),
+  independent_worker_required: z.boolean(),
+  excluded_screener_hotkeys: z.array(z.string()),
+  claimed_by: z.string().nullable(),
+  claimed_at: z.string().nullable(),
+  dispatch_deadline: z.string().nullable(),
+  outcome: z.enum(['verification_complete', 'verification_incomplete']).nullable(),
+  failure_domain: verificationFailureDomainSchema.nullable(),
+  completed_checks: z.array(z.string()).nullable(),
+  refuted_leads: z.array(z.string()).nullable(),
+  reason: z.string(),
+  actor: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+
+export const verificationAuditEventSchema = z.object({
+  event_id: z.string().uuid(),
+  event: z.string(),
+  actor: z.string(),
+  detail: z.record(z.string(), z.unknown()).nullable(),
+  created_at: z.string(),
+})
+
+export const verificationReadinessSchema = z.object({
+  agent_id: z.string().uuid(),
+  agent_status: z.string(),
+  artifact_sha256: z.string(),
+  policy_version: z.number().int().nonnegative(),
+  quarantine_id: z.string().uuid().nullable(),
+  quarantine_status: z.string().nullable(),
+  quarantine_reason_code: z.string().nullable(),
+  has_established_finding: z.boolean(),
+  is_non_decisive_hold: z.boolean(),
+  evidence_bindings: verificationEvidenceBindingsSchema,
+  mandatory_checks: z.array(verificationCheckStateSchema),
+  outstanding_mandatory_checks: z.array(z.string()),
+  integrity_rules: z.array(verificationRuleStateSchema),
+  security_rules: z.array(verificationRuleStateSchema),
+  opaque_roles: z.array(verificationRuleStateSchema),
+  private_paired_required: z.boolean().nullable(),
+  last_court_failure: verificationCourtFailureSchema.nullable(),
+  attempts: z.array(verificationWorkerAttemptSchema),
+  attempts_recorded: z.number().int().nonnegative(),
+  distinct_workers: z.number().int().nonnegative(),
+  published_retry_defaults: publishedRetryDefaultsSchema,
+  finalizer: verificationFinalizerReadSchema,
+  recovery: verificationRecoveryViewSchema.nullable(),
+  recovery_audit: z.array(verificationAuditEventSchema),
+  evidence_sources: z.array(z.string()),
+  generated_at: z.string(),
+} satisfies PlatformResponseShape<GeneratedVerificationReadiness>)
+
+export const verificationRecoveryResponseSchema = z.object({
+  recovery: verificationRecoveryViewSchema,
+  audit: z.array(verificationAuditEventSchema),
+  idempotent: z.boolean(),
+  agent_status: z.string(),
+  quarantine_status: z.string(),
+} satisfies PlatformResponseShape<GeneratedVerificationRecoveryResponse>)
+
+export const verificationReadinessInputSchema = z.object({
+  agentId: z.string().uuid(),
+})
+
+/** Every pinned identity is a compare-and-swap guard, so a stale operator view
+ * cannot authorize a replay against an artifact, image, policy, or attempt that
+ * has moved. Read them from get_verification_readiness first. */
+export const resumeArtifactVerificationInputSchema = z.strictObject({
+  agentId: z.string().uuid(),
+  reason: auditReasonSchema(8),
+  expectedSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  expectedScoreCount: z.number().int().nonnegative(),
+  expectedAttemptId: z.string().uuid(),
+  expectedAttemptCount: z.number().int().positive(),
+  expectedQuarantineId: z.string().uuid(),
+  expectedPolicyVersion: z.number().int().positive(),
+  expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  // Null is the real "no screened image is pinned", which is a distinct bound
+  // identity from any digest and must be stated rather than omitted.
+  expectedImageDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  confirmation: z.literal(RESUME_VERIFICATION_CONFIRMATION),
+})

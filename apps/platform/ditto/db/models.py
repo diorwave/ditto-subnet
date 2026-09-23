@@ -1068,6 +1068,222 @@ class ScreeningQuarantineResolution(Base):
     )
 
 
+class ScreeningVerificationRecovery(Base):
+    """One operator grant to resume the missing v13 mandatory verification.
+
+    This is an append-only *authorization*, not a screening outcome. It pins
+    every identity policy v13 binds a decision to, records which mandatory
+    checks are outstanding and which recorded evidence may be reused, and
+    commits to fresh hidden challenge randomness generated after the artifact
+    was committed. Completing it never clears, rejects, or rules on the hold:
+    the quarantine stays active and the agent's status is untouched.
+
+    One grant per exact non-decisive attempt, mirroring
+    :class:`ScreeningRetryOverride`. A second bite requires a new attempt.
+    """
+
+    __tablename__ = "screening_verification_recoveries"
+
+    recovery_id: Mapped[UUID] = mapped_column(SaUUID(as_uuid=True), primary_key=True)
+    agent_id: Mapped[UUID] = mapped_column(SaUUID(as_uuid=True), nullable=False)
+    quarantine_id: Mapped[UUID] = mapped_column(SaUUID(as_uuid=True), nullable=False)
+    source_attempt_id: Mapped[UUID] = mapped_column(
+        SaUUID(as_uuid=True), nullable=False
+    )
+    """The exact non-decisive attempt whose verification never completed."""
+
+    artifact_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    manifest_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    image_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """Effective screened-image digest at grant time; null when none is pinned.
+
+    A null here is a real absence -- the artifact has no verified screened image
+    -- rather than unrecorded evidence."""
+
+    expected_score_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    outstanding_checks: Mapped[list] = mapped_column(_JSON_VARIANT, nullable=False)
+    """Published mandatory-check ids this grant is authorized to complete."""
+
+    reused_evidence: Mapped[list] = mapped_column(_JSON_VARIANT, nullable=False)
+    """Check ids whose recorded evidence matched every bound identity.
+
+    Empty whenever no artifact-bound per-check evidence exists, which is the
+    normal case today. Evidence is never reused across a role, profile, or
+    digest mismatch."""
+
+    challenge_commitment: Mapped[str] = mapped_column(Text, nullable=False)
+    """SHA-256 of the hidden challenge randomness, safe to publish."""
+
+    challenge_manifest_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    challenge_seed_sealed: Mapped[str] = mapped_column(Text, nullable=False)
+    """The hidden randomness itself. Private challenge material.
+
+    Never serialized by an admin, Backroom, public, or audit payload. It is
+    released exactly once, to the authenticated screener that claims this
+    grant, and no wire model outside that claim response may reference it."""
+
+    independent_worker_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    excluded_screener_hotkeys: Mapped[list] = mapped_column(
+        _JSON_VARIANT, nullable=False
+    )
+    """Workers that already attempted this artifact under the current policy."""
+
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    dispatch_deadline: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_checks: Mapped[list | None] = mapped_column(
+        _NULLABLE_JSON_VARIANT, nullable=True
+    )
+    refuted_leads: Mapped[list | None] = mapped_column(
+        _NULLABLE_JSON_VARIANT, nullable=True
+    )
+    """I1-I8 / S1-S3 leads this replay refuted. Evidence, never a clearance."""
+
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(["agent_id"], ["agents.agent_id"], ondelete="CASCADE"),
+        ForeignKeyConstraint(
+            ["quarantine_id"],
+            ["screening_quarantines.quarantine_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["source_attempt_id"],
+            ["screening_attempts.attempt_id"],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "source_attempt_id",
+            name="screening_verification_recoveries_attempt_key",
+        ),
+        CheckConstraint(
+            "length(artifact_sha256) = 64",
+            name="screening_verification_recoveries_sha_check",
+        ),
+        CheckConstraint(
+            "policy_version > 0",
+            name="screening_verification_recoveries_policy_check",
+        ),
+        CheckConstraint(
+            "expected_score_count >= 0 AND expected_attempt_count >= 0",
+            name="screening_verification_recoveries_counts_check",
+        ),
+        CheckConstraint(
+            "challenge_manifest_version > 0",
+            name="screening_verification_recoveries_manifest_version_check",
+        ),
+        CheckConstraint(
+            "state IN ('queued', 'dispatched', 'completed', 'failed', 'canceled')",
+            name="screening_verification_recoveries_state_check",
+        ),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN "
+            "('verification_complete', 'verification_incomplete')",
+            name="screening_verification_recoveries_outcome_check",
+        ),
+        CheckConstraint(
+            "failure_domain IS NULL OR failure_domain IN "
+            "('artifact', 'submission', 'platform', 'provider')",
+            name="screening_verification_recoveries_domain_check",
+        ),
+        # A completed grant reports a completed replay; an incomplete one must
+        # name the failure domain so the evidence stays attributable.
+        CheckConstraint(
+            "(state = 'completed' AND outcome = 'verification_complete') OR "
+            "(state = 'failed' AND outcome = 'verification_incomplete' "
+            "AND failure_domain IS NOT NULL) OR "
+            "(state IN ('queued', 'dispatched', 'canceled') AND outcome IS NULL)",
+            name="screening_verification_recoveries_terminal_check",
+        ),
+        CheckConstraint(
+            "state <> 'queued' OR (claimed_by IS NULL AND claimed_at IS NULL)",
+            name="screening_verification_recoveries_claim_check",
+        ),
+        CheckConstraint(
+            "length(trim(reason)) >= 8",
+            name="screening_verification_recoveries_reason_check",
+        ),
+        CheckConstraint(
+            "length(trim(actor)) BETWEEN 1 AND 120",
+            name="screening_verification_recoveries_actor_check",
+        ),
+        # At most one open grant per agent: the duplicate-replay guard.
+        Index(
+            "screening_verification_recoveries_one_open_idx",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("state IN ('queued', 'dispatched')"),
+            sqlite_where=text("state IN ('queued', 'dispatched')"),
+        ),
+        Index(
+            "screening_verification_recoveries_agent_created_idx",
+            "agent_id",
+            "created_at",
+            "recovery_id",
+        ),
+        Index(
+            "screening_verification_recoveries_queued_idx",
+            "created_at",
+            postgresql_where=text("state = 'queued'"),
+            sqlite_where=text("state = 'queued'"),
+        ),
+    )
+
+
+class ScreeningVerificationEvent(Base):
+    """Append-only attempt/evidence audit for one verification-recovery grant."""
+
+    __tablename__ = "screening_verification_events"
+
+    event_id: Mapped[UUID] = mapped_column(SaUUID(as_uuid=True), primary_key=True)
+    recovery_id: Mapped[UUID] = mapped_column(SaUUID(as_uuid=True), nullable=False)
+    event: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict | None] = mapped_column(_NULLABLE_JSON_VARIANT, nullable=True)
+    """Bounded public-safe detail. Never challenge material or source text."""
+
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["recovery_id"],
+            ["screening_verification_recoveries.recovery_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "length(trim(actor)) BETWEEN 1 AND 120",
+            name="screening_verification_events_actor_check",
+        ),
+        Index(
+            "screening_verification_events_recovery_created_idx",
+            "recovery_id",
+            "created_at",
+            "event_id",
+        ),
+    )
+
+
 class ScreeningDispute(Base):
     """One miner-authenticated appeal: of a rejected screening decision
     (``kind = 'screening'``) or of cited bench v13+ gate notes on a scored

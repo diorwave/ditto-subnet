@@ -48,6 +48,8 @@ import {
   screeningDisputeResolutionSchema,
   screeningArtifactInputSchema,
   screeningFailureDiagnosticInputSchema,
+  verificationReadinessInputSchema,
+  resumeArtifactVerificationInputSchema,
   screeningSubmissionLookupInputSchema,
   sourceSearchInputSchema,
   ownerAttestationLookupInputSchema,
@@ -143,6 +145,8 @@ import {
   fetchScreeningQuarantines,
   fetchScreeningDisputes,
   fetchScreeningFailureDiagnostic,
+  fetchVerificationReadiness,
+  resumeArtifactVerification,
   fetchScreeningSubmission,
   fetchScreeningSubmissions,
   fetchScreeningFailureSummary,
@@ -340,6 +344,7 @@ export const WRITE_TOOL_NAMES = new Set([
   'set_burn_settings',
   'set_confirmation_bundle_settings',
   'authorize_confirmation_bundle_retest',
+  'resume_artifact_verification',
 ])
 
 export const TOOL_SCOPE_REQUIREMENTS = new Map<string, string>([
@@ -639,6 +644,10 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Group active-benchmark screening / screening_failed agents by reason_code. Pass generation=all only for a cross-benchmark audit. Use get_screening_submission for one row.',
   get_screening_failure_diagnostic:
     'Private exact-attempt failure diagnostic; artifact scope.',
+  get_verification_readiness:
+    "One exact artifact's policy-v13 verification readiness: pinned identities, which of the 19 mandatory checks and I1-I8/S1-S3 rules have a recorded outcome, what is outstanding, the last court failure, workers, retry defaults, any recovery grant. Unknown evidence is not_recorded, never a pass.",
+  resume_artifact_verification:
+    'Authorize one replay of the outstanding mandatory verification on the unchanged committed artifact; guards from get_verification_readiness. Confirmation: RESUME MANDATORY VERIFICATION ON THIS ARTIFACT. Never clears, rejects, or rules. Requires backroom:write.',
   reject_screening_submission:
     'Reject a screening row. Confirmation: REJECT SCREENING SUBMISSION. Requires backroom:write.',
   get_queue_policy_settings:
@@ -1178,6 +1187,31 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       artifact(() =>
         fetchScreeningFailureDiagnostic(input, props.session.email),
       ),
+  )
+
+  registerTool(
+    'get_verification_readiness',
+    {
+      title: 'Get verification readiness',
+      description:
+        "Read one exact agent UUID's policy-v13 verification readiness. Reports the bound identities a decision attaches to (artifact SHA, effective screened-image digest, policy digest, opaque manifest, verification-profile digest, challenge manifest), each of the 19 published mandatory checks with its lane and recorded state, the I1-I8 and S1-S3 rules, every opaque role with whether its published requirement includes private paired testing, which checks are outstanding, the last sanitized court failure (reusing the same trace as get_screening_failure_diagnostic), every recorded attempt with its worker hotkey, the published retry defaults, the finalizer read, and any recovery grant with its append-only audit. UNKNOWN EVIDENCE IS `not_recorded`, NOT A PASS AND NOT A FAILURE: the active hold schema persists no per-check outcome, so almost everything reads not_recorded today, and you must never infer a completed check from L1 review notes, a reviewer summary, or a missing leaderboard field. `evidence_sources` lists exactly which stores were consulted and deliberately excludes review notes. A null `verification_deadline` here means this surface does not compute one — read get_screening_verification_state for the effective finalizer deadline; `attempt_deadline` is the screening lease, not the verification deadline. `published_retry_defaults.enforced` is false: those are the policy's recommended numbers, not a deployed budget. Reading this clears nothing, rejects nothing, and queues nothing. Requires backroom:read; no miner source and no private challenge content.",
+      inputSchema: verificationReadinessInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchVerificationReadiness(input, props.session.email)),
+  )
+
+  registerTool(
+    'resume_artifact_verification',
+    {
+      title: 'Resume artifact verification',
+      description:
+        'Authorize exactly ONE replay of the outstanding mandatory verification on the unchanged committed artifact, for a hold that a non-decisive court or infrastructure failure left incomplete. This is the third option next to release and reject: it does not repeat the source review and it does not decide anything. Read every guard from get_verification_readiness immediately before calling — expectedSha256, expectedImageDigest (null when no screened image is pinned), expectedScoreCount, expectedAttemptId, expectedAttemptCount, expectedQuarantineId, expectedPolicyVersion, expectedManifestDigest — because each one is a compare-and-swap and a moved identity is refused with 409 rather than replayed against different bytes. REFUSED when the hold carries an established finding: a proven finding belongs to the decision path, not here. One grant per exact attempt; an identical repeat is idempotent and a changed guard set conflicts, so this cannot create duplicate paid work. Platform draws fresh hidden challenge randomness only after confirming the artifact identity and returns just its commitment — the randomness itself goes only to the claiming screener, and the published procedure requires an INDEPENDENT worker, so a screener that already attempted this artifact cannot take the replay. WHAT IT CAN NEVER DO: it never changes the agent status, never resolves the quarantine, and a complete, partial, or failed replay never becomes a CLEAR, a misconduct REJECT, or a no-fault V1/V2/V3 ruling. Terminal decisions still go through the published decision record and the deadline/retry procedure. Confirmation: RESUME MANDATORY VERIFICATION ON THIS ARTIFACT. Requires backroom:write.',
+      inputSchema: resumeArtifactVerificationInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) =>
+      write(() => resumeArtifactVerification(input, props.session.email)),
   )
 
   registerTool(

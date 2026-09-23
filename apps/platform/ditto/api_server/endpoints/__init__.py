@@ -177,6 +177,12 @@ from ditto.api_server.endpoints.validator_coding_inference import (
 from ditto.api_server.endpoints.validator_confirmation import (
     router as validator_confirmation_router,
 )
+from ditto.api_server.endpoints.verification_recovery import (
+    admin_router as admin_verification_recovery_router,
+)
+from ditto.api_server.endpoints.verification_recovery import (
+    screener_router as screener_verification_recovery_router,
+)
 
 __all__ = [
     "health_router",
@@ -234,6 +240,8 @@ __all__ = [
     "retrieval_router",
     "scoring_router",
     "screener_router",
+    "admin_verification_recovery_router",
+    "screener_verification_recovery_router",
     "attestation_router",
     "name_claims_router",
     "upload_router",

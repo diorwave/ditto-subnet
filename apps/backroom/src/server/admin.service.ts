@@ -108,6 +108,10 @@ import {
   screeningArtifactSchema,
   screeningFailureDiagnosticInputSchema,
   screeningFailureDiagnosticSchema,
+  verificationReadinessInputSchema,
+  verificationReadinessSchema,
+  resumeArtifactVerificationInputSchema,
+  verificationRecoveryResponseSchema,
   screeningSubmissionLookupInputSchema,
   screeningSubmissionSchema,
   screeningSubmissionListSchema,
@@ -3169,4 +3173,39 @@ export async function authorizeConversationRetry(actor: string, rawInput: unknow
     method: 'POST', body: { ...input, actor }, actor,
   })
   return conversationObservationsSchema.parse(payload)
+}
+
+// --- Policy-v13 verification readiness and bounded recovery replay (#2117) ---
+
+export async function fetchVerificationReadiness(rawInput: unknown, actor: string) {
+  const input = verificationReadinessInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/screening-submissions/${encodeURIComponent(input.agentId)}/verification-readiness`,
+    { actor },
+  )
+  return verificationReadinessSchema.parse(payload)
+}
+
+export async function resumeArtifactVerification(rawInput: unknown, actor: string) {
+  const input = resumeArtifactVerificationInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/screening-submissions/${encodeURIComponent(input.agentId)}/verification-recovery`,
+    {
+      method: 'POST',
+      actor,
+      body: {
+        reason: input.reason,
+        expected_sha256: input.expectedSha256,
+        expected_score_count: input.expectedScoreCount,
+        expected_attempt_id: input.expectedAttemptId,
+        expected_attempt_count: input.expectedAttemptCount,
+        expected_quarantine_id: input.expectedQuarantineId,
+        expected_policy_version: input.expectedPolicyVersion,
+        expected_manifest_digest: input.expectedManifestDigest,
+        expected_image_digest: input.expectedImageDigest,
+        confirmation: input.confirmation,
+      },
+    },
+  )
+  return verificationRecoveryResponseSchema.parse(payload)
 }
