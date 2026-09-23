@@ -130,6 +130,7 @@ const readiness = {
       model: 'z-ai/glm-5.3-flash',
       provider: 'openrouter',
       upstream: 'sail-research',
+      request_count: 0,
     },
   },
   attempts: [

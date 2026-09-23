@@ -307,6 +307,7 @@ export const screenerReviewSettingsSchema = z
     adjudicator_model: z.literal('z-ai/glm-5.3-flash').default('z-ai/glm-5.3-flash'),
     adjudicator_max_steps: z.number().int().min(1).max(1024).default(128),
     adjudicator_timeout_seconds: z.number().int().min(60).max(3_600).default(600),
+    adjudicator_max_completion_tokens: z.number().int().min(1_000).max(128_000).nullable().default(null),
     fanout_shadow_mode: z.enum(['off', 'shadow']).default('off'),
     fanout_shadow_image_source_sha: z.string().regex(/^[0-9a-f]{40}$/).default('0'.repeat(40)),
     fanout_shadow_model: z.literal('z-ai/glm-5.3-flash').default('z-ai/glm-5.3-flash'),
@@ -341,6 +342,13 @@ export const screenerReviewSettingsSchema = z
         code: 'custom',
         message: 'Completion budget cannot exceed output budget',
         path: ['max_completion_tokens'],
+      })
+    }
+    if (value.adjudicator_max_completion_tokens !== null && value.adjudicator_max_completion_tokens > value.max_output_tokens) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Adjudicator completion budget cannot exceed output budget',
+        path: ['adjudicator_max_completion_tokens'],
       })
     }
     if (
@@ -4309,10 +4317,37 @@ export const screeningAttemptSchema = z.object({
   duplicate_version: z.number().int().positive().nullish().default(null),
 })
 
+export const adjudicationRequestAttemptDiagnosticSchema = z.object({
+  ordinal: z.number().int().min(1).max(1_024),
+  started_ms: z.number().int().min(0).max(3_600_000),
+  elapsed_ms: z.number().int().min(0).max(3_600_000),
+  stage: z.enum(['request', 'headers', 'bytes', 'event', 'complete']),
+  stream_requested: z.boolean(),
+  prompt_bytes: z.number().int().min(0).max(20_000_000),
+  http_status: z.number().int().min(100).max(599).nullish(),
+  headers_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  first_byte_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  last_byte_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  first_event_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  last_event_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  event_count: z.number().int().min(0).max(100_000),
+  wire_bytes: z.number().int().min(0).max(20_000_000),
+  upstream: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/).nullish(),
+})
+
 export const adjudicationRunDiagnosticSchema = z.object({
   error_class: z
     .string()
     .regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/)
+    .nullish(),
+  failure_code: z
+    .enum([
+      'completion-timeout', 'provider-http-error', 'provider-stream-error',
+      'provider-body-error', 'transport-error', 'stream-incomplete',
+      'stream-no-tool-call', 'stream-invalid', 'response-too-large',
+      'response-json-invalid', 'tool-call-invalid', 'verdict-invalid',
+      'lease-budget', 'step-budget', 'response-invalid',
+    ])
     .nullish(),
   escalation_code: z
     .string()
@@ -4340,6 +4375,12 @@ export const adjudicationRunDiagnosticSchema = z.object({
     .string()
     .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
     .nullish(),
+  /** Bounded per-request timeline; contains counts and times, never prompt or response text. */
+  // Mirrors the protocol model's `request_count = 0` default, so an older
+  // Platform that omits it still parses while the output stays the generated
+  // required `number`.
+  request_count: z.number().int().min(0).max(1_024).default(0),
+  request_attempts: z.array(adjudicationRequestAttemptDiagnosticSchema).max(32).optional(),
 })
 
 export const screeningFailureDiagnosticSchema = z.object({
@@ -4367,6 +4408,32 @@ export const screeningFailureDiagnosticSchema = z.object({
   // failures that were not an automated-court run. Older Platform responses
   // omit the key; treat that the same as an absent trace.
   court_diagnostic: adjudicationRunDiagnosticSchema.nullish().default(null),
+})
+
+export const screeningVerificationReadinessSchema = z.object({
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  attempt_id: z.string().uuid(),
+  policy_version: z.literal(13),
+  attempt_status: z.string(),
+  checks: z.array(z.object({
+    check_code: z.string().regex(/^[a-z0-9_]{1,64}$/),
+    record_status: z.enum(['not_recorded', 'recorded_unverified']),
+    receipt_count: z.number().int().nonnegative(),
+  })).length(20),
+  private_metamorphic_applicability: z.literal('not_recorded'),
+  receipts: z.array(z.object({
+    receipt_id: z.string().uuid(),
+    check_code: z.string().regex(/^[a-z0-9_]{1,64}$/),
+    evidence_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    image_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    profile_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    challenge_manifest_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    worker_hotkey: z.string().min(1).max(120),
+    created_at: z.string(),
+  })).max(128),
+  receipt_count: z.number().int().nonnegative(),
+  receipts_truncated: z.boolean(),
 })
 
 export const screeningImageBuildSchema = z.object({
@@ -7242,6 +7309,9 @@ export type ScreeningDisputeKind = z.infer<typeof screeningDisputeKindSchema>
 export type ScreeningSubmission = z.infer<typeof screeningSubmissionSchema>
 export type ScreeningFailureDiagnostic = z.infer<
   typeof screeningFailureDiagnosticSchema
+>
+export type ScreeningVerificationReadiness = z.infer<
+  typeof screeningVerificationReadinessSchema
 >
 export type ScreeningEvidenceItem = z.infer<typeof screeningEvidenceItemSchema>
 export type SourceReviewFinding = z.infer<typeof sourceReviewFindingSchema>

@@ -208,6 +208,7 @@ describe('Backroom MCP tools', () => {
         'get_screening_quarantine_contexts',
         'get_screening_review_queue',
         'get_screening_failure_diagnostic',
+        'get_screening_verification_readiness',
         'get_screening_submission',
         'get_source_release_policy',
         'get_owner_attestations',
@@ -343,11 +344,13 @@ describe('Backroom MCP tools', () => {
     // One bounded conversation observation tool adds ~900 bytes.
     // The audited retry adds exact report/artifact digests; measured 136,355 bytes.
     // Exact-agent continual retest diagnosis adds one bounded read schema.
+    // The optional L4 completion cap and exact-attempt v13 receipt inventory
+    // add small bounded schemas without expanding tool descriptions.
     // The policy-v13 verification-recovery pair (#2117) adds one bounded read
     // and one write whose eight compare-and-swap guards are what make the
-    // replay safe; measured catalog is 140,187 bytes. Both catalog lines stay
-    // one-liners, so this is schema weight rather than prose.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(140_400)
+    // replay safe. Both catalog lines stay one-liners, so this is schema
+    // weight rather than prose. Measured 141,176 bytes together.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(141_300)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener

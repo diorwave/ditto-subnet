@@ -112,6 +112,7 @@ import {
   verificationReadinessSchema,
   resumeArtifactVerificationInputSchema,
   verificationRecoveryResponseSchema,
+  screeningVerificationReadinessSchema,
   screeningSubmissionLookupInputSchema,
   screeningSubmissionSchema,
   screeningSubmissionListSchema,
@@ -1906,6 +1907,15 @@ export async function fetchScreeningFailureDiagnostic(rawInput: unknown, actor: 
     { actor },
   )
   return screeningFailureDiagnosticSchema.parse(payload)
+}
+
+export async function fetchScreeningVerificationReadiness(rawInput: unknown, actor: string) {
+  const input = screeningFailureDiagnosticInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/screening-submissions/${encodeURIComponent(input.agentId)}/attempts/${encodeURIComponent(input.attemptId)}/verification-readiness`,
+    { actor },
+  )
+  return screeningVerificationReadinessSchema.parse(payload)
 }
 
 export async function fetchScreeningFailureSummary(rawInput: unknown = {}) {

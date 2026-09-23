@@ -4226,6 +4226,34 @@ CREATE TABLE public.screening_verification_events (
 
 
 --
+-- Name: screening_verification_receipts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.screening_verification_receipts (
+    receipt_id uuid NOT NULL,
+    agent_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    artifact_sha256 text NOT NULL,
+    policy_version integer NOT NULL,
+    check_code text NOT NULL,
+    evidence_sha256 text NOT NULL,
+    image_sha256 text,
+    profile_sha256 text,
+    challenge_manifest_sha256 text,
+    worker_hotkey text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_screening_verification_receipts_svr_artifact_sha_check CHECK ((length(artifact_sha256) = 64)),
+    CONSTRAINT ck_screening_verification_receipts_svr_check_code_check CHECK (((length(check_code) >= 1) AND (length(check_code) <= 64))),
+    CONSTRAINT ck_screening_verification_receipts_svr_evidence_sha_check CHECK ((length(evidence_sha256) = 64)),
+    CONSTRAINT ck_screening_verification_receipts_svr_image_sha_check CHECK (((image_sha256 IS NULL) OR (length(image_sha256) = 64))),
+    CONSTRAINT ck_screening_verification_receipts_svr_manifest_sha_check CHECK (((challenge_manifest_sha256 IS NULL) OR (length(challenge_manifest_sha256) = 64))),
+    CONSTRAINT ck_screening_verification_receipts_svr_policy_version_check CHECK ((policy_version > 0)),
+    CONSTRAINT ck_screening_verification_receipts_svr_profile_sha_check CHECK (((profile_sha256 IS NULL) OR (length(profile_sha256) = 64))),
+    CONSTRAINT ck_screening_verification_receipts_svr_worker_check CHECK (((length(worker_hotkey) >= 1) AND (length(worker_hotkey) <= 120)))
+);
+
+
+--
 -- Name: screening_verification_recoveries; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6654,6 +6682,14 @@ ALTER TABLE ONLY public.screening_verification_events
 
 
 --
+-- Name: screening_verification_receipts pk_screening_verification_receipts; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_receipts
+    ADD CONSTRAINT pk_screening_verification_receipts PRIMARY KEY (receipt_id);
+
+
+--
 -- Name: screening_verification_recoveries pk_screening_verification_recoveries; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8218,6 +8254,13 @@ CREATE INDEX submission_source_reviews_queue_idx ON public.submission_source_rev
 
 
 --
+-- Name: svr_attempt_created_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX svr_attempt_created_idx ON public.screening_verification_receipts USING btree (attempt_id, created_at, receipt_id);
+
+
+--
 -- Name: trusted_image_builds_queue_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9347,6 +9390,22 @@ ALTER TABLE ONLY public.screener_fanout_shadow_reviews
 
 ALTER TABLE ONLY public.screening_verification_events
     ADD CONSTRAINT fk_screening_verification_events_recovery_id_screening__5e21 FOREIGN KEY (recovery_id) REFERENCES public.screening_verification_recoveries(recovery_id) ON DELETE CASCADE;
+
+
+--
+-- Name: screening_verification_receipts fk_screening_verification_receipts_agent_id_agents; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_receipts
+    ADD CONSTRAINT fk_screening_verification_receipts_agent_id_agents FOREIGN KEY (agent_id) REFERENCES public.agents(agent_id) ON DELETE CASCADE;
+
+
+--
+-- Name: screening_verification_receipts fk_screening_verification_receipts_attempt_id_screening_3974; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.screening_verification_receipts
+    ADD CONSTRAINT fk_screening_verification_receipts_attempt_id_screening_3974 FOREIGN KEY (attempt_id) REFERENCES public.screening_attempts(attempt_id) ON DELETE CASCADE;
 
 
 --
