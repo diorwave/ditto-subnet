@@ -166,6 +166,7 @@ describe('Backroom MCP tools', () => {
         'get_confirmation_bundle',
         'get_confirmation_lane_diagnosis',
         'get_efficiency_bonus_settings',
+        'get_emission_eligibility_policy',
         'get_inference_concurrency_settings',
         'get_inference_runtime_metrics',
         'list_inference_traces',
@@ -226,6 +227,7 @@ describe('Backroom MCP tools', () => {
         'issue_coding_shadow_ticket_set',
         'get_validator_weight_diagnostics',
         'get_agent_core_qualification',
+        'get_agent_emission_eligibility',
         'get_agent_scores',
         'get_leaderboard',
         'get_ledger_epoch_snapshots',
@@ -341,7 +343,10 @@ describe('Backroom MCP tools', () => {
     // One bounded conversation observation tool adds ~900 bytes.
     // The audited retry adds exact report/artifact digests; measured 136,355 bytes.
     // Exact-agent continual retest diagnosis adds one bounded read schema.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(137_200)
+    // The two terminal-review eligibility reads (#2041) add the settings-history
+    // input and one uuid input; measured catalog is 139,052 bytes. Both are
+    // read-only and their operational notes live in get_backroom_tool_help.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(139_200)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -360,7 +365,10 @@ describe('Backroom MCP tools', () => {
     // the one-line bench v13 gate-evidence and dispute-kind notes on the score
     // and dispute tools land at 25_237, so it moves to 25_400.
     expect(descriptions.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
-      25_700, // Includes the exact-agent continual retest read summary.
+      // Includes the exact-agent continual retest read summary, plus the two
+      // one-line terminal-review eligibility reads (#2041); their operational
+      // notes live in get_backroom_tool_help, not here.
+      26_200,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
