@@ -6588,7 +6588,11 @@ export const benchmarkRolloutStateSchema = z.object({
   cohort_size: z.number().int().nonnegative().optional().default(0),
   cohort_ready_count: z.number().int().nonnegative().optional().default(0),
   priority_cohort_size: z.number().int().positive().optional().default(5),
+  // Promotion progress. Nullish so an older Platform still parses.
+  priority_cohort_ready_count: z.number().int().nonnegative().nullish().default(null),
   priority_complete: z.boolean().optional().default(false),
+  promotion_pending: z.boolean().nullish().default(null),
+  promotion_requirement: z.string().nullish().default(null),
   members: z.array(benchmarkRolloutMemberSchema),
   qualification_blockers: z
     .array(z.record(z.string(), z.string()))
@@ -7799,6 +7803,12 @@ export const publicLeaderboardSchema = z.object({
   generated_at: z.string(),
   count: z.number().int().nonnegative(),
   current_bench_version: z.number().int().positive(),
+  // #2098's names for the two versions a rollout splits: what the board is
+  // scored on, and the ledger pin that pays. Nullish because Platform and
+  // Backroom ship together but do not deploy atomically, and an older
+  // Platform must not fail an operator board read.
+  scoring_bench_version: z.number().int().positive().nullish().default(null),
+  emission_bench_version: z.number().int().positive().nullish().default(null),
   active_bench_version: z.number().int().positive(),
   desired_bench_version: z.number().int().positive(),
   available_bench_versions: z.array(z.number().int().positive()),
@@ -7807,11 +7817,33 @@ export const publicLeaderboardSchema = z.object({
   emissions: publicKothEmissionsSchema.nullable().optional(),
 })
 
+/**
+ * What emission authority is still waiting for, from `/public/bench/rollout`.
+ * Relayed rather than re-worded, so an operator's answer to "why is the new
+ * version not paying" is Platform's own gate sentence. Every progress field is
+ * nullish so a Platform that predates them still yields a readable object.
+ */
+export const leaderboardRolloutPromotionSchema = z.object({
+  active_version: z.number().int().positive(),
+  desired_version: z.number().int().positive(),
+  status: z.string(),
+  promotion_pending: z.boolean().nullish().default(null),
+  promotion_requirement: z.string().nullish().default(null),
+  priority_cohort_size: z.number().int().nonnegative().nullish().default(null),
+  priority_cohort_ready_count: z.number().int().nonnegative().nullish().default(null),
+  ranked_quorum_agents: z.number().int().nonnegative().nullish().default(null),
+  min_ranked_quorum_agents: z.number().int().nonnegative().nullish().default(null),
+})
+
 export const scoreLeaderboardPageSchema = z.object({
   generated_at: z.string(),
   current_bench_version: z.number().int().positive(),
+  scoring_bench_version: z.number().int().positive().nullish().default(null),
+  emission_bench_version: z.number().int().positive().nullish().default(null),
   active_bench_version: z.number().int().positive(),
   desired_bench_version: z.number().int().positive(),
+  // Null on a historical board, or when the rollout status was unreadable.
+  rollout_promotion: leaderboardRolloutPromotionSchema.nullable().default(null),
   available_bench_versions: z.array(z.number().int().positive()),
   selection_mode: z.enum(['authoritative', 'historical']),
   status: z.enum(['all', 'finalized', 'provisional']),

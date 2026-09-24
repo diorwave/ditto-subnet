@@ -4817,11 +4817,19 @@ class PublicBenchRolloutResponse(BaseModel):
     """Benchmark-version rollout state (``GET /public/bench/rollout``).
 
     Two versions matter here and they are not the same number:
-    ``active_version`` is the one that currently drives on-chain weights, and
-    ``desired_version`` is the one being rolled out. The whole ledger switches
-    at once, and only once ``ranked_quorum_agents`` reaches
-    ``min_ranked_quorum_agents``: that gate is what guarantees the emission set
-    (champion plus tail) is never short at the moment authority moves.
+    ``active_version`` is the one that currently drives on-chain weights (the
+    leaderboard's ``emission_bench_version``), and ``desired_version`` is the
+    one being rolled out and scored. ``desired_version`` leading
+    ``active_version`` is the normal mid-rollout state, not a stall.
+
+    The whole ledger switches at once, and only once BOTH gates close: every
+    position in the frozen priority cohort holds a complete per-agent quorum at
+    ``desired_version`` (``priority_cohort_ready_count`` of
+    ``priority_cohort_size``), and ``ranked_quorum_agents`` reaches
+    ``min_ranked_quorum_agents``, which guarantees the emission set (champion
+    plus tail) is never short at the moment authority moves.
+    ``promotion_pending`` / ``promotion_requirement`` state that in one flag
+    and one sentence.
 
     Extra keys are preserved rather than dropped: this model documents the shape
     without becoming a filter on it.
@@ -4837,6 +4845,24 @@ class PublicBenchRolloutResponse(BaseModel):
     )
     status: str = Field(
         description="inactive | collecting | superseded | activated | blocked."
+    )
+    promotion_pending: bool = Field(
+        default=False,
+        description=(
+            "True while desired_version is being collected and has not yet "
+            "taken emission authority. The normal mid-rollout state, not a "
+            "stall."
+        ),
+    )
+    promotion_requirement: str | None = Field(
+        default=None,
+        description=(
+            "The gates that must close before emission authority moves to "
+            "desired_version, in one sentence built from their live values: "
+            "the priority-cohort quorum over the frozen inherited prefix and "
+            "the ranked quorum over the emission set. Null when nothing is "
+            "pending."
+        ),
     )
     blocked_reason: str | None = None
     capability_bench_version: int
@@ -4876,6 +4902,14 @@ class PublicBenchRolloutResponse(BaseModel):
     priority_cohort_size: int = Field(
         default=5,
         description="Inherited leaders that must finish before later cohort work.",
+    )
+    priority_cohort_ready_count: int = Field(
+        default=0,
+        description=(
+            "Priority-cohort members that already satisfy the barrier, out of "
+            "priority_cohort_size: a complete desired-version quorum, or "
+            "permanently ineligible (skipped exactly as the gate skips them)."
+        ),
     )
     priority_complete: bool = Field(
         default=False,

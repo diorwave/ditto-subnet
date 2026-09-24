@@ -8094,7 +8094,8 @@ async def benchmark_rollout_state(
     ``ranked_quorum_agents`` / ``min_ranked_quorum_agents`` answer the question
     the rest of this payload only implies: how close the desired version is to
     taking over weight-setting. Weights stay on ``active_version`` until the
-    former reaches the latter.
+    priority-cohort gate closes AND the former reaches the latter;
+    ``promotion_pending`` / ``promotion_requirement`` say so directly.
     """
     response.headers["Cache-Control"] = "public, max-age=30"
     state = await rollout_state(session)

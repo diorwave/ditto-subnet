@@ -291,6 +291,7 @@ import {
   ownerFootprintSchema,
   ownerFootprintDetailSchema,
   publicAgentScoresSchema,
+  leaderboardRolloutPromotionSchema,
   publicLeaderboardSchema,
   publicSubmissionPipelineSchema,
   scoreLeaderboardInputSchema,
@@ -2977,17 +2978,42 @@ async function fetchPublicSubmissionPipeline(agentId: string) {
   }
 }
 
+/**
+ * The rollout's promotion progress for the authoritative board, or null.
+ *
+ * Best-effort by design: this explains the board, it is not the board. A
+ * rollout read that fails or returns an unrecognizable shape degrades to null
+ * instead of failing the leaderboard an operator asked for.
+ */
+async function fetchRolloutPromotion() {
+  try {
+    const payload = await platformPublicRequest('/api/v1/public/bench/rollout')
+    const parsed = leaderboardRolloutPromotionSchema.safeParse(payload)
+    return parsed.success ? parsed.data : null
+  } catch {
+    return null
+  }
+}
+
 export async function fetchScoreLeaderboard(rawInput: unknown) {
   const input = scoreLeaderboardInputSchema.parse(rawInput)
-  const board = await fetchLeaderboardSnapshot(input.benchVersion)
+  // A historical board is a pinned past version: the live rollout's gates say
+  // nothing about it, so only the authoritative board carries them.
+  const [board, rolloutPromotion] = await Promise.all([
+    fetchLeaderboardSnapshot(input.benchVersion),
+    input.benchVersion === undefined ? fetchRolloutPromotion() : Promise.resolve(null),
+  ])
   const filtered = board.entries.filter((entry) =>
     input.status === 'all' ? true : input.status === 'finalized' ? entry.finalized : !entry.finalized,
   )
   return scoreLeaderboardPageSchema.parse({
     generated_at: board.generated_at,
     current_bench_version: board.current_bench_version,
+    scoring_bench_version: board.scoring_bench_version,
+    emission_bench_version: board.emission_bench_version,
     active_bench_version: board.active_bench_version,
     desired_bench_version: board.desired_bench_version,
+    rollout_promotion: rolloutPromotion,
     available_bench_versions: board.available_bench_versions,
     selection_mode: board.selection_mode,
     status: input.status,
