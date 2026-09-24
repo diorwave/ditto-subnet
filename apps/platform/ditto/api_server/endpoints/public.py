@@ -182,6 +182,10 @@ from ditto.api_models.screener import (
     ScreenEvidenceItem,
     SourceReviewFinding,
 )
+from ditto.api_models.screener_policy_activation import (
+    PublicV13ReviewClockRevision,
+    PublicV13ReviewClockSchedule,
+)
 from ditto.api_models.stack_health import ValidatorStackHealth
 from ditto.api_models.system_health import (
     SystemMetrics,
@@ -280,6 +284,7 @@ from ditto.db.models import (
     ScreeningDispute,
     ScreeningQuarantine,
     ScreeningRetryOverride,
+    ScreeningReviewDeadlineActivation,
     SubmissionImageBuild,
     ValidatorHeartbeat,
     ValidatorTicket,
@@ -387,8 +392,15 @@ from ditto.db.queries.scores import (
 from ditto.db.queries.screening import (
     PROVIDER_BACKOFF_REASON_CODES,
     get_running_screening_attempts,
+    infra_retry_agent_admitted,
     list_screening_attempts,
 )
+from ditto.db.queries.screening_infra_retry import (
+    INFRA_AUTO_RETRY_REASON_CODES,
+    plan_infra_retries,
+)
+from ditto.db.queries.screening_retry import failed_screening_retry_authorized
+from ditto.db.queries.screening_review_deadlines import POLICY_V13_DOCUMENT_DIGEST
 from ditto.db.queries.tickets import (
     get_score_continuation_floor,
     get_score_continuation_floor_row,
@@ -541,6 +553,7 @@ _BENCHMARK_STALL_PER_CHECK = timedelta(seconds=60)
 _PUBLIC_ACTIVITY_STATUSES = frozenset(
     {
         "waiting_screening",
+        "screening_failed",
         "screening",
         "waiting_validator",
         "evaluating",
@@ -3793,6 +3806,12 @@ async def build_public_leaderboard(
         generated_at=now,
         count=len(entries),
         current_bench_version=display_version,
+        # One resolution, three names: the deprecated field, the clear one, and
+        # the pin that decides pay. Miners read the rollout as stalled when a
+        # board says 13 while the ledger is still paying 12, so both halves have
+        # to be present on the same response rather than inferred from it.
+        scoring_bench_version=display_version,
+        emission_bench_version=active_version,
         active_bench_version=active_version,
         desired_bench_version=desired_version,
         available_bench_versions=await list_scored_bench_versions(session),
@@ -4780,7 +4799,7 @@ def _public_handle_status(raw: str) -> Literal["reserved", "disputed", "pending"
 _SS58_HOTKEY_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{47,48}$")
 _INTERNAL_TO_PUBLIC_STATUS = {
     "uploaded": "waiting_screening",
-    "screening_failed": "waiting_screening",
+    "screening_failed": "screening_failed",
     "screening": "screening",
     "screening_passed": "waiting_validator",
     "evaluating": "evaluating",
@@ -4934,6 +4953,56 @@ async def public_miner_avatar(
             "ETag": etag,
             "Cache-Control": "public, max-age=30",
         },
+    )
+
+
+@router.get("/v13-review-clock", response_model=PublicV13ReviewClockSchedule)
+async def public_v13_review_clock(
+    response: Response,
+    session: SessionDep,
+) -> PublicV13ReviewClockSchedule:
+    """Publish the configured first-claim window without operator identity."""
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    rows = list(
+        await session.scalars(
+            select(ScreeningReviewDeadlineActivation)
+            .where(ScreeningReviewDeadlineActivation.policy_version == 13)
+            .order_by(ScreeningReviewDeadlineActivation.revision.desc())
+            .limit(100)
+        )
+    )
+    now = datetime.now(UTC)
+    configured = [
+        row for row in rows if row.policy_document_digest == POLICY_V13_DOCUMENT_DIGEST
+    ]
+    latest_due = await session.scalar(
+        select(ScreeningReviewDeadlineActivation)
+        .where(
+            ScreeningReviewDeadlineActivation.policy_version == 13,
+            ScreeningReviewDeadlineActivation.activate_at <= now,
+        )
+        .order_by(ScreeningReviewDeadlineActivation.revision.desc())
+        .limit(1)
+    )
+    return PublicV13ReviewClockSchedule(
+        current_policy_document_digest=POLICY_V13_DOCUMENT_DIGEST,
+        due_revision=(
+            latest_due.revision
+            if latest_due is not None
+            and latest_due.policy_document_digest == POLICY_V13_DOCUMENT_DIGEST
+            else None
+        ),
+        revisions=[
+            PublicV13ReviewClockRevision(
+                revision=row.revision,
+                policy_document_digest=cast(str, row.policy_document_digest),
+                policy_manifest_digest=row.policy_digest,
+                activate_at=row.activate_at,
+                window_seconds=row.window_seconds,
+                state="due" if _timeline_utc(row.activate_at) <= now else "pending",
+            )
+            for row in configured
+        ],
     )
 
 
@@ -5247,6 +5316,7 @@ def _public_activity_status(
     score_continuation_floor: float | None = None,
     benchmark_admitted: bool = True,
     retired: bool = False,
+    screening_retry_authorized: bool = False,
 ) -> str:
     """Collapse internal moderation detail into stable public lifecycle labels."""
     needs_rescreen = (
@@ -5259,7 +5329,9 @@ def _public_activity_status(
     )
     if has_active_attempt or status == AgentStatus.SCREENING:
         return AgentStatus.SCREENING.value
-    if status in (AgentStatus.UPLOADED, AgentStatus.SCREENING_FAILED) or needs_rescreen:
+    if status == AgentStatus.SCREENING_FAILED:
+        return "waiting_screening" if screening_retry_authorized else "screening_failed"
+    if status == AgentStatus.UPLOADED or needs_rescreen:
         return "waiting_screening"
     if status in (AgentStatus.SCREENING_PASSED, AgentStatus.EVALUATING):
         # Checked before ``not_queued`` because it is the more specific and more
@@ -5601,6 +5673,7 @@ def _public_activity_response(
         # remains the authoritative route for full history and search.
         board_statuses = {
             "waiting_screening",
+            "screening_failed",
             "screening",
             "waiting_validator",
             "below_score_floor",
@@ -6731,6 +6804,16 @@ async def agent_summary(
         score_continuation_floor=score_floor,
         benchmark_admitted=admitted,
         retired=retired,
+        screening_retry_authorized=bool(
+            await session.scalar(
+                select(Agent.agent_id).where(
+                    Agent.agent_id == agent_id,
+                    failed_screening_retry_authorized(),
+                )
+            )
+        )
+        if row.agent.status == AgentStatus.SCREENING_FAILED
+        else False,
     )
 
     ath_reviews: dict[UUID, _PublicAthReviewSnapshot] = {}
@@ -6848,7 +6931,8 @@ async def agent_pipeline(
         last_failure_infrastructure = bool(
             latest_attempt is not None
             and latest_attempt.status in ("failed", "expired")
-            and (latest_attempt.reason_code or "") in PROVIDER_BACKOFF_REASON_CODES
+            and (latest_attempt.reason_code or "")
+            in (*PROVIDER_BACKOFF_REASON_CODES, *INFRA_AUTO_RETRY_REASON_CODES)
         )
         next_retry_at: datetime | None = None
         if agent.status == AgentStatus.SCREENING:
@@ -6863,10 +6947,29 @@ async def agent_pipeline(
                 .where(ScreeningRetryOverride.attempt_id == latest_attempt.attempt_id)
                 .limit(1)
             )
+            scheduled = (
+                (
+                    await plan_infra_retries(
+                        session, now=now, agent_ids=[agent_id], fleet_scan=False
+                    )
+                ).decisions.get(agent_id)
+                if latest_attempt.reason_code in INFRA_AUTO_RETRY_REASON_CODES
+                # The claim never retries an agent withdrawn from the validator
+                # queue or from the active benchmark era; do not promise it.
+                and await infra_retry_agent_admitted(session, agent_id)
+                else None
+            )
             if overridden is not None:
                 retry_state = "retry_queued"
             elif latest_attempt.reason_code == "source-review-retryable-infra":
                 retry_state = "parked"
+            elif scheduled is not None and scheduled.state != "capped":
+                # Automatic, bounded retry: the miner sees the earliest start
+                # (per-artifact backoff; the fleet breaker is not consulted on
+                # this unauthenticated path). A capped or aged-out agent falls
+                # through to ``stuck``: an operator must retry it.
+                retry_state = "retry_queued"
+                next_retry_at = scheduled.next_retry_at
             elif last_failure_infrastructure:
                 retry_state = "stuck"
             else:
@@ -7138,6 +7241,9 @@ async def agent_pipeline(
         )[agent_id],
         status=_public_activity_status(
             agent.status,
+            screening_retry_authorized=(
+                admission_retry is not None and admission_retry.state == "retry_queued"
+            ),
             screening_policy_version=agent.screening_policy_version,
             has_active_attempt=running_attempt is not None,
             has_active_validation=any(
@@ -7166,6 +7272,7 @@ async def agent_pipeline(
         ),
         submission_family=submission_family,
         active_bench_version=canonical_version,
+        emission_bench_version=canonical_version,
         score_bench_version=era_version,
         score_count=len(era_scores),
         quorum=SCORING_QUORUM,

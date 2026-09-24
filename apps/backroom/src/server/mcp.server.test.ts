@@ -159,6 +159,7 @@ describe('Backroom MCP tools', () => {
         'get_copy_court_settings',
         'get_confirmation_seed_anchors',
         'get_copy_review_source_diff',
+        'get_continual_retest_diagnostic',
         'get_continual_retest_settings',
         'get_core_qualification_policy',
         'get_confirmation_bundle_settings',
@@ -173,8 +174,10 @@ describe('Backroom MCP tools', () => {
         'download_runtime_profile',
         'get_queue_policy_settings',
         'get_screener_capacity',
+        'get_screening_infra_retries',
         'set_screener_provider_settings',
         'set_screener_node_channel_settings',
+        'set_screener_node_replay_capacity',
         'create_screener_bootstrap_grant',
         'get_screener_review_settings',
         'get_screener_fanout_shadow',
@@ -183,7 +186,9 @@ describe('Backroom MCP tools', () => {
         'get_screener_policy_manifest',
         'rotate_screener_policy_manifest',
         'get_screener_policy_activation',
+        'get_v13_review_clock',
         'schedule_screener_policy_activation',
+        'schedule_v13_review_clock',
         'restore_scored_screening_snapshot',
         'get_validator_fleet',
         'get_validator_slot_settings',
@@ -204,7 +209,11 @@ describe('Backroom MCP tools', () => {
         'get_screening_quarantine_context',
         'get_screening_quarantine_contexts',
         'get_screening_review_queue',
+        'get_screening_review_deadline',
         'get_screening_failure_diagnostic',
+        'list_screening_adjudication_attempts',
+        'get_screening_verification_readiness',
+        'get_v13_private_generation_group',
         'get_screening_submission',
         'get_source_release_policy',
         'get_owner_attestations',
@@ -339,7 +348,13 @@ describe('Backroom MCP tools', () => {
     // measured catalog is 133,733 bytes. Descriptions remain short summaries.
     // One bounded conversation observation tool adds ~900 bytes.
     // The audited retry adds exact report/artifact digests; measured 136,355 bytes.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(136_500)
+    // Exact-agent continual retest diagnosis adds one bounded read schema.
+    // One bounded L4 cohort read adds a compact schema and catalog line.
+    // The two V13 clock tools and bounded, default-off replay control bring
+    // the measured catalog just above 142 KB. The no-input infra-retry read
+    // adds one more bounded catalog entry; measured 143,145 bytes together
+    // after #2180, bounded with ~1 KB headroom like the entries above.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(144_200)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -356,9 +371,13 @@ describe('Backroom MCP tools', () => {
     // one-line bench v13+ confirmation seed anchor read (its notes live in the
     // detailed help) lands at 25_047, so the bound moves to 25_200;
     // the one-line bench v13 gate-evidence and dispute-kind notes on the score
-    // and dispute tools land at 25_237, so it moves to 25_400.
+    // and dispute tools land at 25_237, so it moves to 25_400. The short
+    // L4 cohort diagnostic adds one catalog line without another tutorial.
+    // The infra-retry read summary lands at 25,990, so the bound moves to 26_200.
     expect(descriptions.reduce((total, value) => total + value.length, 0)).toBeLessThanOrEqual(
-      25_500, // One concise audited-retry summary adds 77 characters.
+      // Includes the V13 clock, independent replay, and infra-retry read
+      // summaries; measured 26,431 characters together.
+      26_600,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
@@ -2184,6 +2203,80 @@ describe('Backroom MCP tools', () => {
     await server.close()
   })
 
+  it('reads screening infrastructure retry state read-only and bounded', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const payload = {
+      generated_at: '2026-09-21T12:00:00Z',
+      basis: 'Derived from screening attempt history at read time; nothing is stored.',
+      policy: {
+        auto_retry_reason_codes: ['docker-build-infrastructure'],
+        base_backoff_seconds: 600, max_backoff_seconds: 3600, jitter_fraction: 0.2,
+        auto_retry_max_age_seconds: 86400, auto_retry_max_streak: 8, plan_max_claimable: 500,
+        breaker_distinct_agents: 3, breaker_window_seconds: 300, breaker_open_seconds: 600,
+        breaker_probe_interval_seconds: 300, breaker_history_lookback_seconds: 172800,
+      },
+      summary: {
+        parked_agents: 1,
+        by_state: { backoff: 0, breaker_held: 0, probe_due: 0, due: 0, capped: 1 },
+        not_admitted: 0, aged_out_agents: 2, open_breakers: 0, half_open_breakers: 0,
+        breakers_total: 1,
+      },
+      agents: [{
+        agent_id: '11111111-1111-4111-8111-111111111111',
+        attempt_id: '22222222-2222-4222-8222-222222222222',
+        reason_code: 'docker-build-infrastructure', provider: 'gcp', lane: 'buildkit',
+        consecutive_failures: 8, failed_at: '2026-09-21T11:00:00Z',
+        backoff_until: '2026-09-21T12:00:00Z', next_retry_at: '2026-09-21T12:00:00Z',
+        state: 'capped', breaker_phase: 'closed', admitted: true, claim_outlook: 'needs_operator',
+      }],
+      agents_limit: 200, agents_truncated: false,
+      breakers: [{
+        reason_code: 'docker-build-infrastructure', provider: 'gcp', lane: 'buildkit',
+        phase: 'closed', opened_at: null, open_until: null, last_probe_at: null,
+        next_probe_at: null, parked_agents: 1,
+      }],
+      breakers_limit: 50, breakers_truncated: false,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    try {
+      const listed = (await client.listTools()).tools.find(
+        (tool) => tool.name === 'get_screening_infra_retries',
+      )
+      expect(listed?.annotations?.readOnlyHint).toBe(true)
+      expect(listed?.description).toContain('Derived at read time')
+      const response = await client.callTool({ name: 'get_screening_infra_retries', arguments: {} })
+      expect(response.isError).not.toBe(true)
+      expect(readJsonResult(response)).toMatchObject({
+        summary: { by_state: { capped: 1 }, aged_out_agents: 2 },
+        agents: [{ state: 'capped', claim_outlook: 'needs_operator', consecutive_failures: 8 }],
+        policy: { auto_retry_max_streak: 8 },
+      })
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://platform-api.heyditto.ai/api/v1/admin/screening-infra-retries',
+        expect.any(Object),
+      )
+      const help = readJsonResult(
+        await client.callTool({
+          name: 'get_backroom_tool_help',
+          arguments: { tool: 'get_screening_infra_retries' },
+        }),
+      ) as { guidance: string }
+      expect(help.guidance).toContain('wait for an operator retry')
+      expect(help.guidance).toContain('per signature')
+      expect(help.guidance).toContain('earliest next_retry_at first')
+      expect(help.guidance).not.toContain('longest')
+      expect(help.guidance).toContain('half_open')
+      expect(help.guidance).toContain('a worker on another provider can still claim those agents by backoff alone')
+      expect(help.guidance).toContain('holds every worker')
+      expect(help.guidance).toContain('aged_out_agents')
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('applies the conversation switch with the authenticated operator identity', async () => {
     process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
     const fetchMock = vi.fn().mockResolvedValue(Response.json({
@@ -2419,6 +2512,38 @@ describe('Backroom MCP tools', () => {
 
     expect(response.isError).toBe(true)
     expect(fetchMock).not.toHaveBeenCalled()
+    await client.close()
+    await server.close()
+  })
+
+  it('sets only the exact independent node replay cap with operator audit', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const hotkey = '5IndependentReplayHotkey'
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(Response.json({
+        snapshot: null, nodes: [], events: [], event_retention_days: null,
+        builds: [], provider_jobs: [], node_controls: [],
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    const response = await client.callTool({
+      name: 'set_screener_node_replay_capacity',
+      arguments: {
+        nodeId: 'subnet-screener-2', expectedHotkey: hotkey,
+        expectedStatus: 'active', expectedCapacity: 0, capacity: 1,
+        reason: 'Start one independent report-only replay canary',
+        confirmation: `SET SCREENER NODE subnet-screener-2 HOTKEY=${hotkey} REPLAY_CAPACITY=1`,
+      },
+    })
+    expect(response.isError).not.toBe(true)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://platform-api.heyditto.ai/api/v1/admin/screener-nodes/subnet-screener-2/verification-replay-capacity')
+    expect(init.headers).toMatchObject({ 'X-Admin-Actor': 'peyton@omniaura.ai' })
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      expected_hotkey: hotkey, expected_status: 'active', expected_capacity: 0,
+      capacity: 1, reason: 'Start one independent report-only replay canary',
+    })
     await client.close()
     await server.close()
   })
@@ -3630,6 +3755,68 @@ describe('Backroom MCP tools', () => {
       reason: 'scheduled v11 activation for the planner-forced I7 amendment',
       actor: 'peyton@omniaura.ai',
       confirmation: 'SCHEDULE SCREENER POLICY ACTIVATION',
+    })
+
+    await client.close()
+    await server.close()
+  })
+
+  it('reads the default-off V13 review clock and guards its exact schedule write', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const empty = {
+      current_policy_document_digest: 'a'.repeat(64),
+      latest: null,
+      revisions: [],
+      finalizer_state: 'not_configured',
+    }
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(Response.json(empty)))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+
+    const read = await client.callTool({ name: 'get_v13_review_clock', arguments: {} })
+    expect(read.isError).not.toBe(true)
+    expect(readJsonResult(read)).toEqual(empty)
+    const invalid = await client.callTool({
+      name: 'schedule_v13_review_clock',
+      arguments: {
+        expectedRevision: 0,
+        policyDocumentDigest: 'a'.repeat(64),
+        policyManifestDigest: 'b'.repeat(64),
+        activateAt: '2026-10-01T12:00:00Z',
+        windowSeconds: 86400,
+        reason: 'publish a future first-claim window',
+        confirmation: 'WRONG PHRASE',
+      },
+    })
+    expect(invalid.isError).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    const scheduled = await client.callTool({
+      name: 'schedule_v13_review_clock',
+      arguments: {
+        expectedRevision: 0,
+        policyDocumentDigest: 'a'.repeat(64),
+        policyManifestDigest: 'b'.repeat(64),
+        activateAt: '2026-10-01T12:00:00Z',
+        windowSeconds: 86400,
+        reason: 'publish a future first-claim window',
+        confirmation: 'SCHEDULE V13 REVIEW CLOCK',
+      },
+    })
+    expect(scheduled.isError).not.toBe(true)
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(url).toBe('https://platform-api.heyditto.ai/api/v1/admin/screener-policy-activation/review-clock')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      expected_revision: 0,
+      policy_version: 13,
+      policy_document_digest: 'a'.repeat(64),
+      policy_manifest_digest: 'b'.repeat(64),
+      activate_at: '2026-10-01T12:00:00Z',
+      window_seconds: 86400,
+      reason: 'publish a future first-claim window',
+      actor: 'peyton@omniaura.ai',
+      confirmation: 'SCHEDULE V13 REVIEW CLOCK',
     })
 
     await client.close()
@@ -5094,6 +5281,53 @@ describe('Backroom MCP tools', () => {
     await server.close()
   })
 
+  it('reads an unconfigured exact review deadline with read scope only', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const agentId = '90cb5697-cbc1-40f4-a27e-439a7986a054'
+    const diagnostic = {
+      agent_id: agentId,
+      artifact_sha256: 'ab'.repeat(32),
+      agent_status: 'uploaded',
+      policy_version: 0,
+      quarantine_id: null,
+      quarantine_status: null,
+      quarantine_resolution: null,
+      quarantine_attempt_id: null,
+      quarantine_artifact_matches: null,
+      manifest_digest: null,
+      deadline_state: 'not_configured',
+      finalizer_state: 'not_configured',
+      activation_revision: null,
+      activation_actor: null,
+      activation_reason: null,
+      activated_at: null,
+      start_event: null,
+      window_started_at: null,
+      deadline_at: null,
+      recorded_attempts: [],
+      observed_worker_hotkeys: [],
+      required_retries: null,
+      independent_worker_count: null,
+      failure_domain: null,
+      outstanding_mandatory_checks: null,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(diagnostic))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    const response = await client.callTool({
+      name: 'get_screening_review_deadline',
+      arguments: { agentId },
+    })
+    expect(response.isError).not.toBe(true)
+    expect(readJsonResult(response)).toEqual(diagnostic)
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://platform-api.heyditto.ai/api/v1/admin/screening-submissions/${agentId}/review-deadline`,
+      expect.any(Object),
+    )
+    await client.close()
+    await server.close()
+  })
+
   it('gates exact screening failure diagnostics on artifact scope', async () => {
     process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
     const agentId = '90cb5697-cbc1-40f4-a27e-439a7986a054'
@@ -5137,7 +5371,11 @@ describe('Backroom MCP tools', () => {
       arguments: { agentId, attemptId },
     })
     expect(allowed.isError).not.toBe(true)
-    expect(readJsonResult(allowed)).toEqual(diagnostic)
+    expect(readJsonResult(allowed)).toEqual({
+      ...diagnostic,
+      court_diagnostic: null,
+      court_completion_receipt: null,
+    })
     expect(fetchMock).toHaveBeenCalledWith(
       `https://platform-api.heyditto.ai/api/v1/admin/screening-submissions/${agentId}/attempts/${attemptId}/failure-diagnostic`,
       expect.objectContaining({

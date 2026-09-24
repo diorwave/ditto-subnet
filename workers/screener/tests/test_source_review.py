@@ -1024,6 +1024,100 @@ def test_decisive_preflight_still_flags_targeted_wallet_reads() -> None:
     assert "data_exfiltration" in {item["category"] for item in findings}
 
 
+def test_decisive_preflight_allows_injected_endpoint_and_timeout_config() -> None:
+    """Endpoint and timeout configuration is not cross-user access.
+
+    Reproduces the #2099 hold class (observed on Sky v1) with sanitized,
+    representative configuration: no miner source is reproduced here. Two
+    ordinary shapes combined into a 100%-confidence pre-build quarantine --
+    `/host` inside the `http://host.docker.internal` authority satisfied the
+    filesystem-path role, and a declared `read_timeout` field satisfied the
+    access-effect role on a bare `\\w*` match. Neither is a read of another
+    user's data, and the hold landed before build, runtime-isolation, and tool
+    checks could run.
+    """
+    findings = find_decisive_malicious_source(
+        [
+            (
+                "src/inference/config.rs",
+                "use std::time::Duration;\n"
+                "pub struct InferenceConfig {\n"
+                "    pub base_url: String,\n"
+                "    pub read_timeout: Duration,\n"
+                "    pub write_timeout: Duration,\n"
+                "}\n"
+                "impl InferenceConfig {\n"
+                "    pub fn from_env() -> Self {\n"
+                '        let base_url = std::env::var("DITTO_INFERENCE_BASE_URL")\n'
+                "            .unwrap_or_else(|_| "
+                '"http://host.docker.internal:11434/v1".to_string());\n'
+                "        let read_timeout = Duration::from_secs(600);\n"
+                "        let write_timeout = Duration::from_secs(30);\n"
+                "        Self { base_url, read_timeout, write_timeout }\n"
+                "    }\n"
+                "}\n",
+            ),
+            (
+                "src/runtime.py",
+                "import os\n"
+                'BASE_URL = os.environ.get("DITTO_INFERENCE_BASE_URL",\n'
+                '                          "http://host.docker.internal:8000/v1")\n'
+                "READ_TIMEOUT_SECONDS = 600.0\n"
+                "def client():\n"
+                "    return OpenAiChatClient(base_url=BASE_URL,\n"
+                "                            read_timeout=READ_TIMEOUT_SECONDS)\n",
+            ),
+        ]
+    )
+
+    assert findings == []
+
+
+def test_decisive_preflight_still_flags_a_served_cross_user_read() -> None:
+    """A served read of another principal's files stays decisive.
+
+    The narrowing above removes a URL authority and a config field name; it
+    must not remove the shape the rule exists for. Each fixture reaches a real
+    filesystem location belonging to another user through a real read/walk
+    call, which is the S1 cross-user-access bar.
+    """
+    for path, source in (
+        (
+            "src/served/handler.rs",
+            'let other = request.query("peer_user");\n'
+            'let target = format!("/home/{}/.ditto/memory.json", other);\n'
+            "let borrowed = std::fs::read_to_string(&target)?;\n"
+            "Response::text(borrowed)\n",
+        ),
+        (
+            "src/harvest.rs",
+            'let base = "/Users/";\n'
+            "for entry in walkdir::WalkDir::new(base) {\n"
+            "    collected.push(entry?.path().to_path_buf());\n"
+            "}\n",
+        ),
+        (
+            "src/runtime.py",
+            'TARGET = "file:///home/otheruser/.ditto/memory.db"\n'
+            'blob = open(TARGET.removeprefix("file://"), "rb").read()\n',
+        ),
+        # URL schemes are case-insensitive, so an upper-case file URL names the
+        # same local path and must not be masked as a remote endpoint.
+        (
+            "src/served/upper.py",
+            'TARGET = "FILE:///home/other/.ditto/memory.db"\n'
+            'blob = open(TARGET.removeprefix("FILE://"), "rb").read()\n',
+        ),
+        (
+            "src/escape.rs",
+            'let host_copy = "/proc/1/root/home/other/notes";\n'
+            "let body = std::fs::read(host_copy)?;\n",
+        ),
+    ):
+        findings = find_decisive_malicious_source([(path, source)])
+        assert "cross_user_access" in {item["category"] for item in findings}, path
+
+
 def test_decisive_malicious_preflight_ignores_inert_regression_material() -> None:
     findings = find_decisive_malicious_source(
         [
@@ -1049,6 +1143,143 @@ def test_decisive_malicious_preflight_ignores_inert_regression_material() -> Non
         ]
     )
     assert findings == []
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
+def test_rust_cfg_test_cross_user_fixture_does_not_hold_preflight(
+    tmp_path: Path, mode: str
+) -> None:
+    source = (
+        "fn main() { serve(); }\n"
+        "fn serve() { call_model(); }\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    fn rejects_foreign_home() {\n"
+        '        let path = "/root/private";\n'
+        "        read(path);\n"
+        "    }\n"
+        "}\n"
+    )
+    repo = TarSourceRepository(
+        str(
+            _archive_files(
+                tmp_path,
+                {
+                    "Dockerfile": (
+                        b"FROM rust:bookworm AS build\nCOPY . .\n"
+                        b"RUN cargo build --release\nFROM scratch\n"
+                        b"COPY --from=build /target/release/app /app\n"
+                        b'ENTRYPOINT ["/app"]\n'
+                    ),
+                    "Cargo.toml": b"[package]\nname='app'\nversion='0.1.0'\n",
+                    "src/main.rs": source.encode(),
+                },
+            )
+        )
+    )
+
+    assert repo.malicious_preflight(artifact_sha256="a" * 64, mode=mode) is None
+
+
+def test_rust_cfg_test_does_not_hide_adjacent_served_cross_user_access() -> None:
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn local() { let path = "/root/test-fixture"; read(path); }\n'
+        "}\n"
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+    )
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(
+        finding["category"] == "cross_user_access"
+        and {item["line"] for item in finding["locations"]} == {5}
+        for finding in findings
+    )
+
+
+def test_rust_test_literal_brace_cannot_hide_following_served_item() -> None:
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn local() { let template = "{"; assert!(!template.is_empty()); }\n'
+        "}\n"
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+    )
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(
+        finding["category"] == "cross_user_access"
+        and {item["line"] for item in finding["locations"]} == {5}
+        for finding in findings
+    )
+
+
+def test_enforced_preflight_keeps_served_access_after_rust_test_literal(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn local() { let template = "{"; assert!(!template.is_empty()); }\n'
+        "}\n"
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+        "fn main() { serve(); }\n"
+    )
+    archive = _archive_files(
+        tmp_path,
+        {
+            "Dockerfile": (
+                b"FROM rust:bookworm AS build\nCOPY . .\n"
+                b"RUN cargo build --release\nFROM scratch\n"
+                b"COPY --from=build /target/release/app /app\n"
+                b'ENTRYPOINT ["/app"]\n'
+            ),
+            "Cargo.toml": b"[package]\nname='app'\nversion='0.1.0'\n",
+            "src/main.rs": source.encode(),
+        },
+    )
+
+    observation = TarSourceRepository(str(archive)).malicious_preflight(
+        artifact_sha256="a" * 64, mode="enforce"
+    )
+
+    assert observation is not None
+    assert observation.finding is not None
+    assert observation.finding["prompt_revision"] == "static-malicious-preflight-v2"
+    assert observation.categories == ("cross_user_access",)
+    assert {item["line"] for item in observation.finding["evidence"]} == {5}
+
+
+def test_rust_attribute_text_inside_raw_string_cannot_hide_served_item() -> None:
+    source = (
+        'const GUIDE: &str = r#"\n#[cfg(test)]\nmod tests {\n"#;\n'
+        'fn serve() { let path = "/root/private"; read(path); }\n'
+    )
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(
+        finding["category"] == "cross_user_access"
+        and {item["line"] for item in finding["locations"]} == {5}
+        for finding in findings
+    )
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["#[cfg(not(test))]", '#[cfg(any(test, feature = "production"))]'],
+)
+def test_rust_cfg_branch_that_can_run_in_production_remains_decisive(
+    attribute: str,
+) -> None:
+    source = f'{attribute}\nfn serve() {{ let path = "/root/private"; read(path); }}\n'
+
+    findings = find_decisive_malicious_source([("src/baseline.rs", source)])
+
+    assert any(finding["category"] == "cross_user_access" for finding in findings)
 
 
 def test_decisive_preflight_ignores_nested_inert_regression_material() -> None:

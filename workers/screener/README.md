@@ -149,6 +149,30 @@ Required values are supplied through the production host's protected
 - `SCREENER_SOURCE_REVIEW_API_KEY_FILE`: required mode-0400 OpenRouter key file
   for the private read-only source reviewer. The default model is
   `openai/gpt-5.6-luna`.
+- `SCREENER_SEED_PROBE_MODE`: `shadow` (default), `enforce`, or `off`. After
+  the health gate, one bounded `POST /seed` wave with a single coined pair
+  proves the image can ingest state, not just answer `/health`. `shadow`
+  records the failure class as evidence beside the existing outcome;
+  `enforce` makes it a deterministic contract failure whose detail tells the
+  miner what to fix (writing outside `/tmp`, the sandbox memory cap, a non-2xx
+  reply, or no reply). The probe is served by the same isolated fake gateway as
+  the rest of the smoke, so it costs no provider call.
+  `SCREENER_SEED_PROBE_TIMEOUT_SECONDS` (default `60`) bounds it, and
+  `SCREENER_SEED_PATH` (default `/seed`) names the path. Whatever the mode
+  decides, the probe also samples what the container consumed of the sandbox
+  envelope (`memory.peak` and `/tmp`, the same cgroup files the validator reads
+  after a scored run) and records it as `seed-envelope-usage` evidence on every
+  screened image, passing ones included -- how close the fleet runs to the caps
+  cannot be read from rejections alone. An image without a shell reports
+  nothing and screening is unchanged.
+- `SCREENER_V13_RUNTIME_RECEIPTS_MODE`: `off` (default) or `shadow`. The shadow
+  mode sends bounded `/run` and `/seed` requests through the isolated smoke
+  network and records digest-only, exact-attempt observations for V13 runtime
+  checks 3–7. A receipt means `recorded_unverified`, never a pass: the fake
+  model cannot establish actual tool choice, memory correctness, or user
+  isolation. The mode has no influence on the screening outcome and should
+  remain off until its overhead and evidence profile have been calibrated.
+  Targon-only smoke and pre-build source holds leave these checks `not_recorded`.
 - `SCREENER_L2_REVIEW_MODE`: `off` (default), `shadow`, or `enforce`.
 - `SCREENER_L2_REVIEW_MODEL`: defaults to `openai/gpt-5.6-terra`; legacy
   `moonshotai/kimi-k3` remains accepted only for a deliberate rollback.

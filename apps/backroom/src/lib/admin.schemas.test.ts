@@ -89,6 +89,7 @@ import {
   listLeaseRevocationsInputSchema,
   leaseRevocationsListSchema,
   screenerCapacityViewSchema,
+  screeningInfraRetryViewSchema,
   screenerProviderSettingsConfirmation,
   screenerProviderSettingsSchema,
   authorizeConfirmationBundleRetestInputSchema,
@@ -2019,6 +2020,7 @@ describe('screener review settings schemas', () => {
     expect(parsed.source_review_model).toBe('openai/gpt-5.6-luna')
     expect(parsed.source_review_timeout_seconds).toBe(1_800)
     expect(parsed.adjudicator_max_steps).toBe(128)
+    expect(parsed.adjudicator_max_completion_tokens).toBeNull()
   })
 
   it('accepts Platform L2 budgets and preserves the upper bounds', () => {
@@ -2046,6 +2048,18 @@ describe('screener review settings schemas', () => {
     expect(() => screenerReviewSettingsSchema.parse({
       ...settings,
       adjudicator_max_steps: 1025,
+    })).toThrow()
+  })
+
+  it('separates the L4 completion cap from L2 and bounds it by output budget', () => {
+    const parsed = screenerReviewSettingsSchema.parse({
+      ...settings, max_completion_tokens: 16_000,
+      adjudicator_max_completion_tokens: 4_000,
+    })
+    expect(parsed.max_completion_tokens).toBe(16_000)
+    expect(parsed.adjudicator_max_completion_tokens).toBe(4_000)
+    expect(() => screenerReviewSettingsSchema.parse({
+      ...settings, adjudicator_max_completion_tokens: 20_001,
     })).toThrow()
   })
 
@@ -4521,5 +4535,34 @@ describe('batched ATH rulings schemas', () => {
     expect(parsed.rulings?.every((item) => item.action === 'reject')).toBe(true)
     expect(parsed.rulings?.every((item) => item.evidence_references.length > 0)).toBe(true)
     expect(parsed.source).toBe('docs/sn118-top5-board-review-2026-09-13.json')
+  })
+
+  it('parses the infrastructure retry view and refuses an unknown decision state', () => {
+    const view = {
+      generated_at: '2026-09-21T12:00:00Z',
+      basis: 'Derived at read time.',
+      policy: {
+        auto_retry_reason_codes: ['docker-build-infrastructure'],
+        base_backoff_seconds: 600, max_backoff_seconds: 3600, jitter_fraction: 0.2,
+        auto_retry_max_age_seconds: 86400, auto_retry_max_streak: 8, plan_max_claimable: 500,
+        breaker_distinct_agents: 3, breaker_window_seconds: 300, breaker_open_seconds: 600,
+        breaker_probe_interval_seconds: 300, breaker_history_lookback_seconds: 172800,
+      },
+      summary: {
+        parked_agents: 0,
+        by_state: { backoff: 0, breaker_held: 0, probe_due: 0, due: 0, capped: 0 },
+        not_admitted: 0, aged_out_agents: 0, open_breakers: 0, half_open_breakers: 0,
+        breakers_total: 0,
+      },
+      agents: [], agents_limit: 200, agents_truncated: false,
+      breakers: [], breakers_limit: 50, breakers_truncated: false,
+    }
+    expect(screeningInfraRetryViewSchema.parse(view).summary.by_state.capped).toBe(0)
+    expect(() =>
+      screeningInfraRetryViewSchema.parse({
+        ...view,
+        summary: { ...view.summary, by_state: { ...view.summary.by_state, exploded: 1 } },
+      }),
+    ).toThrow()
   })
 })

@@ -1,4 +1,5 @@
 import { conversationAssessmentInputSchema, conversationSettingsInputSchema, conversationRetryInputSchema } from '../lib/conversation.schemas'
+import { scheduleV13ReviewClockInputSchema } from '../lib/review-clock.schemas'
 import { fetchConversationAssessments, setConversationSettings, authorizeConversationRetry } from './admin.service'
 import '@tanstack/react-start/server-only'
 
@@ -48,6 +49,8 @@ import {
   screeningDisputeResolutionSchema,
   screeningArtifactInputSchema,
   screeningFailureDiagnosticInputSchema,
+  v13GenerationGroupInputSchema,
+  adjudicationAttemptsInputSchema,
   screeningSubmissionLookupInputSchema,
   sourceSearchInputSchema,
   ownerAttestationLookupInputSchema,
@@ -87,6 +90,7 @@ import {
   refreshAgentCoreQualificationInputSchema,
   setCoreQualificationPolicyMcpInputSchema,
   agentScoresLookupInputSchema,
+  continualRetestDiagnosticInputSchema,
   scoreLeaderboardInputSchema,
   ownerFootprintLookupInputSchema,
   setBurnSettingsInputSchema,
@@ -121,6 +125,7 @@ import {
   createScreenerBootstrapGrantInputSchema,
   setScreenerProviderSettingsInputSchema,
   setScreenerNodeChannelSettingsInputSchema,
+  setScreenerNodeReplayCapacityInputSchema,
   setConfirmationBundleSettingsInputSchema,
   authorizeConfirmationBundleRetestInputSchema,
   retryTrustedImageBuildInputSchema,
@@ -142,6 +147,10 @@ import {
   fetchScreeningQuarantines,
   fetchScreeningDisputes,
   fetchScreeningFailureDiagnostic,
+  fetchAdjudicationAttempts,
+  fetchScreeningVerificationReadiness,
+  fetchV13GenerationGroup,
+  fetchScreeningReviewDeadline,
   fetchScreeningSubmission,
   fetchScreeningSubmissions,
   fetchScreeningFailureSummary,
@@ -201,6 +210,7 @@ import {
   fetchV9ContractRetests,
   queueValidatorScoreRetests,
   fetchAgentScores,
+  fetchContinualRetestDiagnostic,
   fetchAgentScoreHistory,
   fetchScoreLeaderboard,
   fetchOwnerFootprint,
@@ -217,14 +227,18 @@ import {
   downloadRuntimeProfile,
   fetchQueuePolicySettings,
   fetchScreenerPolicyActivation,
+  fetchV13ReviewClock,
   fetchScoredPolicyRescreen,
   scheduleScreenerPolicyActivation,
+  scheduleV13ReviewClock,
   advanceScoredPolicyRescreen,
   restoreScoredScreeningSnapshot,
   createScreenerBootstrapGrant,
   fetchScreenerCapacity,
+  fetchScreeningInfraRetries,
   updateScreenerProviderSettings,
   updateScreenerNodeChannelSettings,
+  updateScreenerNodeReplayCapacity,
   fetchScreenerReviewControl,
   fetchScreenerFanoutShadow,
   fetchCopyCourtControl,
@@ -266,6 +280,27 @@ export type McpGrantProps = {
   session: BackroomSession
   scopes: Array<string>
   clientName: string
+  /**
+   * The exact OAuth grant and client this access token belongs to. Stamped at
+   * token issuance so an operator can match a live connection to the grant
+   * listed (and revocable) on the Agent access page.
+   */
+  grant?: { id: string; clientId: string }
+}
+
+/**
+ * The scopes this connection can actually exercise right now: the token's
+ * granted scopes, further capped by the account's live Backroom level. A
+ * read-level account never exercises artifact or write scopes, whatever an
+ * older grant recorded.
+ */
+export function effectiveScopes(props: McpGrantProps) {
+  return props.scopes.filter(
+    (scope) =>
+      scope === BACKROOM_READ_SCOPE ||
+      ((scope === BACKROOM_ARTIFACT_SCOPE || scope === BACKROOM_WRITE_SCOPE) &&
+        props.session.accessLevel === 'write'),
+  )
 }
 
 export type BackroomEnv = {
@@ -282,6 +317,7 @@ export const WRITE_TOOL_NAMES = new Set([
   'create_screener_bootstrap_grant',
   'set_screener_provider_settings',
   'set_screener_node_channel_settings',
+  'set_screener_node_replay_capacity',
   'register_coding_catalog_release',
   'supersede_coding_catalog_release',
   'retire_coding_catalog_release',
@@ -325,6 +361,7 @@ export const WRITE_TOOL_NAMES = new Set([
   'apply_screener_review_settings',
   'rotate_screener_policy_manifest',
   'schedule_screener_policy_activation',
+  'schedule_v13_review_clock',
   'restore_scored_screening_snapshot',
   'set_validator_slot_settings',
   'apply_copy_court_settings',
@@ -344,6 +381,7 @@ export const TOOL_SCOPE_REQUIREMENTS = new Map<string, string>([
   ...[...WRITE_TOOL_NAMES].map((name) => [name, BACKROOM_WRITE_SCOPE] as const),
   ['get_screening_artifact', BACKROOM_ARTIFACT_SCOPE],
   ['get_screening_failure_diagnostic', BACKROOM_ARTIFACT_SCOPE],
+  ['get_screening_verification_readiness', BACKROOM_ARTIFACT_SCOPE],
   ['download_runtime_profile', BACKROOM_ARTIFACT_SCOPE],
   // Trace records carry miner prompts and full model responses, so anything
   // that discloses record CONTENT gates on the artifact scope. Listing object
@@ -546,10 +584,14 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Artifact-bound coding certifications; weight_eligible is always false. Requires backroom:read.',
   get_screener_capacity:
     'Read screener capacity, provider priorities, and recent build, runtime, and source-review jobs before manual retry.',
+  get_screening_infra_retries:
+    'Read infra-failure retry state: policy, per-state counts, parked agents (next retry, failure count), per-signature breakers. Derived at read time.',
   set_screener_provider_settings:
     'Apply complete revisioned screener routing and bounded GCE overflow settings after reading get_screener_capacity.',
   set_screener_node_channel_settings:
     'Apply complete revisioned concurrency limits for one enrolled screener node after reading get_screener_capacity.',
+  set_screener_node_replay_capacity:
+    'Set report-only replay capacity to zero or one on the independently enrolled second screener, with exact hotkey, status, capacity, confirmation and audit guards. Read get_screener_capacity first.',
   get_coding_catalog_releases:
     'Read signed shadow catalog commitments, retirement, and exposure counts.',
   get_coding_private_v2_releases:
@@ -630,19 +672,29 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_owner_attestations:
     'Read direct signed owner links, including revoked history. Direct-only, non-transitive, and limited to near-duplicate review.',
   list_lease_revocations:
-    'Page newest-first through platform-ended validator leases. evidence is WHOLE AND UNTYPED validator_lease_audit context; response can include operator_evicted rows and preserve exact verdict strings. AN EMPTY RESULT IS A FINDING, NOT AN UNWIRED FEATURE. Use filters to narrow the audit.',
+    'Page ended leases with operator_evicted and exact verdicts. Evidence is WHOLE AND UNTYPED validator_lease_audit context. AN EMPTY RESULT IS A FINDING, NOT AN UNWIRED FEATURE.',
   list_stuck_submissions:
-    'Page the current-benchmark platform triage order for stuck submissions. Pass generation=all only for a cross-benchmark audit. Returns ticket-state counts and silent_expiry_count; use get_validation_retry for one submission\'s complete ticket history, including infra_retry_grants. This urgency queue is intentionally not newest-first.',
+    'Page stuck-submission urgency order with ticket counts and silent_expiry_count. generation=all spans benchmarks; get_validation_retry includes infra_retry_grants.',
   summarize_screening_failures:
     'Group active-benchmark screening / screening_failed agents by reason_code. Pass generation=all only for a cross-benchmark audit. Use get_screening_submission for one row.',
   get_screening_failure_diagnostic:
     'Private exact-attempt failure diagnostic; artifact scope.',
+  get_screening_verification_readiness:
+    'Read V13 receipt presence; no pass or CLEAR. Artifact scope.',
+  get_v13_private_generation_group:
+    'Read V13 group or optional role package digests; unverified, no verdict.',
+  get_screening_review_deadline:
+    'Read exact V13 artifact deadline binding; null/not_configured means no authoritative window. Attempt leases are not finalizer dates.',
   reject_screening_submission:
     'Reject a screening row. Confirmation: REJECT SCREENING SUBMISSION. Requires backroom:write.',
   get_queue_policy_settings:
     'Read effective queue policy, rollout-locked fields, defaults, and optionally paged newest-first revision history. Open-rollout targets are snapshots: settings do not resize an in-flight rollout. historyLimit defaults to 0.',
   get_screener_policy_activation:
     'Read the scheduled screening-policy activation and its revision history; latest is null when none was ever scheduled.',
+  get_v13_review_clock:
+    'Read the explicitly scheduled V13 first-claim review clock. No row means no authoritative deadline; this does not activate a finalizer.',
+  schedule_v13_review_clock:
+    'Schedule a future V13 first-claim clock for new submissions only. Requires exact document/manifest digests, 65-minute notice, revision guard, and confirmation. Does not finalize holds.',
   schedule_screener_policy_activation:
     'Schedule one future screening-policy activation. `canaryOnly` keeps ordinary submissions on the current policy and permits only explicit scored releases to attest the target. Confirmation: "SCHEDULE SCREENER POLICY ACTIVATION". 409 stale revision; 422 bad phrase, naive/past time, or out-of-range target.',
   restore_scored_screening_snapshot:
@@ -651,6 +703,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read effective continual-retest policy, fleet readiness, compatibility field_support, defaults, and optionally paged newest-first revision history. historyLimit defaults to 0.',
   get_agent_scores:
     'Read accepted validator scores for one agent and benchmark version, with exact seeds and aggregates. Defaults to the current applicable benchmark.',
+  get_continual_retest_diagnostic:
+    'Read one exact agent UUID current owner-family scoring, sample counts, cutoff and tie-band comparison, continual retest cohort reason, and whether a validator could claim it now. Changes nothing.',
   get_validator_slot_settings:
     'Read effective validator slot and disk policy plus optional newest-first revision history. A validator advertising more slots than the cap is not an underutilized host. historyLimit defaults to 0.',
   get_validator_fleet:
@@ -722,6 +776,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   // context — which is also what buys the budget the queue's own entry needs.
   list_screening_quarantines:
     'Page screener quarantines (active | resolved | all), newest first; sort=oldest for chronology, detail=full for every evidence row. Active rows are auto-resolved by the platform within milliseconds, so this is not the operator queue — use get_screening_review_queue.',
+  list_screening_adjudication_attempts:
+    'Recent L4 outcomes with attempt SHA, manifest and pinned settings; observed timing/provider only when recorded. Null success telemetry is unavailable, not zero.',
   get_screening_quarantine_context:
     'Full review context for one quarantine: the screener evidence trail, the digest-verified source-review finding with its flagged path:line locations, every screening attempt, the miner track record, identical-artifact duplicates, and the advisory `shadow_review` (often null, never authoritative — a divergence from the L1 finding is a prompt to read the source, not a decision). Read this before deciding a quarantine.',
   search_screening_source:
@@ -794,7 +850,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get Backroom access',
       description:
-        'Show the authenticated staff identity and the read, artifact-download, and write scopes granted to this MCP connection.',
+        "Show the staff identity, this connection's OAuth grant and client ids, and effective scopes (granted scopes capped by the live account level).",
       annotations: toolAnnotations('read'),
     },
     async () =>
@@ -805,7 +861,9 @@ export function createBackroomMcpServer(props: McpGrantProps) {
           name: props.session.name,
         },
         clientName: props.clientName,
-        scopes: props.scopes,
+        grant: props.grant ?? null,
+        scopes: effectiveScopes(props),
+        grantedScopes: props.scopes,
         accessLevel: hasWriteAccess(props)
           ? hasArtifactAccess(props)
             ? 'full'
@@ -1162,11 +1220,23 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_screening_review_deadline',
+    {
+      title: 'Get screening review deadline',
+      description:
+        'Read exact V13 artifact deadline evidence. Null/not_configured means no bound window; attempt lease dates are not finalizer dates. Attempts and distinct hotkeys do not prove retry or independence. Read-only metadata.',
+      inputSchema: screeningSubmissionLookupInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchScreeningReviewDeadline(input)),
+  )
+
+  registerTool(
     'get_screening_failure_diagnostic',
     {
       title: 'Get screening failure diagnostic',
       description:
-        'Read the bounded, sanitized private failure detail and log tail retained for one exact screening attempt. Supply both the agent UUID and attempt UUID; Platform verifies that the attempt belongs to that submission and returns the artifact SHA-256, attempt status, policy version, reason code, and timestamps alongside the diagnostic. This is operator infrastructure evidence, not a policy verdict. Requires backroom:artifact:read because the text can contain miner-influenced build or runtime diagnostics.',
+        'Read one exact attempt with private failure text and sanitized L4 failure trace, when recorded. No source or model text. Requires backroom:artifact:read; read get_backroom_tool_help for field semantics.',
       inputSchema: screeningFailureDiagnosticInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1175,6 +1245,51 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         fetchScreeningFailureDiagnostic(input, props.session.email),
       ),
   )
+
+  registerTool(
+    'list_screening_adjudication_attempts',
+    {
+      title: 'List screening adjudication attempts',
+      description:
+        'Read a bounded recent cohort of persisted L4 clear, reject, and escalation outcomes. Each row binds attempt UUID, pinned artifact SHA when available, policy version, manifest digest, and pinned review settings. Configured model, timeout, and completion ceiling are distinct from observed model/provider/upstream. New successful L4 runs may include a text-free completion receipt: run elapsed time, first substantive tool-call signal in the final request, and final-request byte/event counts. Historical successes remain null. Failed runs expose only sanitized trace aggregates when recorded. No source, prompts, tool arguments, or raw responses. Read-only; requires backroom:read.',
+      inputSchema: adjudicationAttemptsInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) =>
+      result(
+        compacted(await fetchAdjudicationAttempts(input), {
+          items: { pin: ['agent_id', 'attempt_id'] },
+        }),
+      ),
+  )
+
+  registerTool(
+    'get_screening_verification_readiness',
+    {
+      title: 'Get screening verification readiness',
+      description:
+        'Read exact V13 attempt receipts and private prerequisites. Missing or recorded_unverified is not a pass; mechanically_verified covers only archive/image identity. Never authorizes CLEAR. Artifact scope.',
+      inputSchema: screeningFailureDiagnosticInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) =>
+      artifact(() =>
+        fetchScreeningVerificationReadiness(input, props.session.email),
+      ),
+  )
+
+  registerTool(
+    'get_v13_private_generation_group',
+    {
+      title: 'Get V13 private generation group',
+      description:
+        'Read V13 generation group or role package metadata with optional role. Digest-only, recorded_unverified; no private cases or verdict.',
+      inputSchema: v13GenerationGroupInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchV13GenerationGroup(input)),
+  )
+
 
   registerTool(
     'get_owner_attestations',
@@ -1697,6 +1812,18 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_continual_retest_diagnostic',
+    {
+      title: 'Explain exact agent continual retest admission',
+      description:
+        'Read one exact submission UUID: canonical and official composites with sample counts and completed-wave depth, the same-owner representative and the comparison that selected it, raw/folded seed IDs, membership in the raw wave, folded emission set and resolved cohort with the cutoff/tie-band comparison and exclusion reason, seed anchor, retest tickets with the latest result, and claimability (scheduled round, catch-up, spare capacity, idle gate). A negative cohort_cutoff.gap on an agent that is still out of the cohort means the exclusion is structural owner suppression, not a score it failed. Outstanding work is a count; no confirmation dataset, prompt, or answer key is returned. This snapshot does not grant work. Seed IDs are exact decimal strings. Requires backroom:read.',
+      inputSchema: continualRetestDiagnosticInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchContinualRetestDiagnostic(input)),
+  )
+
+  registerTool(
     'get_leaderboard',
     {
       title: 'Get production score leaderboard',
@@ -1920,6 +2047,17 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_screening_infra_retries',
+    {
+      title: 'Get screening infrastructure retries',
+      description:
+        'Read how Platform is retrying screening attempts that failed on Ditto infrastructure (docker-build-infrastructure), and why an agent is or is not being retried. Returns the effective policy (backoff base/cap, jitter, max age, max consecutive failures, breaker threshold/window/open/probe durations, all in seconds); a summary with a count per state (backoff, breaker_held, probe_due, due, capped), not_admitted, aged_out_agents, open_breakers, half_open_breakers and breakers_total; the parked agents (agent id, latest attempt id, reason code, provider/lane, consecutive failure count, failed_at, backoff_until, next_retry_at, state, breaker_phase, admitted, claim_outlook), earliest next_retry_at first; and each signature\'s circuit breaker (phase, opened_at, open_until, last_probe_at, next_probe_at, parked agents). Everything is derived from screening attempt history at read time and nothing is stored, so it can lag a claim that lands a moment later. Agents in the capped state, and aged_out_agents (parked on an infrastructure failure older than the max age with no operator retry; counted, not listed individually), are never retried automatically and wait for an operator retry. The breaker is per signature (reason code, provider, lane), and a breaker with a known provider holds and probes only workers on that provider: a worker on another provider can still claim those agents by backoff alone (that run is not a probe), while a signature with no provider holds every worker. This view is computed with no particular claimant, so breaker_held and waiting_breaker mean held for workers on the signature\'s provider. Breaker phase is computed at read time: open while now < open_until, half_open after that until a probe recovers or the failures age out of the history window (probes are allowed, nothing is held for that lane), closed otherwise; a half_open breaker with no parked agents is history, not a live hold. parked_agents counts agents parked now, not historical failures. claim_outlook ready means admitted with the backoff and breaker hold elapsed; the claim may still skip it (one probe per signature per pass, ownership rules); not_admitted, needs_operator, waiting_backoff and waiting_breaker (held for workers on that provider) say why not. Rows are bounded (agents_limit, breakers_limit); the summary counts everything and *_truncated says when rows were cut. Carries no error text, source, or miner identity. Requires backroom:read and changes nothing.',
+      annotations: toolAnnotations('read'),
+    },
+    async () => result(await fetchScreeningInfraRetries()),
+  )
+
+  registerTool(
     'create_screener_bootstrap_grant',
     {
       title: 'Create screener bootstrap grant',
@@ -1956,6 +2094,19 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     },
     async (input) =>
       write(() => updateScreenerNodeChannelSettings(props.session.email, input)),
+  )
+
+  registerTool(
+    'set_screener_node_replay_capacity',
+    {
+      title: 'Set independent screener replay capacity',
+      description:
+        'Enable at most one report-only V13 verification replay on enrolled subnet-screener-2, or disable it with capacity zero. Read get_screener_capacity first and supply the exact node hotkey, status, current replay capacity, audit reason, and confirmation "SET SCREENER NODE subnet-screener-2 HOTKEY=<hotkey> REPLAY_CAPACITY=<0|1>". This cannot clear a hold or authorize emissions. Requires backroom:write.',
+      inputSchema: setScreenerNodeReplayCapacityInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) =>
+      write(() => updateScreenerNodeReplayCapacity(props.session.email, input)),
   )
 
   registerTool(
@@ -2115,10 +2266,33 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get screener policy activation',
       description:
-        'Read the screening-policy activation schedule: the effective policy version in force, the floor and builtin versions bounding what can be scheduled, the latest scheduled activation (null when none has ever been written), and the append-only revision history newest-first. `state` is computed at read time — "due" once now >= activate_at, "pending" before it. Read this before schedule_screener_policy_activation to get the expectedRevision and version bounds. Requires backroom:read.',
+        'Read effective screening policy, version bounds, latest scheduled activation, and revision history. Read before scheduling to get expectedRevision. Requires backroom:read.',
       annotations: toolAnnotations('read'),
     },
     async () => result(await fetchScreenerPolicyActivation()),
+  )
+
+  registerTool(
+    'get_v13_review_clock',
+    {
+      title: 'Get V13 review clock schedule',
+      description:
+        'Read V13 first-claim clock revisions. No row means no configured deadline. Requires backroom:read.',
+      annotations: toolAnnotations('read'),
+    },
+    async () => result(await fetchV13ReviewClock()),
+  )
+
+  registerTool(
+    'schedule_v13_review_clock',
+    {
+      title: 'Schedule V13 review clock',
+      description:
+        'Future V13 first-claim clock for new UUIDs only: exact document/manifest SHA, revision, 65-minute notice, confirmation SCHEDULE V13 REVIEW CLOCK. No backfill or finalizer. Requires backroom:write.',
+      inputSchema: scheduleV13ReviewClockInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => scheduleV13ReviewClock(input, props.session.email)),
   )
 
   registerTool(
@@ -2126,7 +2300,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Schedule screener policy activation',
       description:
-        'Schedule one future screening-policy activation, append-only: expectedRevision as the concurrent-write guard (409 stale), targetPolicyVersion within the floor..builtin bounds the read reports (422 out of range), activateAt as ISO-8601 that MUST carry a timezone offset (422 naive or in the past), rescreenScored (default true), and an auditable reason. Set canaryOnly true to keep ordinary submissions on the current policy while explicit scored releases alone attest the target; it requires rescreenScored and a target above the floor. Exact confirmation "SCHEDULE SCREENER POLICY ACTIVATION" required. Requires backroom:write.',
+        'Schedule a future policy activation with expectedRevision, bounded targetPolicyVersion, timezone-aware activateAt, and reason. canaryOnly limits rollout to explicit scored releases and requires rescreenScored. Confirmation SCHEDULE SCREENER POLICY ACTIVATION. Requires backroom:write.',
       inputSchema: scheduleScreenerPolicyActivationInputSchema,
       annotations: toolAnnotations('write', true),
     },
@@ -2150,7 +2324,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Advance scored policy rescreen',
       description:
-        'Fill up to maxActiveReleases (1–4) top-down stale-score slots, or retry one paused row. Existing V10 scores and ranks remain visible. A terminal verdict frees one slot; a pause prevents later positions from being released. A canary-only activation requires reviewSettingsRevision for an immutable enforce-mode L3/L4 posture. Exact confirmation "ADVANCE SCORED POLICY RESCREEN" required. Requires backroom:write.',
+        'Fill 1–4 stale-score rescreen slots or retry one paused row; existing scores remain visible. canaryOnly requires reviewSettingsRevision. Confirmation ADVANCE SCORED POLICY RESCREEN. Requires backroom:write.',
       inputSchema: advanceScoredPolicyRescreenInputSchema,
       annotations: toolAnnotations('write', true),
     },
@@ -2163,7 +2337,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Restore scored screening snapshot',
       description:
-        'Incident recovery for a cohort that already has a complete benchmark score quorum but was displaced by a later scored-rescreen activation. The Platform derives the exact cohort under row locks, requires its latest attempt to belong to sourcePolicyVersion after sourceActivationRevision, restores each submission to its last successful screening attempt at or below targetPolicyVersion, and appends one immutable audit row per submission. It does not create screening attempts, builds, datasets, scores, or validator leases. Supply expectedCurrentActivationRevision, sourceActivationRevision, sourcePolicyVersion, targetPolicyVersion, benchVersion, expectedCount, an auditable reason, and exact confirmation "RESTORE SCORED SCREENING SNAPSHOT". Requires backroom:write.',
+        'Restore an exact scored cohort displaced by policy rescreen, preserving scores and audit history. Requires current/source activation and policy revisions, bench version, expected count, reason, and confirmation RESTORE SCORED SCREENING SNAPSHOT. Requires backroom:write.',
       inputSchema: restoreScoredScreeningSnapshotInputSchema,
       annotations: toolAnnotations('write', true),
     },
@@ -2309,7 +2483,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get validator fleet',
       description:
-        'Read the platform public validator heartbeat view with the identity the slot-cap console drops. Each row keeps software_version, protocol_version, stack component revisions (ditto_subnet, dittobench_api, model_relay, sandbox), scorer probe identity, updater current/candidate versions and updater self-refresh evidence, bench_serviceability, host metrics, live work counts, and claimed_slots (signed occupancy before ticket confirmation). A claimed slot missing from active_benchmarks is occupied locally and unconfirmed on the ledger. Calibration manifests and per-check progress are stripped. The rollout histogram is computed on the whole fleet before any hotkey filter or page, so online_serving_count and version buckets answer "is this SHA on enough validators" without paging. A missing updater_status is heartbeat protocol older than v23, not a failed update; self_refresh_installed is explicit from v26 onward. software_obsolete validators are issued no scoring work. Requires backroom:read; a failed fleet read is an error, never an empty fleet.',
+        'Read the platform public validator heartbeat view with the identity the slot-cap console drops. Each row keeps software_version, protocol_version, stack component revisions (ditto_subnet, dittobench_api, model_relay, sandbox), scorer probe identity, updater current/candidate versions and updater self-refresh evidence, bench_serviceability, host metrics, live work counts, and claimed_slots (signed occupancy before ticket confirmation). active_benchmarks includes up to eight ticket-bound aggregate progress entries: agent_id, slot_id, bench_version, started_at, stage, completed_checks, total_checks, percent, stalled, and purpose. Missing progress is unknown, not zero; pair with reported_at and online before judging freshness. Calibration manifests, private run tokens, and per-case data are stripped. The rollout histogram is computed on the whole fleet before any hotkey filter or page, so online_serving_count and version buckets answer "is this SHA on enough validators" without paging. A missing updater_status is heartbeat protocol older than v23, not a failed update; self_refresh_installed is explicit from v26 onward. software_obsolete validators are issued no scoring work. Requires backroom:read; a failed fleet read is an error, never an empty fleet.',
       inputSchema: {
         validatorHotkey: z.string().min(1).max(64).optional(),
         ...MCP_PAGINATION_INPUT,

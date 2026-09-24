@@ -1,6 +1,11 @@
 import '@tanstack/react-start/server-only'
 
 import {
+  scheduleV13ReviewClockInputSchema,
+  v13ReviewClockScheduleSchema,
+} from '../lib/review-clock.schemas'
+
+import {
   conversationAssessmentInputSchema,
   conversationObservationsSchema,
   conversationReportSchema,
@@ -107,7 +112,14 @@ import {
   screeningArtifactInputSchema,
   screeningArtifactSchema,
   screeningFailureDiagnosticInputSchema,
+  v13GenerationGroupInputSchema,
+  v13GenerationGroupSchema,
+  v13GroupPackageSchema,
   screeningFailureDiagnosticSchema,
+  adjudicationAttemptsInputSchema,
+  adjudicationAttemptsSchema,
+  screeningVerificationReadinessSchema,
+  screeningReviewDeadlineDiagnosticSchema,
   screeningSubmissionLookupInputSchema,
   screeningSubmissionSchema,
   screeningSubmissionListSchema,
@@ -256,11 +268,14 @@ import {
   confirmationSeedAnchorListSchema,
   confirmationSeedAnchorsInputSchema,
   screenerCapacityViewSchema,
+  screeningInfraRetryViewSchema,
+  type ScreeningInfraRetryOutcome,
   createScreenerBootstrapGrantInputSchema,
   screenerBootstrapGrantResponseSchema,
   screenerProviderSettingsControlSchema,
   setScreenerProviderSettingsInputSchema,
   setScreenerNodeChannelSettingsInputSchema,
+  setScreenerNodeReplayCapacityInputSchema,
   screenerNodeChannelSettingsControlSchema,
   retryTrustedImageBuildInputSchema,
   trustedImageBuildSchema,
@@ -271,6 +286,8 @@ import {
   updateSubmissionSettingsInputSchema,
   agentScoresLookupInputSchema,
   agentScoresDetailSchema,
+  continualRetestDiagnosticInputSchema,
+  continualRetestDiagnosticSchema,
   agentScoreHistorySchema,
   ownerFootprintLookupInputSchema,
   ownerFootprintSchema,
@@ -614,6 +631,26 @@ export async function fetchScreenerCapacity() {
   return screenerCapacityViewSchema.parse(payload)
 }
 
+export async function fetchScreeningInfraRetries() {
+  const payload = await platformAdminRequest('/api/v1/admin/screening-infra-retries')
+  return screeningInfraRetryViewSchema.parse(payload)
+}
+
+/** Never throws: the capacity page renders without this view, but the message
+ * and HTTP status must stay visible rather than collapse into "unavailable". */
+export async function readScreeningInfraRetries(): Promise<ScreeningInfraRetryOutcome> {
+  try {
+    return { ok: true, view: await fetchScreeningInfraRetries() }
+  } catch (error) {
+    return {
+      ok: false,
+      status: error instanceof PlatformAdminError ? error.status : null,
+      // A schema-parse failure message can be long; the head names the field.
+      message: (error instanceof Error ? error.message : 'Unknown error reading infrastructure retries.').slice(0, 400),
+    }
+  }
+}
+
 export async function createScreenerBootstrapGrant(actor: string, rawInput: unknown) {
   const input = createScreenerBootstrapGrantInputSchema.parse(rawInput)
   const payload = await platformAdminRequest('/api/v1/admin/screener-bootstrap-grants', {
@@ -686,6 +723,27 @@ export async function updateScreenerNodeChannelSettings(actor: string, rawInput:
   })
   const payload = await platformAdminRequest(path)
   return screenerNodeChannelSettingsControlSchema.parse(payload)
+}
+
+export async function updateScreenerNodeReplayCapacity(actor: string, rawInput: unknown) {
+  const input = setScreenerNodeReplayCapacityInputSchema.parse(rawInput)
+  await platformAdminRequest(
+    `/api/v1/admin/screener-nodes/${input.nodeId}/verification-replay-capacity`,
+    {
+      method: 'POST',
+      actor,
+      body: {
+        environment: 'prod',
+        expected_hotkey: input.expectedHotkey,
+        expected_status: input.expectedStatus,
+        expected_capacity: input.expectedCapacity,
+        capacity: input.capacity,
+        reason: input.reason,
+        confirmation: input.confirmation,
+      },
+    },
+  )
+  return fetchScreenerCapacity()
 }
 
 export async function fetchArtifactReleaseControl() {
@@ -1142,6 +1200,31 @@ export async function setQueuePolicySettings(rawInput: unknown, actor: string) {
 }
 
 const SCREENER_POLICY_ACTIVATION_PATH = '/api/v1/admin/screener-policy-activation'
+const V13_REVIEW_CLOCK_PATH = `${SCREENER_POLICY_ACTIVATION_PATH}/review-clock`
+
+export async function fetchV13ReviewClock() {
+  return v13ReviewClockScheduleSchema.parse(await platformAdminRequest(V13_REVIEW_CLOCK_PATH))
+}
+
+export async function scheduleV13ReviewClock(rawInput: unknown, actor: string) {
+  const input = scheduleV13ReviewClockInputSchema.parse(rawInput)
+  await platformAdminRequest(V13_REVIEW_CLOCK_PATH, {
+    method: 'POST',
+    actor,
+    body: {
+      expected_revision: input.expectedRevision,
+      policy_version: 13,
+      policy_document_digest: input.policyDocumentDigest,
+      policy_manifest_digest: input.policyManifestDigest,
+      activate_at: input.activateAt,
+      window_seconds: input.windowSeconds,
+      reason: input.reason,
+      actor,
+      confirmation: input.confirmation,
+    },
+  })
+  return fetchV13ReviewClock()
+}
 
 export async function fetchScreenerPolicyActivation() {
   const payload = await platformAdminRequest(SCREENER_POLICY_ACTIVATION_PATH)
@@ -1900,6 +1983,47 @@ export async function fetchScreeningFailureDiagnostic(rawInput: unknown, actor: 
     { actor },
   )
   return screeningFailureDiagnosticSchema.parse(payload)
+}
+
+export async function fetchAdjudicationAttempts(rawInput: unknown) {
+  const input = adjudicationAttemptsInputSchema.parse(rawInput)
+  const query = new URLSearchParams({
+    limit: String(input.limit),
+    offset: String(input.offset),
+    lookback_hours: String(input.lookbackHours),
+  })
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/screening-adjudication-attempts?${query.toString()}`,
+  )
+  return adjudicationAttemptsSchema.parse(payload)
+}
+
+export async function fetchScreeningVerificationReadiness(rawInput: unknown, actor: string) {
+  const input = screeningFailureDiagnosticInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/screening-submissions/${encodeURIComponent(input.agentId)}/attempts/${encodeURIComponent(input.attemptId)}/verification-readiness`,
+    { actor },
+  )
+  return screeningVerificationReadinessSchema.parse(payload)
+}
+
+export async function fetchV13GenerationGroup(rawInput: unknown) {
+  const input = v13GenerationGroupInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/v13-private-generation/groups/${encodeURIComponent(input.groupId)}` +
+      (input.role ? `/packages/${encodeURIComponent(input.role)}` : ''),
+  )
+  return input.role
+    ? v13GroupPackageSchema.parse(payload)
+    : v13GenerationGroupSchema.parse(payload)
+}
+
+export async function fetchScreeningReviewDeadline(rawInput: unknown) {
+  const input = screeningSubmissionLookupInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/screening-submissions/${encodeURIComponent(input.agentId)}/review-deadline`,
+  )
+  return screeningReviewDeadlineDiagnosticSchema.parse(payload)
 }
 
 export async function fetchScreeningFailureSummary(rawInput: unknown = {}) {
@@ -2978,6 +3102,14 @@ export async function fetchAgentScores(rawInput: unknown) {
     desired_bench_version: board.desired_bench_version,
     leaderboard: entry,
   })
+}
+
+export async function fetchContinualRetestDiagnostic(rawInput: unknown) {
+  const { agentId } = continualRetestDiagnosticInputSchema.parse(rawInput)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/agents/${encodeURIComponent(agentId)}/continual-retest-diagnostic`,
+  )
+  return continualRetestDiagnosticSchema.parse(payload)
 }
 
 /**

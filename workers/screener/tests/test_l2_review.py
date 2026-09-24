@@ -506,6 +506,20 @@ def test_session_safe_harbors_are_shared_by_l2_and_l3() -> None:
     assert "inconclusive rather than manufacturing" in _VIOLATION_CAUSE_TASK
 
 
+def test_v13_i6_review_requires_scored_endpoint_reachability() -> None:
+    analyst = _l2_review_system_prompt(13)
+    assert "local stub only when the request omits" in analyst
+    assert "valid endpoint-present scored path" in analyst
+    assert "not validator-observed" in analyst
+    assert "do not treat it as a v13 eligibility pass" in analyst
+
+    adjudicator = _SAFETY_ADJUDICATOR_TASK
+    assert "trace the other branch and the scored request contract" in adjudicator
+    assert "endpoint-present path skips the POST" in adjudicator
+    assert "falsely reports success after an endpoint error" in adjudicator
+    assert "rest of the artifact from refuting this one lead" in adjudicator
+
+
 def test_dittobench_preflight_clearance_is_exact_and_shared() -> None:
     for prompt in (SYSTEM_PROMPT, _SAFETY_ADJUDICATOR_TASK):
         assert "preflight:" in prompt
@@ -1612,6 +1626,17 @@ async def test_inprocess_harness_rejects_unknown_command(tmp_path: Path) -> None
         await InProcessAnalyzerHarness().run(tmp_path, "rm_rf", {})
 
 
+# IsolatedCodingHarness refuses uid 0 on its first line, so every test that
+# reaches its run() has to have a non-root worker. Containerised development
+# usually runs as root; skipping there reports the precondition instead of
+# failing on it, and CI runners are non-root so the coverage is unchanged.
+_non_root_only = pytest.mark.skipif(
+    os.getuid() == 0,
+    reason="the L2 analyzer harness refuses to run from a root worker",
+)
+
+
+@_non_root_only
 async def test_harness_command_has_no_egress_secrets_or_host_mounts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1645,6 +1670,7 @@ async def test_harness_command_has_no_egress_secrets_or_host_mounts(
     assert set(env) == {"PATH"}  # type: ignore[arg-type]
 
 
+@_non_root_only
 async def test_rootless_harness_shares_private_workspace_with_daemon_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1692,6 +1718,7 @@ def test_harness_rejects_unbounded_calibration_cpu_override() -> None:
         )
 
 
+@_non_root_only
 async def test_expired_deadline_stops_before_analyzer_process(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1718,6 +1745,7 @@ async def test_expired_deadline_stops_before_analyzer_process(
     assert not started
 
 
+@_non_root_only
 async def test_cancelled_review_terminates_analyzer_process(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1747,7 +1775,10 @@ async def test_cancelled_review_terminates_analyzer_process(
         docker_bin="docker", image="ditto-screener-l2-analyzer:active"
     )
     task = asyncio.create_task(harness.run(tmp_path, "workspace_index", {}))
-    await started.wait()
+    # Bounded: if run() raises before it reaches the fake process, nothing ever
+    # sets this event and the bare wait stops the whole file with no traceback,
+    # since the task's exception is never retrieved either.
+    await asyncio.wait_for(started.wait(), timeout=5)
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -1756,6 +1787,7 @@ async def test_cancelled_review_terminates_analyzer_process(
     assert proc.killed
 
 
+@_non_root_only
 async def test_model_tool_argument_error_is_private_and_correctable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

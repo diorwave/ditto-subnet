@@ -9,6 +9,8 @@ import {
   ACTIVITY_FILTERS,
   ACTIVITY_STATUSES,
   activityStage,
+  isSourceReviewIncomplete,
+  SOURCE_REVIEW_INCONCLUSIVE_REASON,
   duplicateComparisonLabel,
   policyScreeningLabel,
   reviewEventLabel,
@@ -27,6 +29,7 @@ describe("status vocabulary (row 10)", () => {
   it("keeps the canonical status whitelist and the quick-filter map", () => {
     expect(ACTIVITY_STATUSES).toEqual([
       "waiting_screening",
+      "screening_failed",
       "screening",
       "waiting_validator",
       "evaluating",
@@ -54,27 +57,53 @@ describe("status vocabulary (row 10)", () => {
     expect(activityStage("waiting_screening")).toEqual(["Waiting for admission", "progress"]);
     expect(activityStage("screening")).toEqual(["Image build & admission", "progress"]);
     expect(activityStage("screening_passed")).toEqual(["Admitted", "good"]);
-    expect(activityStage("screening_failed")).toEqual(["Admission interrupted", "warn"]);
+    expect(activityStage("screening_failed")).toEqual([
+      "Screening interrupted · retry required",
+      "warn",
+    ]);
+    expect(ACTIVITY_FILTERS.queued).not.toContain("screening_failed");
     expect(activityStage("waiting_validator")).toEqual(["Waiting for validators", "progress"]);
     expect(activityStage("evaluating")).toEqual(["Scoring", "progress"]);
     expect(activityStage("below_score_floor")).toEqual(["Low-priority completion", "warn"]);
     expect(activityStage("not_queued")).toEqual(["Historical · not queued", ""]);
     expect(activityStage("retired")).toEqual(["Retired · earlier benchmark", ""]);
-    expect(activityStage("under_review")).toEqual(["Source integrity review", "warn"]);
+    expect(activityStage("under_review")).toEqual(["Deferred source review", "warn"]);
     expect(activityStage("rejected")).toEqual(["Rejected", "bad"]);
     expect(activityStage("nonsense")).toEqual(["Pending", ""]);
   });
 
-  it("names the quick filters with the integrity-review vocabulary", () => {
-    expect(ACTIVITY_FILTER_LABELS.under_review).toBe("Integrity review");
+  it("keeps a review-budget hold neutral and states no finding was made", () => {
+    const held = {
+      status: "under_review",
+      screening_reason: "Bounded source review was inconclusive; held for review",
+    };
+    expect(isSourceReviewIncomplete(held)).toBe(true);
+    expect(activityStage("under_review", held)).toEqual(["Deferred source review", ""]);
+    const tripwire = {
+      status: "under_review",
+      screening_reason: "Submission held for anti-cheat review",
+    };
+    expect(isSourceReviewIncomplete(tripwire)).toBe(false);
+    expect(activityStage("under_review", tripwire)).toEqual(["Deferred source review", "warn"]);
+  });
+
+  it("names the quick filters with the deferred-review vocabulary", () => {
+    expect(ACTIVITY_FILTER_LABELS.under_review).toBe("Deferred review");
     expect(ACTIVITY_FILTER_LABELS.waiting_validator).toBe("Waiting for validators");
   });
 
   it("explains a review hold without claiming the screener is idle", () => {
     expect(validationDetail({ status: "under_review" })).toBe(
-      "This submission is held for integrity review. Existing scores do not clear the hold. " +
+      "This submission is held for deferred source review. Existing scores do not clear the hold. " +
         "The screening history below shows whether a deep review is running or an operator decision is pending.",
     );
+  });
+
+  it("says no finding only when the automated review merely ran out of budget", () => {
+    const detail = (screening_reason: string) =>
+      validationDetail({ status: "under_review", screening_reason });
+    expect(detail(SOURCE_REVIEW_INCONCLUSIVE_REASON)).toContain("which is not a finding");
+    expect(detail("Submission held for anti-cheat review")).not.toContain("not a finding");
   });
 
   it("labels previous-generation and closed-generation rows (#458/#462)", () => {
@@ -192,7 +221,7 @@ describe("policy screening label (#623 + row 14 chip)", () => {
 
   it("names the deferred integrity branch for a full review in screening", () => {
     expect(policyScreeningLabel({ status: "screening", screening_build_only: false })).toBe(
-      "Source integrity review",
+      "Deferred source review",
     );
   });
 
@@ -316,6 +345,29 @@ describe("admissionRetryLine (#1215)", () => {
     expect(admissionRetryLine({ state: "retry_queued", attempt_count: 1 }, now)).toBe(
       "A guarded retry was authorized and is waiting for a screener slot (attempt 2).",
     );
+  });
+
+  it("promises an automatic retry only when a retry time is scheduled", () => {
+    const line = (next_retry_at: string) =>
+      admissionRetryLine(
+        {
+          state: "retry_queued",
+          attempt_count: 2,
+          next_retry_at,
+          last_failure_infrastructure: true,
+        },
+        now,
+      );
+    const head =
+      "A Ditto build infrastructure failure, not a miner failure. It retries automatically with backoff";
+    // A UTC wall clock, whatever offset the wire timestamp carries.
+    expect(line("2099-08-28T10:20:45Z")).toBe(head + ", no earlier than 2099-08-28 10:20 UTC.");
+    expect(line("2099-08-28T12:20:00+02:00")).toBe(
+      head + ", no earlier than 2099-08-28 10:20 UTC.",
+    );
+    // Already due, and an unparseable time, never print a raw or invalid date.
+    expect(line("2000-01-01T00:00:00Z")).toBe(head + " and is due for another attempt.");
+    expect(line("not-a-date")).toBe(head + ".");
   });
 
   it("renders nothing without the block or for unknown states", () => {

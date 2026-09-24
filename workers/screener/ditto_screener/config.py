@@ -110,6 +110,30 @@ class ScreenerConfig:
     container_port: int
     """Port the harness serves on inside the container (contract: ``8080``)."""
 
+    seed_path: str
+    """Harness seeding path to probe after health (contract: ``/seed``)."""
+
+    seed_probe_mode: str
+    """How the post-health ``/seed`` probe participates: ``off``, ``shadow``,
+    or ``enforce``.
+
+    Screening proves the image builds and answers ``/health``; scoring starts at
+    ``/seed``. An image that boots but cannot persist state passes screening
+    today, fails on every validator's first seeding wave, and lands on an
+    operator as a deferred ticket. ``shadow`` records that signal without
+    changing any outcome; ``enforce`` turns it into a deterministic contract
+    failure with an actionable reason."""
+
+    seed_probe_timeout_seconds: float
+    """Deadline for the single post-health ``/seed`` probe."""
+
+    v13_runtime_receipts_mode: str
+    """``off`` (default) or ``shadow`` for bounded, non-decisive v13 probes.
+
+    The shadow observations are evidence-presence receipts only. They do not
+    satisfy the policy's runtime or private-verification decision bar.
+    """
+
     smoke_env: tuple[tuple[str, str], ...]
     """Env vars injected (``docker run -e K=V``) into the serve-smoke container.
 
@@ -198,6 +222,8 @@ class ScreenerConfig:
     Seeded from ``SCREENER_L2_ALWAYS_ESCALATE``; a bound reviewer revision can
     only turn it on for one posture (the integrity double-check), never off.
     """
+    adjudicator_max_completion_tokens: int | None = None
+    """L4-only output cap; None inherits the existing L2 completion cap."""
     remote_build_mode: str = "off"
     """How the gate uses a prebuilt image archive.
 
@@ -227,6 +253,13 @@ def _require(name: str, value: str) -> str:
     return value
 
 
+def _parse_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
+    value = os.environ.get(name, default).strip().lower()
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(allowed)}")
+    return value
+
+
 def _parse_float(name: str, default: str) -> float:
     raw = os.environ.get(name, default)
     try:
@@ -241,6 +274,11 @@ def _parse_int(name: str, default: str) -> int:
         return int(raw)
     except ValueError as e:
         raise ScreenerConfigError(f"{name} must be an integer, got {raw!r}") from e
+
+
+def _parse_optional_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    return None if raw is None or not raw.strip() else _parse_int(name, raw)
 
 
 def _parse_bool(name: str, default: bool) -> bool:
@@ -332,6 +370,19 @@ def parse_screener_config_from_env() -> ScreenerConfig:
         pids_limit=_parse_int("SCREENER_PIDS_LIMIT", "512"),
         health_path=os.environ.get("SCREENER_HEALTH_PATH", "/health"),
         container_port=_parse_int("SCREENER_CONTAINER_PORT", "8080"),
+        seed_path=os.environ.get("SCREENER_SEED_PATH", "/seed"),
+        # Additive rollout: the probe observes and records by default. A
+        # deployment promotes it to ``enforce`` only after its shadow record
+        # shows the signal is stable.
+        seed_probe_mode=_parse_choice(
+            "SCREENER_SEED_PROBE_MODE", "shadow", ("off", "shadow", "enforce")
+        ),
+        seed_probe_timeout_seconds=_parse_float(
+            "SCREENER_SEED_PROBE_TIMEOUT_SECONDS", "60"
+        ),
+        v13_runtime_receipts_mode=_parse_choice(
+            "SCREENER_V13_RUNTIME_RECEIPTS_MODE", "off", ("off", "shadow")
+        ),
         smoke_env=_parse_env_pairs(
             # Compatibility key for older harness startup. The isolated fake
             # gateway separately locks provider traffic away from the internet.
@@ -444,6 +495,9 @@ def parse_screener_config_from_env() -> ScreenerConfig:
         .strip()
         .lower()
         in {"1", "true", "yes", "on"},
+        adjudicator_max_completion_tokens=_parse_optional_int(
+            "SCREENER_ADJUDICATOR_MAX_COMPLETION_TOKENS"
+        ),
         remote_build_mode=os.environ.get("SCREENER_REMOTE_BUILD_MODE", "off"),
         remote_build_timeout_seconds=_parse_float(
             "SCREENER_REMOTE_BUILD_TIMEOUT_SECONDS", "1500"
@@ -500,6 +554,15 @@ def parse_screener_config_from_env() -> ScreenerConfig:
     if not 60 <= config.adjudicator_timeout_seconds <= 3_600:
         raise ScreenerConfigError(
             "SCREENER_ADJUDICATOR_TIMEOUT_SECONDS must be between 60 and 3600"
+        )
+    if config.adjudicator_max_completion_tokens is not None and not (
+        1_000
+        <= config.adjudicator_max_completion_tokens
+        <= min(128_000, config.l2_max_output_tokens)
+    ):
+        raise ScreenerConfigError(
+            "SCREENER_ADJUDICATOR_MAX_COMPLETION_TOKENS must be between 1000 "
+            "and the L2 output budget"
         )
     if not 1 <= config.review_concern_hold_count <= 16:
         raise ScreenerConfigError(

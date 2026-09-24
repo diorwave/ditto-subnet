@@ -335,6 +335,13 @@ def test_private_failure_feedback_is_bounded_to_a_failed_attempt() -> None:
     with pytest.raises(ValidationError, match="passing result cannot carry"):
         _pass_request(private_failure_detail="should not be present")
 
+    with pytest.raises(ValidationError, match="requires a failure outcome"):
+        _request(
+            reason_code="seed-envelope-usage",
+            private_failure_detail="shadow seed observation is not a failure",
+            private_failure_log_tail="memory peak 120 MiB of 3072 MiB",
+        )
+
     with pytest.raises(ValidationError, match="requires attempt_id"):
         _request(attempt_id=None, private_failure_detail="missing lease")
 

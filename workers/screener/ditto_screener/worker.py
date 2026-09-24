@@ -40,6 +40,7 @@ from ditto_screener.heartbeat import (
     probe_docker_health,
 )
 from ditto_screener.policy import (
+    PolicyEvidence,
     ScreeningOutcome,
     SourceReviewObservation,
     builtin_policy_manifest,
@@ -52,7 +53,12 @@ from ditto_screener.review_settings import (
     bootstrap_review_settings,
 )
 from ditto_screener.router_screen import build_signed_router_source_screen
-from ditto_screener.signing import sign_heartbeat, sign_verdict
+from ditto_screener.signing import (
+    sign_completion_receipt,
+    sign_heartbeat,
+    sign_verdict,
+)
+from ditto_screener.verification_receipts import mechanical_evidence_sha256
 from ditto_screening_protocol import (
     SCREENING_FLOOR_POLICY_VERSION,
     SCREENING_POLICY_VERSION,
@@ -85,6 +91,73 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 EXACT_CROSS_MINER_DUPLICATE = "exact-cross-miner-duplicate"
+
+
+# Shadow mode appends this after the deciding evidence. It records sandbox
+# headroom and never changes the typed outcome, so it must not become the
+# public reason or a private-failure cause.
+_SEED_ENVELOPE_OBSERVATION = "seed-envelope-usage"
+_PRIVATE_BUILD_FAILURE_CODES = frozenset(
+    {"docker-build", "docker-build-infrastructure"}
+)
+
+
+def _verdict_reason_code(
+    outcome: ScreenResultOutcome,
+    evidence: tuple[PolicyEvidence, ...],
+) -> str | None:
+    """Pick the public reason from evidence that actually decided the outcome.
+
+    Seed observations are appended last so they survive the evidence cap.
+    Treating that tail as the reason relabels a quarantine or pass as a seed
+    failure and, when private feedback is attached, makes ``ScreenResultRequest``
+    reject the verdict.
+    """
+    if outcome == ScreenResultOutcome.PASS_INCONCLUSIVE:
+        return "source-review-inconclusive"
+    if not evidence:
+        return None
+    shadow_seed = outcome not in {
+        ScreenResultOutcome.DETERMINISTIC_REJECT,
+        ScreenResultOutcome.RETRYABLE_INFRA,
+        ScreenResultOutcome.INCONCLUSIVE,
+    }
+    for item in reversed(evidence):
+        if item.code == _SEED_ENVELOPE_OBSERVATION:
+            continue
+        if shadow_seed and item.code.startswith("seed-"):
+            continue
+        return item.code
+    if outcome in {
+        ScreenResultOutcome.QUARANTINE,
+        ScreenResultOutcome.INCONCLUSIVE,
+        ScreenResultOutcome.DETERMINISTIC_REJECT,
+        ScreenResultOutcome.RETRYABLE_INFRA,
+    }:
+        return evidence[-1].code
+    return None
+
+
+def _attach_private_failure_feedback(
+    outcome: ScreenResultOutcome, reason_code: str | None
+) -> bool:
+    """Private diagnostics are legal only on a protocol failure outcome.
+
+    Pass and quarantine results cannot carry them. A shadow ``/seed`` code on
+    those outcomes used to satisfy the reason check, and constructing the
+    signed request then raised ``private failure feedback requires a failure
+    outcome``, which the worker replaced with ``worker-result-processing-failed``.
+    """
+    if outcome in {
+        ScreenResultOutcome.RETRYABLE_INFRA,
+        ScreenResultOutcome.INCONCLUSIVE,
+    }:
+        return True
+    if outcome != ScreenResultOutcome.DETERMINISTIC_REJECT:
+        return False
+    return reason_code in _PRIVATE_BUILD_FAILURE_CODES or (
+        reason_code or ""
+    ).startswith("seed-")
 
 
 def _private_failure_feedback(detail: str, reason_code: str | None) -> str:
@@ -539,6 +612,37 @@ class ScreenerWorker:
             screened_image: BuiltImageArtifact | None = None
             screened_image_upload_id: UUID | None = None
 
+            async def record_mechanical_verification(
+                check_code: str, *, image_sha256: str | None = None
+            ) -> None:
+                if policy_version != 13:
+                    return
+                try:
+                    await self._platform.record_verification_receipt(
+                        agent_id,
+                        attempt_id=attempt_id,
+                        artifact_sha256=item.sha256.lower(),
+                        policy_version=policy_version,
+                        check_code=check_code,
+                        evidence_sha256=mechanical_evidence_sha256(
+                            check_code=check_code,
+                            artifact_sha256=item.sha256.lower(),
+                            image_sha256=image_sha256,
+                        ),
+                        image_sha256=image_sha256,
+                    )
+                except PlatformError:
+                    # A rolling Platform upgrade or lost receipt transport
+                    # must remain visible as `not_recorded`, never become a
+                    # false screening failure or a fabricated check pass.
+                    logger.warning(
+                        "verification receipt not recorded agent_id=%s "
+                        "attempt_id=%s check=%s",
+                        agent_id,
+                        attempt_id,
+                        check_code,
+                    )
+
             async def publish_image(image: BuiltImageArtifact) -> None:
                 nonlocal screened_image, screened_image_upload_id
                 screened_image_upload_id = await self._platform.upload_screened_image(
@@ -551,6 +655,37 @@ class ScreenerWorker:
                     image_ref=image.image_ref,
                 )
                 screened_image = image
+                await record_mechanical_verification(
+                    "build_image_digest", image_sha256=image.sha256.lower()
+                )
+
+            async def record_archive_verification() -> None:
+                await record_mechanical_verification("archive_sha")
+
+            async def record_runtime_verification(
+                check_code: str, evidence_sha256: str
+            ) -> None:
+                if policy_version != 13:
+                    return
+                try:
+                    await self._platform.record_verification_receipt(
+                        agent_id,
+                        attempt_id=attempt_id,
+                        artifact_sha256=item.sha256.lower(),
+                        policy_version=policy_version,
+                        check_code=check_code,
+                        evidence_sha256=evidence_sha256,
+                    )
+                except PlatformError:
+                    # An unavailable writer cannot turn an observation into a
+                    # check pass. Backroom will retain `not_recorded`.
+                    logger.warning(
+                        "runtime verification receipt not recorded agent_id=%s "
+                        "attempt_id=%s check=%s",
+                        agent_id,
+                        attempt_id,
+                        check_code,
+                    )
 
             if item.precheck_reason_code is not None:
                 if item.precheck_reason_code != EXACT_CROSS_MINER_DUPLICATE:
@@ -663,6 +798,8 @@ class ScreenerWorker:
                         progress=self._set_progress,
                         deadline=screen_deadline,
                         publish_image=publish_image,
+                        record_archive_verification=record_archive_verification,
+                        record_runtime_verification=record_runtime_verification,
                         remote_build=remote_build,
                         remote_build_consumed=remote_build_consumed,
                         remote_source_review=remote_source_review,
@@ -744,19 +881,10 @@ class ScreenerWorker:
                     "build-only screen produced a quarantine outcome for "
                     f"agent_id={agent_id}"
                 )
-            reason_code = (
-                "source-review-inconclusive"
-                if typed_outcome == ScreenResultOutcome.PASS_INCONCLUSIVE
-                else result.evidence[-1].code
-                if result.evidence
-                else None
-            )
+            reason_code = _verdict_reason_code(typed_outcome, result.evidence)
             private_failure_detail: str | None = None
             private_failure_log_tail: str | None = None
-            if typed_outcome in {
-                ScreenResultOutcome.RETRYABLE_INFRA,
-                ScreenResultOutcome.INCONCLUSIVE,
-            } or reason_code in {"docker-build", "docker-build-infrastructure"}:
+            if _attach_private_failure_feedback(typed_outcome, reason_code):
                 # The public reason stays generic. Preserve the exact bounded
                 # diagnostic for the submission owner, with the same sanitizer
                 # Platform applies before durable storage. This includes an
@@ -881,6 +1009,21 @@ class ScreenerWorker:
                 image_ref=screened_image.image_ref if screened_image else None,
                 image_upload_id=screened_image_upload_id,
             )
+            completion_receipt_signature = (
+                sign_completion_receipt(
+                    self._keypair,
+                    screener_hotkey=self._config.screener_hotkey,
+                    agent_id=agent_id,
+                    attempt_id=attempt_id,
+                    artifact_sha256=item.sha256.lower(),
+                    adjudication_digest=adjudication_digest,
+                    receipt=adjudication.completion_receipt,
+                )
+                if adjudication is not None
+                and adjudication.completion_receipt is not None
+                and adjudication_digest is not None
+                else None
+            )
             result_submission_started = True
             resp = await self._platform.submit_result(
                 agent_id,
@@ -924,6 +1067,7 @@ class ScreenerWorker:
                 finding=finding,
                 review_audit=review_audit,
                 adjudication=adjudication,
+                completion_receipt_signature=completion_receipt_signature,
                 review_notes=review_notes,
                 image_sha256=screened_image.sha256 if screened_image else None,
                 image_size_bytes=screened_image.size_bytes if screened_image else None,

@@ -53,10 +53,17 @@ from ditto.db.queries.benchmark_admission import (
 )
 from ditto.db.queries.benchmark_rollout import active_bench_version, open_rollout
 from ditto.db.queries.scores import SCORING_QUORUM
+from ditto.db.queries.screening_infra_retry import (
+    InfraRetryDecision,
+    InfraSignature,
+    plan_infra_retries,
+    screener_provider,
+)
 from ditto.db.queries.screening_retry import (
     failed_screening_retry_authorized,
     latest_screening_attempt_id,
 )
+from ditto.db.queries.screening_review_deadlines import record_first_v13_claim_window
 from ditto.screener_policy_state import (
     effective_rescreen_scored,
     effective_scored_rescreen_activation_revision,
@@ -115,6 +122,12 @@ _ORPHANED_ATTEMPT_REASON_CODE = "worker-lease-orphaned"
 _ORPHANED_ATTEMPT_REASON = (
     "Screening worker stopped reporting this attempt; manual retry required"
 )
+# Provider/reviewer failures held on reclaim for ``FAILED_ATTEMPT_RETRY_BACKOFF`` and,
+# with peer-pass evidence, counted toward ``MAX_SCREENING_EXPIRIES``
+# (``_inconclusive_attempt_count``). Do not add a code that should retry
+# automatically WITHOUT counting: those live in
+# ``screening_infra_retry.INFRA_AUTO_RETRY_REASON_CODES``, which has its own
+# backoff/breaker and never feeds the park cap.
 PROVIDER_BACKOFF_REASON_CODES = (
     "targon-build-unavailable",
     "targon-runtime-unavailable",
@@ -629,6 +642,22 @@ async def _shared_hotkey_claim_budget(
     return max(0, fresh_instances - running)
 
 
+async def infra_retry_agent_admitted(session: AsyncSession, agent_id: UUID) -> bool:
+    """Whether the claim's ``prerequisite_admitted`` guard admits one agent.
+
+    The exact predicate ``claim_screening_attempts`` applies to the automatic
+    infrastructure retry, so public text can say "retried automatically" only for
+    an agent the claim will actually pick up.
+    """
+    _, admitted = await prerequisite_screening_predicates(session)
+    return (
+        await session.scalar(
+            select(Agent.agent_id).where(Agent.agent_id == agent_id, admitted)
+        )
+        is not None
+    )
+
+
 async def _inconclusive_attempt_count(session: AsyncSession, *, agent_id: UUID) -> int:
     """Count inconclusive screening turns under the current policy **since the
     agent's most recent operator clear**.
@@ -717,6 +746,7 @@ async def _park_repeatedly_inconclusive(
     agent leaves the retry pool and a human decides its fate instead of the
     screener re-attempting it every lease forever.
     """
+    # This is an operator park, not an artifact-bound execution lease.
     attempt = ScreeningAttempt(
         attempt_id=uuid4(),
         agent_id=agent.agent_id,
@@ -874,6 +904,20 @@ async def claim_screening_attempts(
             ),
         )
     )
+    # Infrastructure-parked agents retry on their own schedule: per-artifact
+    # exponential backoff, then the fleet breaker. Planned under the claim lock
+    # from persisted attempts, so every worker derives the same answer.
+    infra_plan = await plan_infra_retries(
+        session,
+        now=now,
+        claimant_provider=await screener_provider(session, screener_hotkey),
+    )
+    infra_decisions = infra_plan.decisions
+    infra_auto_retry = (
+        Agent.agent_id.in_(infra_plan.claimable_agent_ids)
+        if infra_plan.claimable_agent_ids
+        else false()
+    )
     rolling_qualified = exists(
         select(BenchmarkRolloutMember.agent_id)
         .join(
@@ -1028,6 +1072,9 @@ async def claim_screening_attempts(
         # A failed attempt is parked forever. Only the append-only Backroom
         # authorization for that exact latest attempt makes it claimable.
         (Agent.status == AgentStatus.SCREENING_FAILED) & manual_failed_retry,
+        # Same benchmark-era guard as the stale-EVALUATING lane: a submission
+        # withdrawn from the active era must not spend screener capacity.
+        infra_auto_retry & prerequisite_admitted,
         # A policy bump only returns agents admitted to the active benchmark
         # era. Historical submissions the validator allocator already skips
         # must not consume screener capacity on a rescreen they can never use.
@@ -1136,12 +1183,26 @@ async def claim_screening_attempts(
             )
             .where(eligible, ~has_running_or_backoff, ~earlier_pending)
             .order_by(*screening_priority_order())
-            .limit(limit)
+            # Surplus probe candidates only exist to be skipped below; widen the
+            # window so they cannot crowd out claimable work behind them.
+            .limit(limit + infra_plan.surplus_probe_candidates)
             .with_for_update(of=Agent, skip_locked=True)
         )
     )
     claimed: list[tuple[Agent, ScreeningAttempt, UUID | None]] = []
+    probed_signatures: set[InfraSignature] = set()
     for agent in agents:
+        if len(claimed) >= limit:
+            break
+        infra: InfraRetryDecision | None = infra_decisions.get(agent.agent_id)
+        # One probe per signature per interval. The probe attempt is added to
+        # this locked transaction, so the next claimer sees it.
+        if (
+            infra is not None
+            and infra.state == "probe_due"
+            and infra.signature in probed_signatures
+        ):
+            continue
         # An agent that keeps coming back inconclusive burns a lease every
         # cycle; after the cap, park it for operator review instead of leasing
         # it out again to loop forever.
@@ -1251,6 +1312,7 @@ async def claim_screening_attempts(
                 AgentStatus.SCREENING_FAILED: "failed",
             }.get(agent.status)
             if legacy_status is not None:
+                # Historical state has no observed attempt/artifact receipt.
                 session.add(
                     ScreeningAttempt(
                         attempt_id=uuid4(),
@@ -1427,6 +1489,7 @@ async def claim_screening_attempts(
         attempt = ScreeningAttempt(
             attempt_id=uuid4(),
             agent_id=agent.agent_id,
+            artifact_sha256=agent.sha256,
             screener_hotkey=screener_hotkey,
             policy_version=attempt_policy_version,
             status="running",
@@ -1465,6 +1528,9 @@ async def claim_screening_attempts(
             ),
         )
         session.add(attempt)
+        await record_first_v13_claim_window(
+            session, agent=agent, attempt=attempt, lease_ttl=ttl
+        )
         if policy_rescreen_release is not None:
             # The release FK is intentionally one-way (an attempt has no ORM
             # collection of rollout releases), so flush the new attempt before
@@ -1482,6 +1548,8 @@ async def claim_screening_attempts(
         agent.screening_reason = None
         agent.screening_reason_code = None
         claimed.append((agent, attempt, duplicate_of))
+        if infra is not None and infra.state == "probe_due":
+            probed_signatures.add(infra.signature)
     await session.flush()
     return claimed
 

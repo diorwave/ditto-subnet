@@ -307,6 +307,7 @@ export const screenerReviewSettingsSchema = z
     adjudicator_model: z.literal('z-ai/glm-5.3-flash').default('z-ai/glm-5.3-flash'),
     adjudicator_max_steps: z.number().int().min(1).max(1024).default(128),
     adjudicator_timeout_seconds: z.number().int().min(60).max(3_600).default(600),
+    adjudicator_max_completion_tokens: z.number().int().min(1_000).max(128_000).nullable().default(null),
     fanout_shadow_mode: z.enum(['off', 'shadow']).default('off'),
     fanout_shadow_image_source_sha: z.string().regex(/^[0-9a-f]{40}$/).default('0'.repeat(40)),
     fanout_shadow_model: z.literal('z-ai/glm-5.3-flash').default('z-ai/glm-5.3-flash'),
@@ -341,6 +342,13 @@ export const screenerReviewSettingsSchema = z
         code: 'custom',
         message: 'Completion budget cannot exceed output budget',
         path: ['max_completion_tokens'],
+      })
+    }
+    if (value.adjudicator_max_completion_tokens !== null && value.adjudicator_max_completion_tokens > value.max_output_tokens) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Adjudicator completion budget cannot exceed output budget',
+        path: ['adjudicator_max_completion_tokens'],
       })
     }
     if (
@@ -646,6 +654,16 @@ export const setScreenerNodeChannelSettingsInputSchema = z.object({
   confirmation: z.string(),
 })
 
+export const setScreenerNodeReplayCapacityInputSchema = z.object({
+  nodeId: z.literal('subnet-screener-2'),
+  expectedHotkey: z.string().min(1),
+  expectedStatus: z.enum(['active', 'draining', 'quarantined', 'revoked']),
+  expectedCapacity: z.number().int().min(0).max(4),
+  capacity: z.union([z.literal(0), z.literal(1)]),
+  reason: auditReasonSchema(8),
+  confirmation: z.string(),
+})
+
 export function screenerNodeChannelSettingsConfirmation(
   nodeId: string,
   settings: z.infer<typeof screenerNodeChannelSettingsSchema>,
@@ -746,6 +764,7 @@ export const screenerCapacityNodeSchema = z.object({
   screener_hotkey: z.string().min(1),
   status: screenerNodeStatusSchema,
   capacity: z.number().int().positive(),
+  verification_replay_capacity: z.number().int().min(0).max(4).default(0),
   token_expires_at: z.string(),
   registered_at: z.string(),
   rotated_at: z.string(),
@@ -844,6 +863,79 @@ export const screenerCapacityViewSchema = z.object({
   node_controls: z.array(screenerNodeChannelSettingsControlSchema).default([]),
 })
 
+const infraRetryStateSchema = z.enum(['backoff', 'breaker_held', 'probe_due', 'due', 'capped'])
+const nonNegativeInt = z.number().int().nonnegative()
+const infraRetryBreakerPhaseSchema = z.enum(['closed', 'open', 'half_open'])
+
+/** Read-only view of Platform's automatic infrastructure-retry state (#475).
+ * Every number is derived from attempt history at read time. */
+export const screeningInfraRetryViewSchema = z.object({
+  generated_at: z.string(),
+  basis: z.string(),
+  policy: z.object({
+    auto_retry_reason_codes: z.array(z.string()),
+    base_backoff_seconds: nonNegativeInt,
+    max_backoff_seconds: nonNegativeInt,
+    jitter_fraction: z.number().nonnegative(),
+    auto_retry_max_age_seconds: nonNegativeInt,
+    auto_retry_max_streak: nonNegativeInt,
+    plan_max_claimable: nonNegativeInt,
+    breaker_distinct_agents: nonNegativeInt,
+    breaker_window_seconds: nonNegativeInt,
+    breaker_open_seconds: nonNegativeInt,
+    breaker_probe_interval_seconds: nonNegativeInt,
+    breaker_history_lookback_seconds: nonNegativeInt,
+  }),
+  summary: z.object({
+    parked_agents: nonNegativeInt,
+    by_state: z.record(infraRetryStateSchema, nonNegativeInt),
+    not_admitted: nonNegativeInt,
+    // Parked on a failure older than the max age with no operator retry; not listed.
+    aged_out_agents: nonNegativeInt,
+    open_breakers: nonNegativeInt,
+    half_open_breakers: nonNegativeInt,
+    breakers_total: nonNegativeInt,
+  }),
+  agents: z.array(z.object({
+    agent_id: z.string().uuid(),
+    attempt_id: z.string().uuid(),
+    reason_code: z.string(),
+    provider: z.string().nullable(),
+    lane: z.string().nullable(),
+    consecutive_failures: nonNegativeInt,
+    failed_at: z.string(),
+    backoff_until: z.string(),
+    next_retry_at: z.string(),
+    state: infraRetryStateSchema,
+    breaker_phase: infraRetryBreakerPhaseSchema.nullable(),
+    admitted: z.boolean(),
+    claim_outlook: z.enum(['ready', 'waiting_backoff', 'waiting_breaker', 'needs_operator', 'not_admitted']),
+  })),
+  agents_limit: nonNegativeInt,
+  agents_truncated: z.boolean(),
+  breakers: z.array(z.object({
+    reason_code: z.string(),
+    provider: z.string().nullable(),
+    lane: z.string().nullable(),
+    phase: infraRetryBreakerPhaseSchema,
+    opened_at: z.string().nullable(),
+    open_until: z.string().nullable(),
+    last_probe_at: z.string().nullable(),
+    next_probe_at: z.string().nullable(),
+    parked_agents: nonNegativeInt,
+  })),
+  breakers_limit: nonNegativeInt,
+  breakers_truncated: z.boolean(),
+})
+
+export type ScreeningInfraRetryView = z.infer<typeof screeningInfraRetryViewSchema>
+
+/** The retry view as the route and panel receive it. The read is isolated so a
+ * failure keeps the capacity page up, but the reason and HTTP status (when
+ * Platform answered) always travel with it. */
+export type ScreeningInfraRetryOutcome =
+  | { ok: true; view: ScreeningInfraRetryView }
+  | { ok: false; status: number | null; message: string }
 export type ScreenerCapacityView = z.infer<typeof screenerCapacityViewSchema>
 export type ScreenerCapacityNode = z.infer<typeof screenerCapacityNodeSchema>
 export type ScreenerHostSpecs = z.infer<typeof screenerHostSpecsSchema>
@@ -3803,8 +3895,21 @@ export type ValidatorFleetMember = z.infer<typeof validatorFleetMemberSchema>
 
 // MCP fleet observability keeps identity the slot-cap console deliberately
 // drops: software_version, protocol, stack component revisions, scorer probe
-// identity, and updater current/candidate. Calibration manifests and per-check
-// progress stay out of the parse so one heartbeat cannot flood the catalog.
+// identity, and updater current/candidate. Progress is aggregate-only and
+// bounded to the eight supported slots; private per-check data stays out.
+const validatorRunProgressSchema = z.object({
+  agent_id: z.string().uuid(),
+  slot_id: z.string().max(64),
+  bench_version: z.number().int().positive(),
+  started_at: z.string().max(64),
+  stage: z.string().max(64).nullish().catch(null),
+  completed_checks: z.number().int().min(0).max(10_000).nullish().catch(null),
+  total_checks: z.number().int().min(1).max(10_000).nullish().catch(null),
+  percent: z.number().int().min(0).max(100).nullish().catch(null),
+  stalled: z.boolean().nullish().catch(null),
+  purpose: z.string().max(64).nullish().catch(null),
+})
+
 const validatorComponentIdentitySchema = z
   .object({
     image_digest: z.string().nullish().catch(null),
@@ -3904,6 +4009,10 @@ export const validatorFleetObservabilityMemberSchema = z
     healthy_slot_count: member.healthy_slots.length,
     active_benchmark_count: member.active_benchmarks.length,
     confirmation_benchmark_count: member.confirmation_benchmarks.length,
+    active_benchmarks: member.active_benchmarks.slice(0, 8).flatMap((raw) => {
+      const parsed = validatorRunProgressSchema.safeParse(raw)
+      return parsed.success ? [parsed.data] : []
+    }),
     orphaned_slot_count: member.orphaned_slots.length,
     claimed_slots: member.claimed_slots,
     disk_percent: member.system_metrics?.disk_percent ?? null,
@@ -4292,6 +4401,69 @@ export const screeningAttemptSchema = z.object({
   duplicate_version: z.number().int().positive().nullish().default(null),
 })
 
+export const adjudicationRequestAttemptDiagnosticSchema = z.object({
+  ordinal: z.number().int().min(1).max(1_024),
+  started_ms: z.number().int().min(0).max(3_600_000),
+  elapsed_ms: z.number().int().min(0).max(3_600_000),
+  stage: z.enum(['request', 'headers', 'bytes', 'event', 'complete']),
+  stream_requested: z.boolean(),
+  prompt_bytes: z.number().int().min(0).max(20_000_000),
+  http_status: z.number().int().min(100).max(599).nullish(),
+  headers_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  first_byte_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  last_byte_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  first_event_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  last_event_ms: z.number().int().min(0).max(3_600_000).nullish(),
+  event_count: z.number().int().min(0).max(100_000),
+  wire_bytes: z.number().int().min(0).max(20_000_000),
+  upstream: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/).nullish(),
+})
+
+export const adjudicationRunDiagnosticSchema = z.object({
+  error_class: z
+    .string()
+    .regex(/^[A-Za-z][A-Za-z0-9]{0,63}$/)
+    .nullish(),
+  failure_code: z
+    .enum([
+      'completion-timeout', 'provider-http-error', 'provider-stream-error',
+      'provider-body-error', 'transport-error', 'stream-incomplete',
+      'stream-no-tool-call', 'stream-invalid', 'response-too-large',
+      'response-json-invalid', 'tool-call-invalid', 'verdict-invalid',
+      'lease-budget', 'step-budget', 'response-invalid',
+    ])
+    .nullish(),
+  escalation_code: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{0,63}$/)
+    .nullish(),
+  timeout_stage: z
+    .enum(['completion', 'lease', 'step-budget', 'unavailable', 'response'])
+    .nullish(),
+  http_status: z.number().int().min(100).max(599).nullish(),
+  elapsed_ms: z.number().int().min(0).max(3_600_000),
+  prompt_tokens: z.number().int().min(0).max(10_000_000).nullish(),
+  completion_tokens: z.number().int().min(0).max(10_000_000).nullish(),
+  final_tool_call_returned: z.boolean().nullish(),
+  model: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/)
+    .nullish(),
+  provider: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
+    .nullish(),
+  /** Which upstream behind that gateway served the call; the gateway may fail
+   * over between upstreams per request, so this is what attributes a burst. */
+  upstream: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
+    .nullish(),
+  /** Bounded per-request timeline; contains counts and times, never prompt or response text. */
+  request_count: z.number().int().min(0).max(1_024).optional(),
+  request_attempts: z.array(adjudicationRequestAttemptDiagnosticSchema).max(32).optional(),
+})
+
 export const screeningFailureDiagnosticSchema = z.object({
   agent_id: z.string().uuid(),
   artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -4313,6 +4485,139 @@ export const screeningFailureDiagnosticSchema = z.object({
   reason_code: z.string().nullable(),
   private_failure_detail: z.string().max(4_000).nullable(),
   private_failure_log_tail: z.string().max(16_000).nullable(),
+  // Null for attempts screened before the court trace existed, and for
+  // failures that were not an automated-court run. Older Platform responses
+  // omit the key; treat that the same as an absent trace.
+  court_diagnostic: adjudicationRunDiagnosticSchema.nullish().default(null),
+  court_completion_receipt: z.object({
+    elapsed_ms: z.number().int().min(0).max(3_600_000),
+    first_tool_call_ms: z.number().int().min(0).max(3_600_000).nullable(),
+    first_tool_observation: z.enum(['stream_delta', 'complete_body']).nullable(),
+    observed_model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/).nullable(),
+    gateway_provider: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/).nullable(),
+    observed_upstream: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/).nullable(),
+    request_count: z.number().int().min(0).max(1_024),
+    final_request_prompt_bytes: z.number().int().min(0).max(20_000_000).nullable(),
+    final_request_wire_bytes: z.number().int().min(0).max(20_000_000).nullable(),
+    final_request_event_count: z.number().int().min(0).max(100_000).nullable(),
+    prompt_tokens: z.number().int().min(0).max(10_000_000).nullable(),
+    completion_tokens: z.number().int().min(0).max(10_000_000).nullable(),
+  }).nullish().default(null),
+})
+
+export const adjudicationAttemptsInputSchema = z.object({
+  limit: z.number().int().min(1).max(100).default(50),
+  offset: z.number().int().min(0).max(10_000).default(0),
+  lookbackHours: z.number().int().min(1).max(720).default(72),
+})
+
+export const adjudicationAttemptsSchema = z.object({
+  limit: z.number().int().min(1).max(100),
+  offset: z.number().int().min(0).max(10_000),
+  lookback_hours: z.number().int().min(1).max(720),
+  items: z.array(z.object({
+    agent_id: z.string().uuid(),
+    attempt_id: z.string().uuid(),
+    artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    policy_version: z.number().int().positive(),
+    manifest_digest: z.string().regex(/^[0-9a-f]{64}$/),
+    started_at: z.string(),
+    finished_at: z.string().nullable(),
+    attempt_status: z.string(),
+    adjudication_decision: z.enum(['clear', 'reject', 'escalate']),
+    review_settings_revision: z.number().int().positive().nullable(),
+    review_settings_checksum: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    configured_model: z.string().nullable(),
+    configured_timeout_seconds: z.number().int().nullable(),
+    configured_completion_ceiling: z.number().int().nullable(),
+    observed_model: z.string().nullable(),
+    observed_provider: z.string().nullable(),
+    observed_upstream: z.string().nullable(),
+    failure_code: z.string().nullable(),
+    elapsed_ms: z.number().int().nullable(),
+    first_tool_call_ms: z.number().int().nullable(),
+    first_tool_observation: z.enum(['stream_delta', 'complete_body']).nullish().default(null),
+    request_count: z.number().int().nullable(),
+    request_prompt_bytes: z.number().int().nullable(),
+    request_wire_bytes: z.number().int().nullable(),
+    request_event_count: z.number().int().nullable(),
+    prompt_tokens: z.number().int().nullable(),
+    completion_tokens: z.number().int().nullable(),
+  })).max(100),
+})
+
+export const screeningVerificationReadinessSchema = z.object({
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  attempt_id: z.string().uuid(),
+  policy_version: z.literal(13),
+  attempt_status: z.string(),
+  // Optional while Platform and Backroom roll out independently. Omission is
+  // unknown, never evidence that no verified image exists.
+  verified_image_sha256s: z.array(z.string().regex(/^[0-9a-f]{64}$/)).max(16).optional(),
+  verified_image_count: z.number().int().nonnegative().optional(),
+  verified_images_truncated: z.boolean().optional(),
+  checks: z.array(z.object({
+    check_code: z.string().regex(/^[a-z0-9_]{1,64}$/),
+    record_status: z.enum(['not_recorded', 'recorded_unverified', 'mechanically_verified']),
+    receipt_count: z.number().int().nonnegative(),
+  })).length(20),
+  private_metamorphic_applicability: z.literal('not_recorded'),
+  private_package: z.object({
+    registration_status: z.enum(['not_registered', 'registered_unverified']),
+    prerequisites: z.array(z.object({
+      code: z.string(),
+      status: z.enum(['not_observed', 'recorded_unverified', 'mechanically_verified']),
+    })),
+    clear_authorized: z.literal(false),
+  }).nullish(),
+  receipts: z.array(z.object({
+    receipt_id: z.string().uuid(),
+    check_code: z.string().regex(/^[a-z0-9_]{1,64}$/),
+    evidence_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    image_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    profile_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    challenge_manifest_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+    worker_hotkey: z.string().min(1).max(120),
+    created_at: z.string(),
+  })).max(128),
+  receipt_count: z.number().int().nonnegative(),
+  receipts_truncated: z.boolean(),
+})
+
+export const screeningReviewDeadlineDiagnosticSchema = z.object({
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  agent_status: z.string(),
+  policy_version: z.number().int().nonnegative(),
+  quarantine_id: z.string().uuid().nullable(),
+  quarantine_status: z.string().nullable(),
+  quarantine_resolution: z.string().nullable(),
+  quarantine_attempt_id: z.string().uuid().nullable(),
+  quarantine_artifact_matches: z.boolean().nullable(),
+  manifest_digest: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  deadline_state: z.enum(['bound', 'not_configured']),
+  finalizer_state: z.literal('not_configured'),
+  activation_revision: z.number().int().positive().nullable(),
+  activation_actor: z.string().nullable(),
+  activation_reason: z.string().nullable(),
+  activated_at: z.string().nullable(),
+  start_event: z.string().nullable(),
+  window_started_at: z.string().nullable(),
+  deadline_at: z.string().nullable(),
+  recorded_attempts: z.array(z.object({
+    attempt_id: z.string().uuid(),
+    status: z.string(),
+    screener_hotkey: z.string(),
+    started_at: z.string(),
+    finished_at: z.string().nullable(),
+    reason_code: z.string().nullable(),
+  })),
+  observed_worker_hotkeys: z.array(z.string()),
+  required_retries: z.null(),
+  independent_worker_count: z.null(),
+  failure_domain: z.null(),
+  outstanding_mandatory_checks: z.null(),
 })
 
 export const screeningImageBuildSchema = z.object({
@@ -4765,6 +5070,47 @@ export const screeningSubmissionLookupInputSchema = z.object({
 export const screeningFailureDiagnosticInputSchema = z.object({
   agentId: z.string().uuid(),
   attemptId: z.string().uuid(),
+})
+
+export const v13GenerationGroupInputSchema = z.object({
+  groupId: z.string().uuid(),
+  role: z.enum(['target', 'known_benign']).optional(),
+})
+
+export const v13GenerationGroupSchema = z.object({
+  group_id: z.string().uuid(),
+  target_agent_id: z.string().uuid(),
+  target_attempt_id: z.string().uuid(),
+  target_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  target_image_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  control_agent_id: z.string().uuid(),
+  control_attempt_id: z.string().uuid(),
+  control_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  control_image_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  approval_id: z.string().uuid(),
+  approval_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  profile_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  target_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  control_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  actor: z.string().min(1).max(120),
+  started_at: z.string(),
+  status: z.literal('recorded_unverified'),
+})
+
+export const v13GroupPackageSchema = z.object({
+  group_id: z.string().uuid(),
+  role: z.enum(['target', 'known_benign']),
+  agent_id: z.string().uuid(),
+  attempt_id: z.string().uuid(),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  image_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  profile_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  generation_receipt_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  manifest_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  pair_inventory_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  registrar_actor: z.string().min(1).max(120),
+  registered_at: z.string(),
+  status: z.literal('recorded_unverified'),
 })
 
 export const screeningArtifactSchema = z.object({
@@ -6341,6 +6687,17 @@ export const activeContractCandidateSchema = z.object({
 })
 
 export const benchmarkRolloutControlSchema = benchmarkRolloutStateSchema.extend({
+  retry_diagnostics: z.array(z.object({
+    agent_id: z.string().uuid(),
+    agent_name: z.string(),
+    bench_version: z.number().int().positive(),
+    blocks_activation: z.boolean(),
+    state: z.string(),
+    score_count: z.number().int().nonnegative(),
+    recovery_allowed: z.boolean(),
+    blocking_reason: z.string().nullable(),
+    earliest_retry_after: z.string().nullable(),
+  })).optional().default([]),
   contracts: z.array(benchmarkContractSchema),
   available_target_versions: z.array(z.number().int().positive()),
   active_contract_candidates: z.array(activeContractCandidateSchema),
@@ -7178,6 +7535,12 @@ export type ScreeningSubmission = z.infer<typeof screeningSubmissionSchema>
 export type ScreeningFailureDiagnostic = z.infer<
   typeof screeningFailureDiagnosticSchema
 >
+export type ScreeningVerificationReadiness = z.infer<
+  typeof screeningVerificationReadinessSchema
+>
+export type ScreeningReviewDeadlineDiagnostic = z.infer<
+  typeof screeningReviewDeadlineDiagnosticSchema
+>
 export type ScreeningEvidenceItem = z.infer<typeof screeningEvidenceItemSchema>
 export type SourceReviewFinding = z.infer<typeof sourceReviewFindingSchema>
 export type ScreeningQuarantineContext = z.infer<typeof screeningQuarantineContextSchema>
@@ -7276,6 +7639,125 @@ export const agentScoresLookupInputSchema = z
       })
     }
   })
+
+export const continualRetestDiagnosticInputSchema = z.object({
+  agentId: z.string().uuid(),
+})
+
+// One cutoff the agent was measured against. A negative `gap` with the agent
+// still outside the cohort is the signature of a structural exclusion (owner
+// suppression) rather than a score it failed to reach.
+export const retestCutoffComparisonSchema = z.object({
+  agent_id: z.string().uuid().nullable().default(null),
+  composite: z.number().nullable().default(null),
+  gap: z.number().nullable().default(null),
+  tie_band: z.number().nonnegative().nullable().default(null),
+  within_tie_band: z.boolean().nullable().default(null),
+})
+
+// The issuance lane's own gates, in the order the lane evaluates them.
+// Outstanding work is a COUNT: seed values stay server-side.
+export const retestClaimabilitySchema = z.object({
+  lane_enabled: z.boolean(),
+  latest_block: z.number().int().nonnegative().nullable(),
+  champion_agent_id: z.string().uuid().nullable(),
+  champion_crown_block: z.number().int().nonnegative().nullable(),
+  scheduled_round: z.boolean().nullable(),
+  spare_capacity_window: z.boolean(),
+  idle_retests_enabled: z.boolean(),
+  in_catchup_set: z.boolean(),
+  route_priority: z.enum(['champion', 'catchup', 'emission', 'extended', 'not_routed']),
+  route_position: z.number().int().positive().nullable(),
+  pending_seed_count: z.number().int().nonnegative(),
+  claimable_seed_available: z.boolean(),
+  live_lease_count: z.number().int().nonnegative(),
+  newer_canonical_work_pending: z.boolean(),
+  least_covered_admitted: z.boolean().nullable(),
+  decision: z.enum([
+    'claimable', 'lane_disabled', 'not_in_cohort', 'chain_unavailable',
+    'round_not_due', 'newer_canonical_work_pending', 'no_pending_seeds',
+    'all_pending_seeds_leased', 'another_member_less_covered',
+  ]),
+})
+
+// A platform that predates the cutoff comparison returns neither object; the
+// empty comparison keeps the console reading "not measured" rather than "tied".
+const emptyRetestCutoff = {
+  agent_id: null,
+  composite: null,
+  gap: null,
+  tie_band: null,
+  within_tie_band: null,
+}
+
+export const continualRetestDiagnosticSchema = z.object({
+  generated_at: z.string(),
+  agent_id: z.string().uuid(),
+  agent_status: z.string(),
+  active_bench_version: z.number().int().positive(),
+  canonical_composite: z.number().min(0).max(1).nullable(),
+  official_composite: z.number().min(0).nullable(),
+  owner_representative_id: z.string().uuid().nullable(),
+  family: z.array(z.object({
+    agent_id: z.string().uuid(),
+    canonical_composite: z.number().min(0).max(1),
+    official_composite: z.number().min(0),
+    representative: z.boolean(),
+    effective_composite: z.number().min(0).nullable().default(null),
+    canonical_sample_count: z.number().int().nonnegative().default(0),
+    completed_wave_depth: z.number().int().nonnegative().default(0),
+    first_seen: z.string().nullable().default(null),
+  })),
+  // int63 seeds must remain decimal strings across the JSON/JavaScript boundary.
+  raw_confirmation_seeds: z.array(z.string().regex(/^(0|[1-9][0-9]*)$/)),
+  folded_confirmation_seeds: z.array(z.string().regex(/^(0|[1-9][0-9]*)$/)),
+  in_raw_wave: z.boolean(),
+  in_emission_set: z.boolean(),
+  in_retest_cohort: z.boolean(),
+  is_same_owner_challenger: z.boolean(),
+  cohort_position: z.number().int().positive().nullable(),
+  cohort_size: z.number().int().nonnegative(),
+  configured_cohort_size: z.number().int().positive(),
+  eligibility_mode: z.enum(['fixed', 'statistical']),
+  eligibility_z: z.number().nonnegative(),
+  configured_max_size: z.number().int().positive(),
+  ticket_status_counts: z.record(z.string(), z.number().int().nonnegative()),
+  active_ticket_count: z.number().int().nonnegative(),
+  seed_anchor_champion_id: z.string().uuid().nullable(),
+  seed_anchor_block: z.number().int().nonnegative().nullable(),
+  seed_anchor_pinned: z.boolean().nullable(),
+  admission_reason: z.enum([
+    'in_cohort', 'same_owner_challenger', 'owner_suppressed',
+    'outside_cohort', 'not_current_finalized_ledger',
+  ]),
+  ledger_eligible: z.boolean().default(false),
+  canonical_sample_count: z.number().int().nonnegative().default(0),
+  completed_wave_depth: z.number().int().nonnegative().default(0),
+  official_sample_count: z.number().int().nonnegative().default(0),
+  raw_confirmation_depth: z.number().int().nonnegative().default(0),
+  composite_stderr: z.number().nonnegative().nullable().default(null),
+  aggregate_mode: z.enum(['disabled', 'fleet_ready', 'enabled']).default('fleet_ready'),
+  wave_membership: z.enum(['strict', 'participants', 'per_agent']).default('participants'),
+  owner_key: z.string().nullable().default(null),
+  representative_canonical_composite: z.number().min(0).max(1).nullable().default(null),
+  representative_official_composite: z.number().min(0).nullable().default(null),
+  // Positive means this generation is BEHIND its owner's representative.
+  representative_margin: z.number().nullable().default(null),
+  representative_selection: z.enum([
+    'self', 'official_composite', 'efficiency_tiebreak',
+    'newest_generation', 'agent_id_tiebreak', 'none',
+  ]).default('none'),
+  cohort_cutoff: retestCutoffComparisonSchema.default(() => emptyRetestCutoff),
+  emission_cutoff: retestCutoffComparisonSchema.default(() => emptyRetestCutoff),
+  claim: retestClaimabilitySchema.nullable().default(null),
+  latest_ticket_status: z.string().nullable().default(null),
+  latest_ticket_validator_hotkey: z.string().nullable().default(null),
+  latest_ticket_updated_at: z.string().nullable().default(null),
+  latest_ticket_failure_reason: z.string().nullable().default(null),
+  terminal_ticket_count: z.number().int().nonnegative().default(0),
+  latest_confirmation_composite: z.number().min(0).max(1).nullable().default(null),
+  latest_confirmation_recorded_at: z.string().nullable().default(null),
+})
 
 export const scoreLeaderboardInputSchema = z.object({
   benchVersion: z.number().int().positive().optional(),

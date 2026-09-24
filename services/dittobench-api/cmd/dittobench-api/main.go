@@ -255,6 +255,9 @@ func main() {
 	allowPrivate := envBool("DITTOBENCH_ALLOW_PRIVATE_HARNESS")
 	allowScreenedImages := envBool("DITTOBENCH_ALLOW_SCREENED_IMAGES")
 	requireTicketInference := envBool("DITTOBENCH_REQUIRE_TICKET_INFERENCE")
+	if err := validatePrivateHarnessPosture(allowPrivate, allowScreenedImages); err != nil {
+		log.Fatalf("%v", err)
+	}
 	logReleaseIdentity(identity)
 	runner.Configure(allowPrivate)
 	if allowPrivate {
@@ -2964,6 +2967,16 @@ func pinnedOrFreshSeed(pinned int64) int64 {
 	return gen.FreshSeed()
 }
 
+// validatePrivateHarnessPosture fails closed when the relaxed SSRF guard is
+// combined with the trusted validator image path: a validator-owned scorer must
+// never fetch tarballs or screened images from link-local/RFC1918 targets.
+func validatePrivateHarnessPosture(allowPrivate, allowScreenedImages bool) error {
+	if allowPrivate && allowScreenedImages {
+		return errors.New("DITTOBENCH_ALLOW_PRIVATE_HARNESS cannot be combined with DITTOBENCH_ALLOW_SCREENED_IMAGES; unset the private-harness flag on validator-owned scorers")
+	}
+	return nil
+}
+
 // envBool reports whether an env var is set to a truthy value.
 func envBool(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
@@ -3048,18 +3061,30 @@ var lockedEnvKeys = map[string]bool{
 	"OPENROUTER_BASE_URL":           true,
 	"DITTOBENCH_INFERENCE_BASE_URL": true,
 	"DITTOBENCH_DB":                 true,
+	"DITTOBENCH_MEMORY_PATH":        true,
+}
+
+// sandboxPersistencePaths are the known harness persistence variables and the
+// bounded tmpfs paths they are pinned to. ditto-screener locks the same pair
+// for its serve smoke, so a harness that honours either variable persists in
+// the same place while it is screened and while it is scored.
+var sandboxPersistencePaths = map[string]string{
+	"DITTOBENCH_DB":          "/tmp/dittobench.db",
+	"DITTOBENCH_MEMORY_PATH": "/tmp/dittobench-memory.json",
 }
 
 // sandboxRuntimeEnv applies filesystem invariants shared by practice and
 // canonical scoring without changing the practice endpoint's provider env.
 func sandboxRuntimeEnv(reqEnv map[string]string) map[string]string {
-	env := make(map[string]string, len(reqEnv)+1)
+	env := make(map[string]string, len(reqEnv)+len(sandboxPersistencePaths))
 	for key, value := range reqEnv {
-		if key != "DITTOBENCH_DB" {
+		if _, locked := sandboxPersistencePaths[key]; !locked {
 			env[key] = value
 		}
 	}
-	env["DITTOBENCH_DB"] = "/tmp/dittobench.db"
+	for key, value := range sandboxPersistencePaths {
+		env[key] = value
+	}
 	return env
 }
 
@@ -3119,10 +3144,13 @@ func harnessSandboxEnvForProvider(reqEnv map[string]string, benchVersion int, pr
 	env["DITTOBENCH_MODEL"] = llm.HarnessModelForVersion(benchVersion)
 	env["OLLAMA_BASE_URL"] = embeddingGateway
 	// The production sandbox has a read-only root and exposes exactly one
-	// bounded writable filesystem at /tmp. Force the standard harness database
-	// there so an image cannot pass screening as root and then fail to boot as
-	// the validator's unprivileged UID.
-	env["DITTOBENCH_DB"] = "/tmp/dittobench.db"
+	// bounded writable filesystem at /tmp. Force the known harness persistence
+	// paths there so an image cannot pass screening as root and then fail to
+	// boot as the validator's unprivileged UID, and so a harness honouring
+	// either variable lands in the same place in both runtimes.
+	for key, value := range sandboxPersistencePaths {
+		env[key] = value
+	}
 	return env
 }
 

@@ -35,8 +35,8 @@ import logging
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from uuid import UUID, uuid4
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import (
     APIRouter,
@@ -92,6 +92,7 @@ from ditto.api_models import (
 )
 from ditto.api_models.agent_status import AgentStatus
 from ditto.api_models.screener import (
+    ScreeningVerificationReceiptRequest,
     ShadowReviewObservationRequest,
     ShadowReviewObservationResponse,
 )
@@ -201,6 +202,7 @@ from ditto.db.models import (
     ScreenerShadowReview,
     ScreeningAttempt,
     ScreeningQuarantine,
+    ScreeningVerificationReceipt,
     SubmissionImageBuild,
     SubmissionSourceReview,
     TrustedImageBuild,
@@ -229,16 +231,23 @@ from ditto.db.queries.screening import (
     POLICY_ONLY_RESCREEN_REASON,
     claim_screening_attempts,
     get_screening_attempt,
+    infra_retry_agent_admitted,
     prerequisite_screening_predicates,
     screening_priority_order,
     try_acquire_screening_claim_lock,
 )
+from ditto.db.queries.screening_infra_retry import INFRA_AUTO_RETRY_REASON_CODES
 from ditto_screening_protocol import (
     SCREENING_POLICY_VERSION,
     ScreenResultOutcome,
     SourceReviewFinding,
     SourceReviewObservationPayload,
+    completion_receipt_signing_message,
     verdict_signing_message,
+)
+from ditto_screening_protocol.mechanical_verification import (
+    MECHANICAL_PROFILE_SHA256,
+    mechanical_evidence_sha256,
 )
 from ditto_screening_protocol.models import source_review_invariants_for_policy
 from ditto_screening_protocol.private_failure import (
@@ -553,6 +562,112 @@ async def require_screener(
 
 
 ScreenerDep = Annotated[str, Depends(require_screener)]
+
+
+@router.post(
+    "/agent/{agent_id}/verification-receipts",
+    response_model=None,
+    status_code=204,
+)
+async def record_screening_verification_receipt(
+    agent_id: UUID,
+    payload: ScreeningVerificationReceiptRequest,
+    screener_hotkey: ScreenerDep,
+    session: SessionDep,
+) -> None:
+    """Append one check digest under the active v13 lease.
+
+    Only the authenticated owner of a running, unexpired attempt may write.
+    Platform recomputes mechanical digests from the committed artifact and
+    verified image upload. Runtime rows remain observation-only. Neither kind
+    is a complete policy-v13 check pass or CLEAR authorization.
+    A deterministic receipt ID makes an uncertain HTTP retry idempotent.
+    """
+    async with session.begin():
+        agent = await get_agent_by_id(session, agent_id=agent_id, for_update=True)
+        attempt = await get_screening_attempt(
+            session, attempt_id=payload.attempt_id, for_update=True
+        )
+        if agent is None or attempt is None or attempt.agent_id != agent_id:
+            raise HTTPException(status_code=404, detail="screening attempt not found")
+        # Re-read time after acquiring both row locks. An in-flight request
+        # waiting on a competing settlement must not backdate a receipt past
+        # the lease deadline.
+        now = datetime.now(UTC)
+        deadline = attempt.deadline
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        mechanical = payload.check_code in {"archive_sha", "build_image_digest"}
+        if (
+            attempt.screener_hotkey != screener_hotkey
+            or attempt.policy_version != payload.policy_version
+            or attempt.status != "running"
+            or now >= deadline
+            or agent.sha256.lower() != payload.artifact_sha256
+            or (
+                (mechanical or attempt.artifact_sha256 is not None)
+                and (
+                    attempt.artifact_sha256 is None
+                    or attempt.artifact_sha256.lower() != payload.artifact_sha256
+                )
+            )
+        ):
+            raise HTTPException(
+                status_code=409, detail="verification receipt lease is stale"
+            )
+        if mechanical and payload.evidence_sha256 != mechanical_evidence_sha256(
+            check_code=payload.check_code,
+            artifact_sha256=agent.sha256.lower(),
+            image_sha256=payload.image_sha256,
+        ):
+            raise HTTPException(
+                status_code=409, detail="mechanical receipt evidence digest mismatch"
+            )
+        if payload.check_code == "build_image_digest":
+            verified_image = await session.scalar(
+                select(ScreenedImageUpload.image_upload_id).where(
+                    ScreenedImageUpload.agent_id == agent_id,
+                    ScreenedImageUpload.attempt_id == payload.attempt_id,
+                    ScreenedImageUpload.screener_hotkey == screener_hotkey,
+                    ScreenedImageUpload.sha256 == payload.image_sha256,
+                    ScreenedImageUpload.status == "verified",
+                )
+            )
+            if verified_image is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="build image receipt lacks verified image upload",
+                )
+        receipt_id = uuid5(
+            NAMESPACE_URL,
+            f"v13:{agent_id}:{payload.attempt_id}:{payload.check_code}",
+        )
+        existing = await session.get(ScreeningVerificationReceipt, receipt_id)
+        if existing is not None and (
+            existing.evidence_sha256 != payload.evidence_sha256
+            or existing.image_sha256 != payload.image_sha256
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="verification receipt conflicts with prior evidence",
+            )
+        if existing is None:
+            session.add(
+                ScreeningVerificationReceipt(
+                    receipt_id=receipt_id,
+                    agent_id=agent_id,
+                    attempt_id=payload.attempt_id,
+                    artifact_sha256=payload.artifact_sha256,
+                    policy_version=payload.policy_version,
+                    check_code=payload.check_code,
+                    evidence_sha256=payload.evidence_sha256,
+                    image_sha256=payload.image_sha256,
+                    profile_sha256=MECHANICAL_PROFILE_SHA256 if mechanical else None,
+                    challenge_manifest_sha256=None,
+                    worker_hotkey=screener_hotkey,
+                    created_at=now,
+                )
+            )
 
 
 def _is_enrolled_node_heartbeat_instance(
@@ -5074,7 +5189,34 @@ async def screened_image_upload(
     if payload.image_ref != expected_ref:
         raise AgentNotScreenableError("screened image ref does not match agent")
     now = datetime.now(UTC)
+    image_upload_id = payload.image_upload_id or uuid4()
     required_policy = (await _required_policy(session)).required_policy_version
+
+    def existing_response(upload: ScreenedImageUpload) -> ScreenedImageUploadResponse:
+        expires_at = upload.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if (
+            upload.agent_id != agent_id
+            or upload.attempt_id != payload.attempt_id
+            or upload.screener_hotkey != screener_hotkey
+            or upload.sha256 != payload.sha256
+            or upload.size_bytes != payload.size_bytes
+            or upload.image_id != payload.image_id
+            or upload.image_ref != payload.image_ref
+            or upload.status != "initiated"
+            or datetime.now(UTC) > expires_at
+        ):
+            raise AgentNotScreenableError(
+                "screened image upload ID does not match an active initiation"
+            )
+        return ScreenedImageUploadResponse(
+            image_upload_id=upload.image_upload_id,
+            storage_upload_id=upload.storage_upload_id,
+            part_size_bytes=_SCREENED_IMAGE_PART_SIZE,
+            expires_at=upload.expires_at,
+        )
+
     async with session.begin():
         attempt = await get_screening_attempt(
             session, attempt_id=payload.attempt_id, for_update=True
@@ -5094,8 +5236,10 @@ async def screened_image_upload(
             deadline = deadline.replace(tzinfo=UTC)
         if now > deadline:
             raise AgentNotScreenableError("screened image upload lease has expired")
+        existing = await session.get(ScreenedImageUpload, image_upload_id)
+        if existing is not None:
+            return existing_response(existing)
 
-    image_upload_id = uuid4()
     expires_at = min(now + _SCREENED_IMAGE_UPLOAD_TTL, deadline)
     metadata = {
         "sha256": payload.sha256,
@@ -5109,6 +5253,7 @@ async def screened_image_upload(
         key=key,
         metadata=metadata,
     )
+    reused: ScreenedImageUploadResponse | None = None
     try:
         async with session.begin():
             attempt = await get_screening_attempt(
@@ -5124,24 +5269,41 @@ async def screened_image_upload(
                 raise AgentNotScreenableError(
                     "screened image upload lease changed during initiation"
                 )
-            session.add(
-                ScreenedImageUpload(
-                    image_upload_id=image_upload_id,
-                    agent_id=agent_id,
-                    attempt_id=payload.attempt_id,
-                    screener_hotkey=screener_hotkey,
-                    storage_upload_id=storage_upload_id,
-                    sha256=payload.sha256,
-                    size_bytes=payload.size_bytes,
-                    image_id=payload.image_id,
-                    image_ref=payload.image_ref,
-                    status="initiated",
-                    expires_at=expires_at,
+            deadline = attempt.deadline
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            if datetime.now(UTC) > deadline:
+                raise AgentNotScreenableError(
+                    "screened image upload lease expired during initiation"
                 )
-            )
+            # Another request with the same ID may have completed while this
+            # one was creating the storage session. The attempt row lock
+            # serializes this decision without holding it across storage I/O.
+            existing = await session.get(ScreenedImageUpload, image_upload_id)
+            if existing is not None:
+                reused = existing_response(existing)
+            else:
+                session.add(
+                    ScreenedImageUpload(
+                        image_upload_id=image_upload_id,
+                        agent_id=agent_id,
+                        attempt_id=payload.attempt_id,
+                        screener_hotkey=screener_hotkey,
+                        storage_upload_id=storage_upload_id,
+                        sha256=payload.sha256,
+                        size_bytes=payload.size_bytes,
+                        image_id=payload.image_id,
+                        image_ref=payload.image_ref,
+                        status="initiated",
+                        expires_at=expires_at,
+                    )
+                )
     except Exception:
         await storage.abort_multipart_upload(key=key, upload_id=storage_upload_id)
         raise
+    if reused is not None:
+        await storage.abort_multipart_upload(key=key, upload_id=storage_upload_id)
+        return reused
     return ScreenedImageUploadResponse(
         image_upload_id=image_upload_id,
         storage_upload_id=storage_upload_id,
@@ -5478,6 +5640,46 @@ _CONTAINER_CONTRACT_PUBLIC_REASONS = {
 }
 
 
+# Seeding-probe rejections. Screening proves an image builds and answers
+# /health; a scored run opens with POST /seed, so an image that cannot persist
+# state used to pass screening and fail on every validator. These map the
+# screener's bounded reason codes to guidance the submission owner can act on
+# without exposing a container log, a path outside the contract, or any
+# private challenge payload.
+_SEED_PROBE_PUBLIC_REASONS: Final[dict[str, str]] = {
+    "seed-readonly-write": (
+        "The application attempted to write outside the sandbox's writable /tmp "
+        "filesystem during /seed. The sandbox root is read-only; configure "
+        "runtime state under /tmp."
+    ),
+    "seed-memory-cap": (
+        "The application exceeded the sandbox memory cap during /seed. "
+        "Validators run the same cap; keep the memory store's working set "
+        "inside it."
+    ),
+    "seed-exit": (
+        "The application exited while serving /seed. The sandbox runs an "
+        "unprivileged user with a read-only root and one bounded /tmp tmpfs."
+    ),
+    "seed-ack-invalid": (
+        "POST /seed answered without acknowledging the wave it was given. The "
+        "2xx response is the ingest acknowledgement and carries the loaded "
+        "counts; return it only once every pair is embedded and queryable."
+    ),
+    "seed-http-error": (
+        "POST /seed did not return 2xx. Scoring begins with a seeding wave, so "
+        "an image that cannot ingest cannot be scored."
+    ),
+    "seed-oversized-response": (
+        "POST /seed answered with a body past the screening safety cap. The "
+        "contract's response is the loaded counts."
+    ),
+    "seed-unreachable": (
+        "POST /seed returned no response before the screening deadline."
+    ),
+}
+
+
 def _public_screening_reason(detail: str, reason_code: str | None = None) -> str:
     """Map untrusted screener detail to a stable, public-safe failure category.
 
@@ -5485,6 +5687,8 @@ def _public_screening_reason(detail: str, reason_code: str | None = None) -> str
     code. Never persist or return it verbatim: a malicious Dockerfile could print
     the BuildKit secret mounted for private dependency access.
     """
+    if reason_code is not None and reason_code in _SEED_PROBE_PUBLIC_REASONS:
+        return _SEED_PROBE_PUBLIC_REASONS[reason_code]
     if reason_code == "exact-cross-miner-duplicate":
         return "Artifact is an exact duplicate of another miner submission"
     if reason_code == "container-harness-contract":
@@ -5522,7 +5726,8 @@ def _public_screening_reason(detail: str, reason_code: str | None = None) -> str
     if reason_code == "docker-build-infrastructure":
         return (
             "Docker build infrastructure failed before screening completed. This "
-            "is operator-owned and requires a manual retry."
+            "is operator-owned and is retried automatically with backoff for a "
+            "limited time, then held for an operator retry."
         )
     if reason_code == "docker-build" or normalized.startswith("build failed"):
         if (
@@ -5636,6 +5841,24 @@ def _quarantine_payload_json(
     return evidence_json, finding_json
 
 
+def _court_diagnostic_json(payload: ScreenResultRequest) -> dict[str, object] | None:
+    """Copy the sanitized court trace off a verdict, if this run recorded one."""
+    adjudication = payload.adjudication
+    if adjudication is None or adjudication.run_diagnostic is None:
+        return None
+    return adjudication.run_diagnostic.model_dump(mode="json")
+
+
+def _court_completion_receipt_json(
+    payload: ScreenResultRequest,
+) -> dict[str, object] | None:
+    """Copy only the typed, text-free completed-court measurements."""
+    adjudication = payload.adjudication
+    if adjudication is None or adjudication.completion_receipt is None:
+        return None
+    return adjudication.completion_receipt.model_dump(mode="json")
+
+
 async def _queue_fanout_shadow_review(
     session: AsyncSession,
     *,
@@ -5746,11 +5969,15 @@ async def _backfill_quarantine_payloads(
         if payload.review_notes is not None
         else None
     )
+    court_json = _court_diagnostic_json(payload)
+    completion_json = _court_completion_receipt_json(payload)
     if (
         evidence_json is None
         and finding_json is None
         and audit_json is None
         and notes_json is None
+        and court_json is None
+        and completion_json is None
     ):
         return
     quarantine = await session.scalar(
@@ -5788,6 +6015,15 @@ async def _backfill_quarantine_payloads(
         and quarantine.finding_digest == payload.finding_digest
     ):
         quarantine.finding = finding_json
+    if quarantine.court_diagnostic is None and court_json is not None:
+        quarantine.court_diagnostic = court_json
+    if completion_json is not None:
+        if quarantine.court_completion_receipt is None:
+            quarantine.court_completion_receipt = completion_json
+        elif quarantine.court_completion_receipt != completion_json:
+            raise AgentNotScreenableError(
+                "re-reported court completion telemetry conflicts with retained receipt"
+            )
 
 
 def _backfill_private_failure_feedback(
@@ -6047,6 +6283,40 @@ async def submit_result(
                 if previous == AgentStatus.LIVE.value:
                     restore_status = AgentStatus.LIVE
 
+    receipt = (
+        payload.adjudication.completion_receipt
+        if payload.adjudication is not None
+        else None
+    )
+    if receipt is not None:
+        if (
+            payload.attempt_id is None
+            or payload.adjudication_digest is None
+            or payload.completion_receipt_signature is None
+            or reported_attempt is None
+            or current_agent is None
+            or reported_attempt.agent_id != agent_id
+            or reported_attempt.artifact_sha256 is None
+            or reported_attempt.artifact_sha256.lower() != current_agent.sha256.lower()
+        ):
+            raise ScreenerAuthError(
+                "completion receipt is not bound to this screening artifact"
+            )
+        receipt_message = completion_receipt_signing_message(
+            screener_hotkey=screener_hotkey,
+            agent_id=agent_id,
+            attempt_id=payload.attempt_id,
+            artifact_sha256=reported_attempt.artifact_sha256.lower(),
+            adjudication_digest=payload.adjudication_digest,
+            receipt=receipt,
+        )
+        if not _verify_signature(
+            screener_hotkey,
+            receipt_message,
+            payload.completion_receipt_signature,
+        ):
+            raise ScreenerAuthError("completion receipt signature did not verify")
+
     deferred_mechanical_admission = bool(
         reported_attempt is not None
         and reported_attempt.build_only
@@ -6162,7 +6432,11 @@ async def submit_result(
         # fail-closed: the terminal attempt parks until an operator authorizes
         # one exact retry through Backroom.
         target = AgentStatus.SCREENING_FAILED
-        public_reason = "Screening was interrupted; manual retry required"
+        public_reason = (
+            _public_screening_reason(payload.detail, payload.reason_code)
+            if payload.reason_code in INFRA_AUTO_RETRY_REASON_CODES
+            else "Screening was interrupted; manual retry required"
+        )
     elif payload.outcome == ScreenResultOutcome.DETERMINISTIC_REJECT:
         target = AgentStatus.REJECTED
         public_reason = _public_screening_reason(payload.detail, payload.reason_code)
@@ -6524,6 +6798,20 @@ async def submit_result(
                 f"agent {agent_id} is {agent.status}, cannot apply verdict "
                 f"passed={payload.passed} (target {target})"
             )
+        if (
+            payload.outcome == ScreenResultOutcome.RETRYABLE_INFRA
+            and payload.reason_code in INFRA_AUTO_RETRY_REASON_CODES
+            and (
+                agent.status != AgentStatus.SCREENING_FAILED
+                or not await infra_retry_agent_admitted(session, agent_id)
+            )
+        ):
+            # Only a parked, admitted submission is picked up by the automatic
+            # retry. A retained scored/evaluating row, a held deferred review, or
+            # an agent withdrawn from the queue or the active era (the claim's
+            # ``prerequisite_admitted`` guard) still needs the operator, so it
+            # must not be promised one.
+            public_reason = "Screening was interrupted; manual retry required"
         if not late_deferred_result:
             agent.screening_reason = public_reason
             agent.screening_reason_code = (
@@ -6599,6 +6887,7 @@ async def submit_result(
             )
         if attempt is None and not idempotent:
             now = datetime.now(UTC)
+            # Compatibility-only terminal receipt; no claim pinned this artifact.
             attempt = ScreeningAttempt(
                 attempt_id=payload.attempt_id or UUID(int=secrets.randbits(128)),
                 agent_id=agent_id,
@@ -6701,6 +6990,10 @@ async def submit_result(
                         reason_code=stored_reason_code or INCONCLUSIVE_REASON_CODE,
                         evidence=evidence_json,
                         finding=finding_json,
+                        court_diagnostic=_court_diagnostic_json(payload),
+                        court_completion_receipt=_court_completion_receipt_json(
+                            payload
+                        ),
                         status="resolved" if evidence_deferred else "active",
                         resolved_at=resolved_at,
                         resolved_by=(
