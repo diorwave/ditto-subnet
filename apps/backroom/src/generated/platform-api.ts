@@ -4941,9 +4941,11 @@ export interface paths {
          * @description Record the screener's verdict and advance the agent's lifecycle.
          *
          *     Ordering is cheap-before-expensive; no DB write happens until every check
-         *     passes: (1) dedicated screener bearer authentication, (2) signature over
-         *     the versioned verdict, (3) generate the per-submission
-         *     dataset (pass + generation enabled), (4) one transaction that promotes
+         *     passes: (1) dedicated screener bearer authentication plus a named claimed
+         *     attempt, (2) signature over the versioned verdict and that attempt's
+         *     ownership (agent, claiming hotkey, policy version), (3) generate the
+         *     per-submission dataset (pass + generation enabled), (4) one transaction that
+         *     re-checks ownership under the row lock and promotes
          *     ``uploaded -> evaluating`` (pass, pinning the dataset) or ``uploaded ->
          *     screening_failed``.
          *
