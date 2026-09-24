@@ -107,6 +107,12 @@ from ditto.api_server.endpoints.admin_screener_policy_activation import (
 from ditto.api_server.endpoints.admin_screener_review_settings import (
     router as admin_screener_review_settings_router,
 )
+from ditto.api_server.endpoints.admin_screening_infra_retry import (
+    router as admin_screening_infra_retry_router,
+)
+from ditto.api_server.endpoints.admin_source_review_queue_slo import (
+    router as admin_source_review_queue_slo_router,
+)
 from ditto.api_server.endpoints.admin_submission_deposit_address import (
     router as admin_submission_deposit_address_router,
 )
@@ -220,7 +226,9 @@ __all__ = [
     "admin_screener_review_settings_router",
     "admin_screener_fanout_shadow_router",
     "admin_screener_capacity_router",
+    "admin_screening_infra_retry_router",
     "admin_screener_policy_activation_router",
+    "admin_source_review_queue_slo_router",
     "admin_v13_private_generation_router",
     "admin_submission_settings_router",
     "admin_submission_deposit_address_router",

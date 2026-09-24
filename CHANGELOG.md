@@ -2,6 +2,139 @@
 
 <!-- version list -->
 
+## v0.306.2 (2026-09-24)
+
+### Bug Fixes
+
+- **screener**: Retry transient image multipart calls
+  ([#2025](https://github.com/ditto-assistant/ditto-subnet/pull/2025),
+  [`6438aff`](https://github.com/ditto-assistant/ditto-subnet/commit/6438affae38e55d16f733b3924d6a8f982c65dac))
+
+
+## v0.306.1 (2026-09-24)
+
+### Bug Fixes
+
+- **screener**: Prioritize court concern evidence
+  ([#2162](https://github.com/ditto-assistant/ditto-subnet/pull/2162),
+  [`0e140f5`](https://github.com/ditto-assistant/ditto-subnet/commit/0e140f5e3145f26aedb4714238a7b432bf196b7e))
+
+
+## v0.306.0 (2026-09-24)
+
+### Bug Fixes
+
+- **ci**: Serialize migration-order sweep triggers
+  ([#2076](https://github.com/ditto-assistant/ditto-subnet/pull/2076),
+  [`55c1c04`](https://github.com/ditto-assistant/ditto-subnet/commit/55c1c042d06abf9d9cc16568b207ae2fbbc76801))
+
+- **infra**: Bound Platform PostgreSQL log retention
+  ([#2121](https://github.com/ditto-assistant/ditto-subnet/pull/2121),
+  [`3a5151d`](https://github.com/ditto-assistant/ditto-subnet/commit/3a5151d02a64b7387d7e957c811e193f70f4500c))
+
+- **platform**: Show the current reason for a reopened review hold
+  ([#2125](https://github.com/ditto-assistant/ditto-subnet/pull/2125),
+  [`8d42e15`](https://github.com/ditto-assistant/ditto-subnet/commit/8d42e15fa3581481e965345fab6089a003d2600c))
+
+- **screener**: Harden legacy worker unit and lock CI uv installs
+  ([#2062](https://github.com/ditto-assistant/ditto-subnet/pull/2062),
+  [`a1c3b4c`](https://github.com/ditto-assistant/ditto-subnet/commit/a1c3b4c8a7405eef154c479b8689a84c50bb6667))
+
+### Documentation
+
+- **platform**: Document last_provider_success_at as last GCE fleet read
+  ([#2082](https://github.com/ditto-assistant/ditto-subnet/pull/2082),
+  [`fdad2fb`](https://github.com/ditto-assistant/ditto-subnet/commit/fdad2fb473cf31b37acd36645407b5dc0ce521b8))
+
+### Features
+
+- **platform**: Add ordinary source-review queue-age SLO
+  ([#2134](https://github.com/ditto-assistant/ditto-subnet/pull/2134),
+  [`a38e643`](https://github.com/ditto-assistant/ditto-subnet/commit/a38e643c252126c15461ee167e7be6313c5ecc07))
+
+- **platform,backroom**: Expose chat failure taxonomy
+  ([#2109](https://github.com/ditto-assistant/ditto-subnet/pull/2109),
+  [`35f9b70`](https://github.com/ditto-assistant/ditto-subnet/commit/35f9b704fa6ea3a323bf1ade4bb5f19f8aa2f066))
+
+
+## v0.305.0 (2026-09-24)
+
+### Bug Fixes
+
+- **screener**: Retry idempotent image upload initiation
+  ([#2199](https://github.com/ditto-assistant/ditto-subnet/pull/2199),
+  [`0ef06f3`](https://github.com/ditto-assistant/ditto-subnet/commit/0ef06f3245d66dae29c6d907eef9a99ac6302260))
+
+### Documentation
+
+- **governance**: Define signed bounty claims
+  ([#2070](https://github.com/ditto-assistant/ditto-subnet/pull/2070),
+  [`97ca7e2`](https://github.com/ditto-assistant/ditto-subnet/commit/97ca7e255a58993cd63431b6024eec9b5c2d016f))
+
+### Features
+
+- **platform,backroom**: Show infrastructure retry backoff and breaker state
+  ([#2084](https://github.com/ditto-assistant/ditto-subnet/pull/2084),
+  [`0512988`](https://github.com/ditto-assistant/ditto-subnet/commit/0512988f21d8c3033f038f8493f9e28513c155a1))
+
+
+## v0.304.1 (2026-09-24)
+
+### Bug Fixes
+
+- **platform**: Make screened image upload initiation idempotent
+  ([#2198](https://github.com/ditto-assistant/ditto-subnet/pull/2198),
+  [`c65f8a6`](https://github.com/ditto-assistant/ditto-subnet/commit/c65f8a6849e3db4da6d2d47a049575cfe54cf4b5))
+
+
+## v0.304.0 (2026-09-24)
+
+### Bug Fixes
+
+- **backroom**: Cap OAuth grants to requested and consented scopes
+  ([#2089](https://github.com/ditto-assistant/ditto-subnet/pull/2089),
+  [`75ac116`](https://github.com/ditto-assistant/ditto-subnet/commit/75ac116f61d704d5af3a3fdf3e8bd7e692db0022))
+
+- **dittobench-api**: Accept the empty attestation config BuildKit writes
+  ([#2065](https://github.com/ditto-assistant/ditto-subnet/pull/2065),
+  [`c41000b`](https://github.com/ditto-assistant/ditto-subnet/commit/c41000bbac01dec6cd22ceb0baf11ecb0fb7bc3d))
+
+- **dittobench-api**: Refuse private harness with screened images
+  ([#2061](https://github.com/ditto-assistant/ditto-subnet/pull/2061),
+  [`361e347`](https://github.com/ditto-assistant/ditto-subnet/commit/361e347b3b1c50552ca3b2a6396a97ec4e00a732))
+
+### Chores
+
+- **tests**: Stop the L2 review suite hanging on a root worker
+  ([#2067](https://github.com/ditto-assistant/ditto-subnet/pull/2067),
+  [`7bda2a5`](https://github.com/ditto-assistant/ditto-subnet/commit/7bda2a5ea522878cdf56a8b00d982f943b590184))
+
+### Features
+
+- **platform**: Expose owner retest admission decisions
+  ([#2110](https://github.com/ditto-assistant/ditto-subnet/pull/2110),
+  [`0916d22`](https://github.com/ditto-assistant/ditto-subnet/commit/0916d22509450b693d576dca356ae49b1638fdd6))
+
+- **platform**: Name scoring and emission bench versions apart
+  ([#2098](https://github.com/ditto-assistant/ditto-subnet/pull/2098),
+  [`2917ee0`](https://github.com/ditto-assistant/ditto-subnet/commit/2917ee0a14492bfc139fa77ee9f82c37aa663bf3))
+
+
+## v0.303.1 (2026-09-23)
+
+### Bug Fixes
+
+- **platform**: Recheck v13 replay readiness before each claim
+  ([#2186](https://github.com/ditto-assistant/ditto-subnet/pull/2186),
+  [`5315b95`](https://github.com/ditto-assistant/ditto-subnet/commit/5315b95373ff74cdbac3733b5fd4ba2b287e6a40))
+
+### Chores
+
+- **tests**: Split Platform endpoint verification shard
+  ([#2195](https://github.com/ditto-assistant/ditto-subnet/pull/2195),
+  [`1199a8c`](https://github.com/ditto-assistant/ditto-subnet/commit/1199a8c642c5a32c2b8c0f0dde920ca500ffe7a9))
+
+
 ## v0.303.0 (2026-09-23)
 
 ### Features

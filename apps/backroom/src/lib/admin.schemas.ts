@@ -700,6 +700,8 @@ export const screenerCapacitySnapshotSchema = z.object({
   gce_pending: z.number().int().nonnegative(),
   gce_draining: z.number().int().nonnegative(),
   fallback_reason: z.string().nullable(),
+  // Last successful GCE fleet read by the capacity controller. It can advance
+  // while provider routing is unavailable and says nothing about other providers.
   last_provider_success_at: z.string().nullable(),
   last_provider_error_code: z.string().nullable(),
   last_provider_error_at: z.string().nullable(),
@@ -863,6 +865,79 @@ export const screenerCapacityViewSchema = z.object({
   node_controls: z.array(screenerNodeChannelSettingsControlSchema).default([]),
 })
 
+const infraRetryStateSchema = z.enum(['backoff', 'breaker_held', 'probe_due', 'due', 'capped'])
+const nonNegativeInt = z.number().int().nonnegative()
+const infraRetryBreakerPhaseSchema = z.enum(['closed', 'open', 'half_open'])
+
+/** Read-only view of Platform's automatic infrastructure-retry state (#475).
+ * Every number is derived from attempt history at read time. */
+export const screeningInfraRetryViewSchema = z.object({
+  generated_at: z.string(),
+  basis: z.string(),
+  policy: z.object({
+    auto_retry_reason_codes: z.array(z.string()),
+    base_backoff_seconds: nonNegativeInt,
+    max_backoff_seconds: nonNegativeInt,
+    jitter_fraction: z.number().nonnegative(),
+    auto_retry_max_age_seconds: nonNegativeInt,
+    auto_retry_max_streak: nonNegativeInt,
+    plan_max_claimable: nonNegativeInt,
+    breaker_distinct_agents: nonNegativeInt,
+    breaker_window_seconds: nonNegativeInt,
+    breaker_open_seconds: nonNegativeInt,
+    breaker_probe_interval_seconds: nonNegativeInt,
+    breaker_history_lookback_seconds: nonNegativeInt,
+  }),
+  summary: z.object({
+    parked_agents: nonNegativeInt,
+    by_state: z.record(infraRetryStateSchema, nonNegativeInt),
+    not_admitted: nonNegativeInt,
+    // Parked on a failure older than the max age with no operator retry; not listed.
+    aged_out_agents: nonNegativeInt,
+    open_breakers: nonNegativeInt,
+    half_open_breakers: nonNegativeInt,
+    breakers_total: nonNegativeInt,
+  }),
+  agents: z.array(z.object({
+    agent_id: z.string().uuid(),
+    attempt_id: z.string().uuid(),
+    reason_code: z.string(),
+    provider: z.string().nullable(),
+    lane: z.string().nullable(),
+    consecutive_failures: nonNegativeInt,
+    failed_at: z.string(),
+    backoff_until: z.string(),
+    next_retry_at: z.string(),
+    state: infraRetryStateSchema,
+    breaker_phase: infraRetryBreakerPhaseSchema.nullable(),
+    admitted: z.boolean(),
+    claim_outlook: z.enum(['ready', 'waiting_backoff', 'waiting_breaker', 'needs_operator', 'not_admitted']),
+  })),
+  agents_limit: nonNegativeInt,
+  agents_truncated: z.boolean(),
+  breakers: z.array(z.object({
+    reason_code: z.string(),
+    provider: z.string().nullable(),
+    lane: z.string().nullable(),
+    phase: infraRetryBreakerPhaseSchema,
+    opened_at: z.string().nullable(),
+    open_until: z.string().nullable(),
+    last_probe_at: z.string().nullable(),
+    next_probe_at: z.string().nullable(),
+    parked_agents: nonNegativeInt,
+  })),
+  breakers_limit: nonNegativeInt,
+  breakers_truncated: z.boolean(),
+})
+
+export type ScreeningInfraRetryView = z.infer<typeof screeningInfraRetryViewSchema>
+
+/** The retry view as the route and panel receive it. The read is isolated so a
+ * failure keeps the capacity page up, but the reason and HTTP status (when
+ * Platform answered) always travel with it. */
+export type ScreeningInfraRetryOutcome =
+  | { ok: true; view: ScreeningInfraRetryView }
+  | { ok: false; status: number | null; message: string }
 export type ScreenerCapacityView = z.infer<typeof screenerCapacityViewSchema>
 export type ScreenerCapacityNode = z.infer<typeof screenerCapacityNodeSchema>
 export type ScreenerHostSpecs = z.infer<typeof screenerHostSpecsSchema>
@@ -2222,6 +2297,76 @@ export const inferenceRuntimeMetricsSchema = z.object({
       process_started_at: z.string().nullable().optional(),
       capacity_declines: z.record(z.string(), z.number().int().nonnegative()).default({}),
       error: z.string().nullable().optional(),
+    }),
+  ),
+})
+
+// Which door the call went through, derived by the platform from the lane and
+// `fallback_phase`: chat phase 0 is the OpenRouter aggregate route and phase 1
+// the reserved `reliable` route; on the embedding lane phase 0 is the direct
+// provider call and phase 1 the OpenRouter fallback. `ditto-router` is the
+// dogfood lane, which picks its own upstream and never reports it.
+const inferenceGatewaySchema = z.enum(['openrouter', 'reliable', 'direct', 'ditto-router'])
+
+// How much the ledger actually knows about `upstream_route`. ONLY
+// `confirmed_selected` means "this upstream served the call": it is the single
+// selected endpoint parsed out of router metadata on a COMPLETED chat row.
+// `last_attempted` is the last upstream a FAILED chat row was sent to, which is
+// evidence and not a route. `configured` is the relay's pinned embedding
+// provider, stamped before the call and never observed. The remaining three
+// always arrive with `upstream_route: null` -- `router_internal` (the Ditto
+// Router chose and did not say), `unknown` (the column was NULL, the usual case
+// for a failure whose provider returned no metadata), and `unrecognized` (a
+// value was present but was not a plain bounded identifier, so the platform
+// refused to render it).
+const inferenceRouteBasisSchema = z.enum([
+  'confirmed_selected',
+  'last_attempted',
+  'configured',
+  'router_internal',
+  'unknown',
+  'unrecognized',
+])
+
+export const inferenceFailureTaxonomySchema = z.object({
+  observed_at: z.string(),
+  window_seconds: z.array(z.number().int().positive()),
+  group_limit: z.number().int().positive(),
+  lanes: z.array(
+    z.object({
+      window_seconds: z.number().int().positive(),
+      request_kind: inferenceRequestKindSchema,
+      calls: z.number().int().nonnegative(),
+      settled: z.number().int().nonnegative(),
+      completed: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative(),
+      canceled: z.number().int().nonnegative(),
+      in_flight: z.number().int().nonnegative(),
+      timed_out: z.number().int().nonnegative(),
+      rate_limited_failures: z.number().int().nonnegative(),
+      failure_share: z.number().nonnegative(),
+      groups_total: z.number().int().nonnegative(),
+      groups_returned: z.number().int().nonnegative(),
+      groups_truncated: z.boolean(),
+    }),
+  ),
+  groups: z.array(
+    z.object({
+      window_seconds: z.number().int().positive(),
+      request_kind: inferenceRequestKindSchema,
+      model: z.string(),
+      gateway: inferenceGatewaySchema,
+      upstream_route: z.string().nullable(),
+      route_basis: inferenceRouteBasisSchema,
+      terminal_error_code: z.string().nullable(),
+      upstream_http_status: z.number().int().nullable(),
+      calls: z.number().int().nonnegative(),
+      completed: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative(),
+      canceled: z.number().int().nonnegative(),
+      timed_out: z.number().int().nonnegative(),
+      openrouter_attempts_max: z.number().int().nonnegative(),
+      share_of_settled_calls: z.number().nonnegative(),
     }),
   ),
 })
@@ -6889,7 +7034,18 @@ export type AthReviewKind = z.infer<typeof athReviewKindSchema>
 export const copyReviewOriginalSchema = z.object({
   review_kind: athReviewKindSchema.default('copy'),
   duplicate_of: z.string().uuid().nullable(),
+  // Why the submission is under review RIGHT NOW. For a hold that was reopened
+  // after its resolution was withdrawn this is the reconsideration reason, not
+  // the withdrawn prose -- a pending appeal must never read as a live finding.
+  // The superseded text moves to the fields below and stays readable.
   reason: z.string().nullable(),
+  // Nullish defaults throughout: a platform that predates the reopen
+  // projection simply reports the original hold, which is what it meant.
+  reason_source: z.enum(['original_hold', 'reconsideration']).nullish().default('original_hold'),
+  superseded_reason: z.string().nullish().default(null),
+  superseded_resolution: copyReviewResolutionSchema.nullish().default(null),
+  superseded_resolution_reason: z.string().nullish().default(null),
+  superseded_at: z.string().nullish().default(null),
   policy_version: z.number().int(),
   fingerprint_versions: z.record(
     z.string(),
@@ -7606,6 +7762,52 @@ export const continualRetestDiagnosticInputSchema = z.object({
   agentId: z.string().uuid(),
 })
 
+// One cutoff the agent was measured against. A negative `gap` with the agent
+// still outside the cohort is the signature of a structural exclusion (owner
+// suppression) rather than a score it failed to reach.
+export const retestCutoffComparisonSchema = z.object({
+  agent_id: z.string().uuid().nullable().default(null),
+  composite: z.number().nullable().default(null),
+  gap: z.number().nullable().default(null),
+  tie_band: z.number().nonnegative().nullable().default(null),
+  within_tie_band: z.boolean().nullable().default(null),
+})
+
+// The issuance lane's own gates, in the order the lane evaluates them.
+// Outstanding work is a COUNT: seed values stay server-side.
+export const retestClaimabilitySchema = z.object({
+  lane_enabled: z.boolean(),
+  latest_block: z.number().int().nonnegative().nullable(),
+  champion_agent_id: z.string().uuid().nullable(),
+  champion_crown_block: z.number().int().nonnegative().nullable(),
+  scheduled_round: z.boolean().nullable(),
+  spare_capacity_window: z.boolean(),
+  idle_retests_enabled: z.boolean(),
+  in_catchup_set: z.boolean(),
+  route_priority: z.enum(['champion', 'catchup', 'emission', 'extended', 'not_routed']),
+  route_position: z.number().int().positive().nullable(),
+  pending_seed_count: z.number().int().nonnegative(),
+  claimable_seed_available: z.boolean(),
+  live_lease_count: z.number().int().nonnegative(),
+  newer_canonical_work_pending: z.boolean(),
+  least_covered_admitted: z.boolean().nullable(),
+  decision: z.enum([
+    'claimable', 'lane_disabled', 'not_in_cohort', 'chain_unavailable',
+    'round_not_due', 'newer_canonical_work_pending', 'no_pending_seeds',
+    'all_pending_seeds_leased', 'another_member_less_covered',
+  ]),
+})
+
+// A platform that predates the cutoff comparison returns neither object; the
+// empty comparison keeps the console reading "not measured" rather than "tied".
+const emptyRetestCutoff = {
+  agent_id: null,
+  composite: null,
+  gap: null,
+  tie_band: null,
+  within_tie_band: null,
+}
+
 export const continualRetestDiagnosticSchema = z.object({
   generated_at: z.string(),
   agent_id: z.string().uuid(),
@@ -7619,6 +7821,10 @@ export const continualRetestDiagnosticSchema = z.object({
     canonical_composite: z.number().min(0).max(1),
     official_composite: z.number().min(0),
     representative: z.boolean(),
+    effective_composite: z.number().min(0).nullable().default(null),
+    canonical_sample_count: z.number().int().nonnegative().default(0),
+    completed_wave_depth: z.number().int().nonnegative().default(0),
+    first_seen: z.string().nullable().default(null),
   })),
   // int63 seeds must remain decimal strings across the JSON/JavaScript boundary.
   raw_confirmation_seeds: z.array(z.string().regex(/^(0|[1-9][0-9]*)$/)),
@@ -7642,6 +7848,33 @@ export const continualRetestDiagnosticSchema = z.object({
     'in_cohort', 'same_owner_challenger', 'owner_suppressed',
     'outside_cohort', 'not_current_finalized_ledger',
   ]),
+  ledger_eligible: z.boolean().default(false),
+  canonical_sample_count: z.number().int().nonnegative().default(0),
+  completed_wave_depth: z.number().int().nonnegative().default(0),
+  official_sample_count: z.number().int().nonnegative().default(0),
+  raw_confirmation_depth: z.number().int().nonnegative().default(0),
+  composite_stderr: z.number().nonnegative().nullable().default(null),
+  aggregate_mode: z.enum(['disabled', 'fleet_ready', 'enabled']).default('fleet_ready'),
+  wave_membership: z.enum(['strict', 'participants', 'per_agent']).default('participants'),
+  owner_key: z.string().nullable().default(null),
+  representative_canonical_composite: z.number().min(0).max(1).nullable().default(null),
+  representative_official_composite: z.number().min(0).nullable().default(null),
+  // Positive means this generation is BEHIND its owner's representative.
+  representative_margin: z.number().nullable().default(null),
+  representative_selection: z.enum([
+    'self', 'official_composite', 'efficiency_tiebreak',
+    'newest_generation', 'agent_id_tiebreak', 'none',
+  ]).default('none'),
+  cohort_cutoff: retestCutoffComparisonSchema.default(() => emptyRetestCutoff),
+  emission_cutoff: retestCutoffComparisonSchema.default(() => emptyRetestCutoff),
+  claim: retestClaimabilitySchema.nullable().default(null),
+  latest_ticket_status: z.string().nullable().default(null),
+  latest_ticket_validator_hotkey: z.string().nullable().default(null),
+  latest_ticket_updated_at: z.string().nullable().default(null),
+  latest_ticket_failure_reason: z.string().nullable().default(null),
+  terminal_ticket_count: z.number().int().nonnegative().default(0),
+  latest_confirmation_composite: z.number().min(0).max(1).nullable().default(null),
+  latest_confirmation_recorded_at: z.string().nullable().default(null),
 })
 
 export const scoreLeaderboardInputSchema = z.object({
@@ -8475,3 +8708,33 @@ export const confirmationSeedAnchorsInputSchema = z.object({
 export type ConfirmationSeedAnchorList = z.infer<
   typeof confirmationSeedAnchorListSchema
 >
+
+// Ordinary (pre-score) source-review queue-age SLO, ditto-subnet#2042 slice 1.
+// Read-only observability: overdue_count and p95_exceeds_threshold are null
+// until an operator configures a threshold, and this board enforces nothing.
+// Top-agent, copy, ATH, and human-escalation review are separate, later
+// clocks -- not covered here.
+export const sourceReviewQueueSloSchema = z.object({
+  generated_at: z.string(),
+  backlog_count: z.number().int().nonnegative(),
+  active_work_count: z.number().int().nonnegative(),
+  capacity_wait_count: z.number().int().nonnegative(),
+  infrastructure_backoff_count: z.number().int().nonnegative(),
+  escalation_count: z.number().int().nonnegative(),
+  p50_age_seconds: z.number().nonnegative().nullable(),
+  p95_age_seconds: z.number().nonnegative().nullable(),
+  oldest_age_seconds: z.number().nonnegative().nullable(),
+  throughput_window_hours: z.number().int().positive(),
+  throughput_completed_count: z.number().int().nonnegative(),
+  throughput_per_hour: z.number().nonnegative(),
+  stale_running_ghost_count: z.number().int().nonnegative(),
+  resolved_quarantine_ghost_count: z.number().int().nonnegative(),
+  attempt_status_drift_ghost_count: z.number().int().nonnegative(),
+  ghost_count: z.number().int().nonnegative(),
+  max_actionable_age_threshold_seconds: z.number().int().positive().nullable(),
+  overdue_count: z.number().int().nonnegative().nullable(),
+  p95_age_threshold_seconds: z.number().int().positive().nullable(),
+  p95_exceeds_threshold: z.boolean().nullable(),
+})
+
+export type SourceReviewQueueSlo = z.infer<typeof sourceReviewQueueSloSchema>

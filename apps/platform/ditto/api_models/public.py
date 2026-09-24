@@ -2105,15 +2105,48 @@ class PublicLeaderboardResponse(BaseModel):
         int,
         Field(
             description=(
-                "The latest DittoBench benchmark version. Entries whose "
-                "bench_version is below this were scored on a previous benchmark "
-                "and are not directly comparable; the UI marks them as such."
+                "Deprecated name for ``scoring_bench_version``, kept so existing "
+                "clients keep working. It is the version this board is scored "
+                "and ranked on, which during a rollout is the version being "
+                "collected rather than the one paying emissions. Read "
+                "``emission_bench_version`` for that."
+            )
+        ),
+    ]
+    scoring_bench_version: Annotated[
+        int,
+        Field(
+            description=(
+                "The benchmark version this board's ranking is computed on: the "
+                "version currently being collected, or the pinned version on a "
+                "historical board. Entries below it were scored on an earlier "
+                "benchmark and are not directly comparable. A submission scored "
+                "here is not yet earning on this version unless "
+                "``emission_bench_version`` equals it."
+            )
+        ),
+    ]
+    emission_bench_version: Annotated[
+        int,
+        Field(
+            description=(
+                "The benchmark version that controls emissions right now, taken "
+                "from the ledger pin. It changes only when a rollout activates, "
+                "so during a rollout it stays behind ``scoring_bench_version`` "
+                "while the new version is still being collected. Same value as "
+                "``active_bench_version``, named for what it decides."
             )
         ),
     ]
     active_bench_version: Annotated[
         int,
-        Field(description="Globally activated benchmark version."),
+        Field(
+            description=(
+                "Globally activated benchmark version: the one whose scores the "
+                "ledger pays on. Identical to ``emission_bench_version``, which "
+                "is the clearer name for the same pin."
+            )
+        ),
     ]
     desired_bench_version: Annotated[
         int,
@@ -3339,6 +3372,48 @@ class PublicAdmissionRetry(BaseModel):
     last_failure_infrastructure: bool = False
 
 
+class PublicOrdinaryReview(BaseModel):
+    """Source-safe ordinary source-review clock (ditto-subnet#2042, slice 1).
+
+    Deliberately thin: a miner learns why their own submission is waiting and
+    roughly how long that kind of wait typically takes, never the operator
+    detail behind it (no quarantine evidence, no reason codes, no other
+    miner's data). ``typical_p50_seconds``/``typical_p95_seconds`` are
+    subnet-wide statistics, not a promise about this specific submission.
+    Null on the pipeline response whenever the submission is not currently in
+    ordinary review (covers both "never entered it" and "already resolved").
+    """
+
+    reason: Literal[
+        "active_work", "capacity_wait", "infrastructure_backoff", "escalation"
+    ]
+    age_seconds: Annotated[
+        float,
+        Field(
+            ge=0,
+            description=(
+                "Time since this submission entered ordinary review (its own "
+                "created_at). Stable across retries: a rescreen does not "
+                "reset it."
+            ),
+        ),
+    ]
+    current_attempt_age_seconds: Annotated[
+        float | None,
+        Field(
+            default=None,
+            ge=0,
+            description=(
+                "Time since the CURRENT screening attempt started, separate "
+                "from age_seconds above. Null when there is no attempt yet "
+                "(capacity_wait)."
+            ),
+        ),
+    ]
+    typical_p50_seconds: Annotated[float | None, Field(default=None, ge=0)]
+    typical_p95_seconds: Annotated[float | None, Field(default=None, ge=0)]
+
+
 class PublicScreeningDispute(BaseModel):
     """Public-safe appeal state; the miner's private message is never exposed."""
 
@@ -3732,6 +3807,14 @@ class PublicSubmissionPipeline(BaseModel):
             "build & admission; null once admission is terminal."
         ),
     )
+    ordinary_review: PublicOrdinaryReview | None = Field(
+        default=None,
+        description=(
+            "Ordinary source-review clock and reason while the submission is "
+            "in the pre-score screening pipeline; null once it leaves that "
+            "pipeline (whichever way)."
+        ),
+    )
     submission_family: PublicSubmissionFamily | None = Field(
         default=None,
         description=(
@@ -3740,7 +3823,29 @@ class PublicSubmissionPipeline(BaseModel):
         ),
     )
     active_bench_version: Annotated[
-        int, Field(ge=1, description="Benchmark version currently being scored.")
+        int,
+        Field(
+            ge=1,
+            description=(
+                "The benchmark version that controls emissions: the ledger pin, "
+                "not the version this submission is being scored on. During a "
+                "rollout the fleet scores the version being collected while this "
+                "stays on the version that still pays, so the two differ until "
+                "the rollout activates. ``score_bench_version`` is the era this "
+                "submission's own scores belong to."
+            ),
+        ),
+    ]
+    emission_bench_version: Annotated[
+        int,
+        Field(
+            ge=1,
+            description=(
+                "Same pin as ``active_bench_version``, named for what it decides. "
+                "A submission finalized at a different ``score_bench_version`` is "
+                "not earning on this version's ledger."
+            ),
+        ),
     ]
     score_bench_version: Annotated[
         int,
