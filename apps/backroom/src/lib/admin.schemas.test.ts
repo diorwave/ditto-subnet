@@ -5,6 +5,8 @@ import type { input as ZodInput, output as ZodOutput } from 'zod'
 import type { components as PlatformComponents } from '../generated/platform-api'
 import {
   auditReasonSchema,
+  baselineDiffManifestSchema,
+  sourceDiffManifestSchema,
   CEILING_DISABLED,
   platformSupportsRetestCohortSize,
   parseContinualRetestSettingsControl,
@@ -4564,5 +4566,93 @@ describe('batched ATH rulings schemas', () => {
         summary: { ...view.summary, by_state: { ...view.summary.by_state, exploded: 1 } },
       }),
     ).toThrow()
+  })
+})
+
+describe('diff manifest omission fields (issue #480)', () => {
+  const agentId = '90cb5697-cbc1-40f4-a27e-439a7986a054'
+  const baselineManifest = {
+    agent_id: agentId,
+    artifact_sha256: 'a'.repeat(64),
+    baseline: {
+      source: 'https://github.com/ditto-assistant/dittobench-starter-kit',
+      revision: 'b'.repeat(40),
+      commit_set_sha256: 'c'.repeat(64),
+      commit_count: 24,
+    },
+    files: [],
+    file_count: 35,
+    identical_count: 30,
+    modified_count: 5,
+    added_count: 0,
+    removed_count: 0,
+    stock_kit_count: 30,
+    custom_file_count: 5,
+    custom_added_lines: 9952,
+    path_aligned: false,
+    truncated: false,
+  }
+  const sourceManifest = {
+    agent_id: agentId,
+    reference_agent_id: agentId,
+    candidate_sha256: 'a'.repeat(64),
+    reference_sha256: 'b'.repeat(64),
+    files: [],
+    file_count: 0,
+    identical_count: 0,
+    modified_count: 0,
+    added_count: 0,
+    removed_count: 0,
+    truncated: false,
+  }
+
+  it('matches the generated Platform contract', () => {
+    type Baseline = PlatformComponents['schemas']['AdminBaselineDiffManifest']
+    expectTypeOf<Baseline['omitted_file_count']>().toEqualTypeOf<number>()
+    expectTypeOf<Baseline['omitted_paths']>().toEqualTypeOf<string[]>()
+    expectTypeOf<Baseline['custom_added_lines_complete']>().toEqualTypeOf<boolean>()
+  })
+
+  it('carries a lower-bound baseline total from a current Platform', () => {
+    const parsed = baselineDiffManifestSchema.parse({
+      ...baselineManifest,
+      omitted_file_count: 1,
+      omitted_paths: ['fixtures/seed-user/pairs.json'],
+      custom_added_lines_complete: false,
+    })
+    expect(parsed.custom_added_lines_complete).toBe(false)
+    expect(parsed.omitted_file_count).toBe(1)
+    expect(parsed.omitted_paths).toEqual(['fixtures/seed-user/pairs.json'])
+  })
+
+  it('treats an older Platform as omitting nothing it can name, completeness unknown', () => {
+    for (const legacy of [
+      baselineManifest,
+      {
+        ...baselineManifest,
+        omitted_file_count: null,
+        omitted_paths: null,
+        custom_added_lines_complete: null,
+      },
+    ]) {
+      const parsed = baselineDiffManifestSchema.parse(legacy)
+      expect(parsed.omitted_file_count).toBe(0)
+      expect(parsed.omitted_paths).toEqual([])
+      expect(parsed.custom_added_lines_complete).toBeNull()
+    }
+  })
+
+  it('accepts copy-review omissions and defaults them for an older Platform', () => {
+    expect(
+      sourceDiffManifestSchema.parse({
+        ...sourceManifest,
+        omitted_file_count: 2,
+        omitted_paths: ['assets/big.txt', 'assets/huge.txt'],
+      }),
+    ).toMatchObject({ omitted_file_count: 2, omitted_paths: ['assets/big.txt', 'assets/huge.txt'] })
+    expect(sourceDiffManifestSchema.parse(sourceManifest)).toMatchObject({
+      omitted_file_count: 0,
+      omitted_paths: [],
+    })
   })
 })

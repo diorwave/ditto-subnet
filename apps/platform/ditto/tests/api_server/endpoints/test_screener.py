@@ -12474,10 +12474,32 @@ def test_shadow_review_accepts_a_full_length_provider_trajectory() -> None:
 class TestQuarantineBaselineDiff:
     """The starter-kit subtraction an operator relies on to find real code."""
 
+    AUTHORED_LINES = 9952
+
+    @staticmethod
+    def _full_kit_with_large_authored_baseline(root: str = "") -> dict[str, bytes]:
+        """Issue #480's shape: the whole kit, fixtures first, big authored source.
+
+        The kit alone carries ~2.4 MB of text, most of it fixture JSON that tar
+        stores before ``src/``; the authored ``src/baseline.rs`` is ~10k lines.
+        """
+        from ditto.api_server.starter_kit import starter_kit_head_text
+
+        files = {path: text.encode() for path, text in starter_kit_head_text().items()}
+        files["src/baseline.rs"] = "".join(
+            f"pub fn authored_step_{i:05d}(x: u64) -> u64 {{ x ^ {i} }}\n"
+            for i in range(TestQuarantineBaselineDiff.AUTHORED_LINES)
+        ).encode()
+        ordered = sorted(
+            files, key=lambda path: (not path.startswith("fixtures/"), path)
+        )
+        return {f"{root}{path}": files[path] for path in ordered}
+
     async def _seed_kit_derived_agent(
         self,
         app: FastAPI,
         session_maker: async_sessionmaker[AsyncSession],
+        files: dict[str, bytes] | None = None,
     ) -> tuple[UUID, MagicMock]:
 
         from ditto.api_server.starter_kit import starter_kit_head_text
@@ -12488,11 +12510,12 @@ class TestQuarantineBaselineDiff:
         )
         head = starter_kit_head_text()
         # A realistic submission: verbatim kit files plus the miner's own code.
-        files = {
-            "Cargo.toml": head["Cargo.toml"].encode(),
-            "src/baseline.rs": head["src/baseline.rs"].encode(),
-            "src/solver.rs": b"fn solve_as_of() -> u64 {\n    42\n}\n",
-        }
+        if files is None:
+            files = {
+                "Cargo.toml": head["Cargo.toml"].encode(),
+                "src/baseline.rs": head["src/baseline.rs"].encode(),
+                "src/solver.rs": b"fn solve_as_of() -> u64 {\n    42\n}\n",
+            }
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
             for name, raw in files.items():
@@ -12543,6 +12566,86 @@ class TestQuarantineBaselineDiff:
         assert body["baseline"]["revision"]
         assert body["baseline"]["source"].endswith("dittobench-starter-kit")
         assert body["path_aligned"] is False
+        # A small archive fits the text budget: nothing omitted, total exact.
+        assert body["omitted_file_count"] == 0
+        assert body["omitted_paths"] == []
+        assert body["custom_added_lines_complete"] is True
+
+    async def test_large_authored_file_is_counted_and_skipped_file_is_omitted(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Issue #480: this archive used to return src/baseline.rs as
+        # {status: removed, candidate_lines: 0} and a custom total near zero.
+        agent_id, _storage = await self._seed_kit_derived_agent(
+            app, session_maker, self._full_kit_with_large_authored_baseline()
+        )
+        response = await client.get(
+            f"/api/v1/admin/screening-submissions/{agent_id}/baseline-diff",
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        by_path = {entry["path"]: entry for entry in body["files"]}
+
+        authored = by_path["src/baseline.rs"]
+        assert authored["status"] == "modified"
+        assert authored["candidate_lines"] == self.AUTHORED_LINES
+        assert authored["stock_kit"] is False
+        assert body["custom_added_lines"] >= self.AUTHORED_LINES
+        # The kit's largest fixture no longer fits the combined text budget. It
+        # is named as not compared, never reported as a deleted file.
+        assert body["omitted_paths"] == ["fixtures/seed-user/pairs.json"]
+        assert body["omitted_file_count"] == 1
+        assert body["custom_added_lines_complete"] is False
+        assert "fixtures/seed-user/pairs.json" not in by_path
+        assert body["removed_count"] == 0
+        assert body["path_aligned"] is False
+
+        # The single-file diff reads the skipped file on its own.
+        detail = await client.get(
+            f"/api/v1/admin/screening-submissions/{agent_id}/baseline-diff/file",
+            params={"path": "fixtures/seed-user/pairs.json"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert detail.status_code == 200
+        detail_body = detail.json()
+        assert detail_body["candidate_present"] is True
+        assert detail_body["reference_present"] is True
+        assert detail_body["identical"] is True
+        assert detail_body["stock_kit"] is True
+
+    async def test_wrapped_archive_aligns_skipped_paths_too(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        agent_id, _storage = await self._seed_kit_derived_agent(
+            app,
+            session_maker,
+            self._full_kit_with_large_authored_baseline(root="agent/"),
+        )
+        response = await client.get(
+            f"/api/v1/admin/screening-submissions/{agent_id}/baseline-diff",
+            headers=_ADMIN_HEADERS,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["path_aligned"] is True
+        assert body["omitted_paths"] == ["fixtures/seed-user/pairs.json"]
+        assert body["removed_count"] == 0
+        assert body["custom_added_lines"] >= self.AUTHORED_LINES
+
+        detail = await client.get(
+            f"/api/v1/admin/screening-submissions/{agent_id}/baseline-diff/file",
+            params={"path": "fixtures/seed-user/pairs.json"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert detail.status_code == 200
+        assert detail.json()["identical"] is True
 
     async def test_file_diff_returns_bounded_body_and_stock_flag(
         self,
