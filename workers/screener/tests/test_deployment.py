@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -458,6 +459,9 @@ def test_golden_image_bake_pipeline_exists() -> None:
 
     assert "image_family      = var.image_family" in packer
     assert "ditto-screener-fleet" in packer
+    # The builder plugin runs with the bake credentials; pin it exactly.
+    plugin_versions = re.findall(r'^\s*version\s*=\s*"([^"]+)"', packer, re.M)
+    assert plugin_versions == ["= 1.2.7"]
     # Bakes via the same bootstrap script in bake mode; stores no secret.
     assert "SCREENER_BAKE_ONLY=1" in packer
     assert "environment: prod" in workflow
