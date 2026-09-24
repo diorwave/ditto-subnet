@@ -168,7 +168,6 @@ from ditto.api_server.inference_concurrency_settings import (
 from ditto.api_server.inference_routing import ProviderRouteRefresher
 from ditto.api_server.ledger_pin import LedgerPinLoop, LedgerPinMaterializer
 from ditto.api_server.middleware import (
-    AuthPassThroughMiddleware,
     PublicCacheMiddleware,
     RequestIDMiddleware,
     SizedGZipMiddleware,
@@ -671,7 +670,11 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     # add_middleware call ends up outermost on the wire. RequestIDMiddleware
     # must be outermost so its contextvar is live for every downstream
     # middleware + handler + log line, including any future auth that
-    # short-circuits before reaching the app.
+    # short-circuits before reaching the app. There is deliberately no auth
+    # middleware: every endpoint authenticates itself through its own
+    # dependency (ValidatorDep, the signed-nonce dependencies, AdminDep, the
+    # screener dependencies), so a stack entry named for auth would only
+    # suggest a gate that does not exist.
     # Gzip is inside the public cache: each identity/gzip representation is
     # built once and cached independently, so a 200KB operations cache HIT
     # does not burn CPU recompressing the same user-agnostic bytes.
@@ -682,7 +685,6 @@ def create_api_server(config: ApiServerConfig | None = None) -> FastAPI:
     from ditto.api_server.admin_activity import AdminActivityMiddleware
 
     app.add_middleware(AdminActivityMiddleware)
-    app.add_middleware(AuthPassThroughMiddleware)
     app.add_middleware(RequestIDMiddleware)
 
     register_exception_handlers(app)
