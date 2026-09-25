@@ -802,7 +802,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   retry_failed_screening_now:
     'Manually retry the latest terminal screening attempt with fresh artifact/score-count/attempt guards; preserves history.',
   get_screening_baseline_diff:
-    'Compare miner-authored residual source against the platform starter-kit baseline. Stock detection is platform-owned; use the file reader for full sanitized bodies. If custom_added_lines_complete is false the total is a lower bound: omitted_paths were not compared. Requires artifact scope.',
+    'Compare miner-authored residual source against the platform starter-kit baseline. Stock detection is platform-owned; use the file reader for full sanitized bodies. If custom_added_lines_complete is false, the total is a lower bound (omitted_paths not compared). Requires artifact scope.',
   list_screening_source_files:
     'Read the readable file manifest for one quarantined submission tarball in archive order. The default limit is the platform listing cap, so a default call returns the WHOLE manifest and pages only when you pass a smaller limit. count is the pageable total and returned is this response; has_more is the only field reporting MCP paging, while truncated reports paths the platform dropped before paging, which no offset recovers. NEVER treat a manifest with has_more or truncated set as the complete inventory of a submission. Requires artifact scope.',
   get_efficiency_bonus_settings:
