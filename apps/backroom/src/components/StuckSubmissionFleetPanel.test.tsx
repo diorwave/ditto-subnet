@@ -88,6 +88,19 @@ const providerParked = {
   snapshot: '12'.repeat(32),
 }
 
+// An agent-attributable exhaustion observed while the provider circuit is open:
+// the outage view still sets provider_outage_blocks_retry, but the Platform
+// recommends withdraw, and a retry can never repair it.
+const agentFaultDuringOutage = {
+  ...providerParked,
+  agent_id: '3b7a6c0e-51d2-4f0b-9c55-6a2f1f0d8e21',
+  agent_name: 'agent-fault-during-outage',
+  blocking_reason: 'exhausted on agent-attributable failures; withdraw rather than retry',
+  recommended_action: 'withdraw' as const,
+  dominant_failure_code: 'inference_request_rejected',
+  snapshot: '34'.repeat(32),
+}
+
 function response(submissions: StuckSubmission[] = [first, second, blocked]) {
   return {
     generated_at: '2026-08-11T20:00:00Z',
@@ -140,6 +153,23 @@ describe('StuckSubmissionFleetPanel', () => {
       (screen.getByLabelText('Select provider-parked-agent') as HTMLInputElement).disabled,
     ).toBe(true)
     expect(screen.getByText('Select all 1 recoverable')).toBeTruthy()
+  })
+
+  it('shows withdraw, not wait for provider, for an agent-attributable row during an outage', () => {
+    render(
+      <StuckSubmissionFleetPanel
+        initial={response([providerParked, agentFaultDuringOutage])}
+        readOnly={false}
+      />,
+    )
+
+    // The provider-caused row still waits; the agent-caused one must not.
+    expect(screen.getByText('wait for provider · upstream_http_503')).toBeTruthy()
+    expect(screen.getByText('withdraw · inference_request_rejected')).toBeTruthy()
+    expect(screen.getAllByText(/^wait for provider/)).toHaveLength(1)
+    expect(
+      (screen.getByLabelText('Select agent-fault-during-outage') as HTMLInputElement).disabled,
+    ).toBe(true)
   })
 
   it('refreshes only the exhausted summary lane', async () => {
