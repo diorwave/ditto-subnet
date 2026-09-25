@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.313.4 (2026-09-25)
+
+### Bug Fixes
+
+- **validator**: Cancel the scorer run when a poll fails
+  ([#2302](https://github.com/ditto-assistant/ditto-subnet/pull/2302),
+  [`cecf680`](https://github.com/ditto-assistant/ditto-subnet/commit/cecf680c2c941c1575b28b1e14c41a90b809b326))
+
+### Documentation
+
+- Clarify local dev quickstart scope
+  ([#2091](https://github.com/ditto-assistant/ditto-subnet/pull/2091),
+  [`5e4d9c4`](https://github.com/ditto-assistant/ditto-subnet/commit/5e4d9c4e5e0ac57d47af04cf857b113f30e5dbd8))
+
+
 ## v0.313.3 (2026-09-25)
 
 ### Bug Fixes
