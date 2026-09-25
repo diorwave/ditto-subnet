@@ -13153,6 +13153,8 @@ export interface components {
             replacement_allowed: boolean;
             /** Replacement Pending */
             replacement_pending: boolean;
+            /** Replacement Queued */
+            replacement_queued: boolean;
             /** Replacement Reason */
             replacement_reason: string | null;
             /** Replacement Request Id */
