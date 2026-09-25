@@ -10,6 +10,7 @@ the DB.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 from ditto_screener.errors import ScreenerConfigError
@@ -217,11 +218,16 @@ class ScreenerConfig:
     review_settings_cache_file: str
     review_settings_max_stale_seconds: int
     l2_always_escalate: bool = False
+    scorer_capabilities_url: str | None = None
+    expected_scorer_revision: str | None = None
+    require_signed_runtime_lease: bool = False
     """Send every L1 result through L2/L3, even a certified low-risk clear.
 
     Seeded from ``SCREENER_L2_ALWAYS_ESCALATE``; a bound reviewer revision can
     only turn it on for one posture (the integrity double-check), never off.
     """
+    # Only the isolated report-only canary widens this to its 45-minute lease.
+    signed_runtime_lease_max_age_seconds: int = 300
     adjudicator_max_completion_tokens: int | None = None
     """L4-only output cap; None inherits the existing L2 completion cap."""
     remote_build_mode: str = "off"
@@ -495,6 +501,13 @@ def parse_screener_config_from_env() -> ScreenerConfig:
         .strip()
         .lower()
         in {"1", "true", "yes", "on"},
+        scorer_capabilities_url=os.environ.get("SCREENER_SCORER_CAPABILITIES_URL")
+        or None,
+        expected_scorer_revision=os.environ.get("SCREENER_EXPECTED_SCORER_REVISION")
+        or None,
+        require_signed_runtime_lease=_parse_bool(
+            "SCREENER_REQUIRE_SIGNED_RUNTIME_LEASE", False
+        ),
         adjudicator_max_completion_tokens=_parse_optional_int(
             "SCREENER_ADJUDICATOR_MAX_COMPLETION_TOKENS"
         ),
@@ -617,30 +630,37 @@ def parse_screener_config_from_env() -> ScreenerConfig:
         raise ScreenerConfigError(
             "SCREENER_L2_ANALYZER_IMAGE must be ditto-screener-l2-analyzer:active"
         )
+    if config.scorer_capabilities_url or config.expected_scorer_revision:
+        if not config.scorer_capabilities_url or not config.expected_scorer_revision:
+            raise ScreenerConfigError(
+                "scorer runtime evidence requires URL and revision"
+            )
+        if not re.fullmatch(r"[0-9a-f]{40}", config.expected_scorer_revision):
+            raise ScreenerConfigError("SCREENER_EXPECTED_SCORER_REVISION must be a SHA")
     if config.l2_workspace_root is not None and not os.path.isabs(
         config.l2_workspace_root
     ):
         raise ScreenerConfigError("SCREENER_L2_WORKSPACE_ROOT must be absolute")
-    if not 1 <= config.l2_max_steps <= 48:
-        raise ScreenerConfigError("SCREENER_L2_MAX_STEPS must be between 1 and 48")
+    if not 1 <= config.l2_max_steps <= 256:
+        raise ScreenerConfigError("SCREENER_L2_MAX_STEPS must be between 1 and 256")
     if not 30 <= config.l2_timeout_seconds <= 1_800:
         raise ScreenerConfigError(
             "SCREENER_L2_TIMEOUT_SECONDS must be between 30 and 1800"
         )
-    if not 1 <= config.l2_max_output_tokens <= 128_000:
+    if not 1 <= config.l2_max_output_tokens <= 1_000_000:
         raise ScreenerConfigError(
-            "SCREENER_L2_MAX_OUTPUT_TOKENS must be between 1 and 128000"
+            "SCREENER_L2_MAX_OUTPUT_TOKENS must be between 1 and 1000000"
         )
     if not 1 <= config.l2_max_completion_tokens <= config.l2_max_output_tokens:
         raise ScreenerConfigError(
             "SCREENER_L2_MAX_COMPLETION_TOKENS must be within the output budget"
         )
-    if not 1 <= config.l2_max_input_tokens <= 1_000_000:
+    if not 1 <= config.l2_max_input_tokens <= 5_000_000:
         raise ScreenerConfigError(
-            "SCREENER_L2_MAX_INPUT_TOKENS must be between 1 and 1000000"
+            "SCREENER_L2_MAX_INPUT_TOKENS must be between 1 and 5000000"
         )
-    if not 0 < config.l2_max_cost_usd <= 10:
-        raise ScreenerConfigError("SCREENER_L2_MAX_COST_USD must be in (0, 10]")
+    if not 0 < config.l2_max_cost_usd <= 25:
+        raise ScreenerConfigError("SCREENER_L2_MAX_COST_USD must be in (0, 25]")
     if config.l2_analyst_reasoning_effort != "model_default":
         raise ScreenerConfigError(
             "SCREENER_L2_ANALYST_REASONING_EFFORT must be model_default"

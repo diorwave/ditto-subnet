@@ -1,6 +1,15 @@
 import { conversationAssessmentInputSchema, conversationSettingsInputSchema, conversationRetryInputSchema } from '../lib/conversation.schemas'
 import { scheduleV13ReviewClockInputSchema } from '../lib/review-clock.schemas'
+import {
+  listV13BenignApprovalsInputSchema,
+  v13BenignApprovalLookupInputSchema,
+  v13BenignApprovalWriteInputSchema,
+  v13ReplayPrivateLookupInputSchema,
+  v13ReplayGroupWriteInputSchema,
+  v13ReplayPackageWriteInputSchema,
+} from '../lib/v13-private.schemas'
 import { fetchConversationAssessments, setConversationSettings, authorizeConversationRetry } from './admin.service'
+import { fetchV13ScorerCohort, fetchV13ScorerCohortPreflight, fetchV13ScorerCohortHistory, fetchV13ReportOnlyCurrentPacket, activateV13ScorerCohort, rotateV13ScorerCohort } from './admin.service'
 import '@tanstack/react-start/server-only'
 
 import { issueBenchmarkCanaryInputSchema, getBenchmarkCanaryInputSchema,
@@ -104,6 +113,8 @@ import {
   peekInferenceTraceInputSchema,
   applyScreenerReviewSettingsInputSchema,
   screenerFanoutShadowInputSchema,
+  l2ReportCanaryLookupInputSchema,
+  scheduleL2ReportCanaryInputSchema,
   applyCopyCourtSettingsInputSchema,
   copyCourtRecommendationsInputSchema,
   confirmationSeedAnchorsInputSchema,
@@ -113,6 +124,7 @@ import {
   advanceScoredPolicyRescreenInputSchema,
   restoreScoredScreeningSnapshotInputSchema,
   setValidatorSlotSettingsInputSchema,
+  setValidatorIssuancePauseInputSchema,
   updateSubmissionSettingsInputSchema,
   unbanHotkeyInputSchema,
   updateArtifactReleaseSettingsInputSchema,
@@ -126,6 +138,8 @@ import {
   setScreenerProviderSettingsInputSchema,
   setScreenerNodeChannelSettingsInputSchema,
   setScreenerNodeReplayCapacityInputSchema,
+  registerReplayProcessKeyInputSchema,
+  revokeReplayProcessKeyInputSchema,
   setConfirmationBundleSettingsInputSchema,
   authorizeConfirmationBundleRetestInputSchema,
   retryTrustedImageBuildInputSchema,
@@ -145,11 +159,20 @@ import {
   fetchScreeningQuarantineContext,
   fetchScreeningQuarantineContexts,
   fetchScreeningQuarantines,
+  fetchScreeningReviewEvents,
   fetchScreeningDisputes,
   fetchScreeningFailureDiagnostic,
   fetchAdjudicationAttempts,
   fetchScreeningVerificationReadiness,
   fetchV13GenerationGroup,
+  listV13BenignApprovals,
+  fetchV13BenignApproval,
+  recordV13BenignApproval,
+  fetchV13ReplayPrivateGroup,
+  recordV13ReplayPrivateGroup,
+  registerV13ReplayPrivatePackage,
+  fetchV13ReplayPrivateReceipt,
+  fetchV13ReplayPrivateStatistics,
   fetchScreeningReviewDeadline,
   fetchScreeningSubmission,
   fetchScreeningSubmissions,
@@ -241,8 +264,13 @@ import {
   updateScreenerProviderSettings,
   updateScreenerNodeChannelSettings,
   updateScreenerNodeReplayCapacity,
+  fetchReplayProcessReadiness,
+  registerReplayProcessKey,
+  revokeReplayProcessKey,
   fetchScreenerReviewControl,
   fetchScreenerFanoutShadow,
+  fetchL2ReportCanary,
+  scheduleL2ReportCanary,
   fetchCopyCourtControl,
   fetchCopyCourtRecommendations,
   fetchConfirmationSeedAnchors,
@@ -258,6 +286,7 @@ import {
   fetchLedgerEpochSnapshots,
   fetchValidatorAssignments,
   setValidatorSlotSettings,
+  setValidatorIssuancePause,
   fetchBurnSettings,
   setBurnSettings,
   fetchSubmissionSettingsControl,
@@ -320,6 +349,8 @@ export const WRITE_TOOL_NAMES = new Set([
   'set_screener_provider_settings',
   'set_screener_node_channel_settings',
   'set_screener_node_replay_capacity',
+  'register_screener_replay_process_key',
+  'revoke_screener_replay_process_key',
   'register_coding_catalog_release',
   'supersede_coding_catalog_release',
   'retire_coding_catalog_release',
@@ -366,6 +397,9 @@ export const WRITE_TOOL_NAMES = new Set([
   'schedule_v13_review_clock',
   'restore_scored_screening_snapshot',
   'set_validator_slot_settings',
+  'set_validator_issuance_pause',
+  'activate_v13_scorer_cohort',
+  'rotate_v13_scorer_cohort',
   'apply_copy_court_settings',
   'set_inference_concurrency_settings',
   'start_runtime_profile',
@@ -594,6 +628,12 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Apply complete revisioned concurrency limits for one enrolled screener node after reading get_screener_capacity.',
   set_screener_node_replay_capacity:
     'Set report-only replay capacity to zero or one on the independently enrolled second screener, with exact hotkey, status, capacity, confirmation and audit guards. Read get_screener_capacity first.',
+  get_screener_replay_process_readiness:
+    'Read node-2 key, signed heartbeat, release gate and missing checks. No secrets.',
+  register_screener_replay_process_key:
+    'Pin one node-2 worker public key only while replay capacity is zero. Exact confirmation and operator audit required.',
+  revoke_screener_replay_process_key:
+    'Revoke one exact node-2 process key, including during an active canary. Exact fingerprint, confirmation and audit required.',
   get_coding_catalog_releases:
     'Read signed shadow catalog commitments, retirement, and exposure counts.',
   get_coding_private_v2_releases:
@@ -638,6 +678,22 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Authorize one audited retry; preserves identity, history and budget caps.',
   get_screener_fanout_shadow:
     'Read bounded baseline/fan-out shadow comparisons, coverage, disagreements, latency, and spend.',
+  get_l2_report_canary:
+    'Read one exact-attempt non-authoritative L2 canary report and lease outcome.',
+  get_v13_scorer_cohort:
+    'Read the immutable three-validator V13 scorer pin, including exact signed runtime packet.',
+  get_v13_scorer_cohort_preflight:
+    'Read fresh V13 validator packets, admission, pause state, and live-ticket drain before pinning.',
+  get_v13_scorer_cohort_history:
+    'Read the original immutable V13 scorer pin and every append-only packet rotation.',
+  get_v13_report_only_current_packet:
+    'Read the unanimous live signed packet of pinned members without changing primary authority.',
+  activate_v13_scorer_cohort:
+    'Pin three exact managed V13 validators after nonmembers are paused and live tickets drain. One-way activation.',
+  rotate_v13_scorer_cohort:
+    'Rotate the exact pinned V13 cohort to a unanimously signed packet after all V13 tickets drain; preserves pin history.',
+  schedule_l2_report_canary:
+    'Queue one isolated L2 report on an enrolled Hetzner node; never changes screening, scoring, or quarantine.',
   get_copy_court_settings:
     'Read the copy-hold triage court posture and revision history.',
   get_confirmation_seed_anchors:
@@ -684,7 +740,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   summarize_screening_failures:
     'Group active-benchmark screening / screening_failed agents by reason_code. Pass generation=all only for a cross-benchmark audit. Use get_screening_submission for one row.',
   get_screening_failure_diagnostic:
-    'Private exact-attempt failure diagnostic; artifact scope.',
+    'Private exact-attempt failure diagnostic, including digest-verified fixed-label L2 accounting when recorded. Null on older attempts. Artifact scope.',
   get_screening_verification_readiness:
     'Read V13 receipt presence; no pass or CLEAR. Artifact scope.',
   get_v13_private_generation_group:
@@ -782,6 +838,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   // context — which is also what buys the budget the queue's own entry needs.
   list_screening_quarantines:
     'Page screener quarantines (active | resolved | all), newest first; sort=oldest for chronology, detail=full for every evidence row. Active rows are auto-resolved by the platform within milliseconds, so this is not the operator queue — use get_screening_review_queue.',
+  list_screening_review_events:
+    'Read append-only source-review decisions with exact attempt, artifact SHA, policy version, model or actor, evidence and receipt snapshots, and state transitions.',
   list_screening_adjudication_attempts:
     'Recent L4 outcomes with attempt SHA, manifest and pinned settings; observed timing/provider only when recorded. Null success telemetry is unavailable, not zero.',
   get_screening_quarantine_context:
@@ -920,6 +978,23 @@ export function createBackroomMcpServer(props: McpGrantProps) {
           detail,
         ),
       ),
+  )
+
+  registerTool(
+    'list_screening_review_events',
+    {
+      title: 'List screening review events',
+      description:
+        'Read immutable automated source-review results and manual quarantine rulings. The event records the exact attempt, artifact SHA, governing policy version, reviewer model or operator, evidence digests and receipts available at the decision, and before/after state. Receipt presence never establishes a policy PASS.',
+      inputSchema: {
+        agentId: z.string().uuid().optional(),
+        limit: z.number().int().min(1).max(20).default(10),
+        offset: z.number().int().min(0).default(0),
+      },
+      annotations: toolAnnotations('read'),
+    },
+    async ({ agentId, limit, offset }) =>
+      result(await fetchScreeningReviewEvents(agentId, limit, offset)),
   )
 
   registerTool(
@@ -1242,7 +1317,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get screening failure diagnostic',
       description:
-        'Read one exact attempt with private failure text and sanitized L4 failure trace, when recorded. No source or model text. Requires backroom:artifact:read; read get_backroom_tool_help for field semantics.',
+        'Read one exact attempt with private failure text, digest-verified fixed-label L2 accounting, and sanitized L4 failure trace when recorded. No source or model text. Requires backroom:artifact:read; read get_backroom_tool_help for field semantics.',
       inputSchema: screeningFailureDiagnosticInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1294,6 +1369,94 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('read'),
     },
     async (input) => result(await fetchV13GenerationGroup(input)),
+  )
+
+  registerTool(
+    'list_v13_benign_approvals',
+    {
+      title: 'List V13 known benign approvals',
+      description: 'Read immutable digest-only known benign control approvals. Recorded evidence is unverified and grants no terminal decision.',
+      inputSchema: listV13BenignApprovalsInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await listV13BenignApprovals(input)),
+  )
+
+  registerTool(
+    'get_v13_benign_approval',
+    {
+      title: 'Get V13 known benign approval',
+      description: 'Read one exact known benign control approval by ID; no private bank contents or verdict.',
+      inputSchema: v13BenignApprovalLookupInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchV13BenignApproval(input)),
+  )
+
+  registerTool(
+    'record_v13_benign_approval',
+    {
+      title: 'Record V13 known benign approval',
+      description: 'Append an exact control artifact and image approval with review evidence digest. Records provenance only; it cannot clear or reject an agent.',
+      inputSchema: v13BenignApprovalWriteInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => recordV13BenignApproval(props.session.email, input)),
+  )
+
+  registerTool(
+    'get_v13_replay_private_group',
+    {
+      title: 'Get V13 replay private group',
+      description: 'Read the exact replay-bound group or role package digests. Recorded unverified; no private case bytes or verdict.',
+      inputSchema: v13ReplayPrivateLookupInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchV13ReplayPrivateGroup(input)),
+  )
+
+  registerTool(
+    'record_v13_replay_private_group',
+    {
+      title: 'Record V13 replay private group',
+      description: 'Append replay-bound target and known benign commitments before private generation. No case generation or terminal decision is performed.',
+      inputSchema: v13ReplayGroupWriteInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => recordV13ReplayPrivateGroup(props.session.email, input)),
+  )
+
+  registerTool(
+    'register_v13_replay_private_package',
+    {
+      title: 'Register V13 replay private package',
+      description: 'Append a role-specific sealed package digest for one replay. Registration is recorded unverified and does not clear a hold.',
+      inputSchema: v13ReplayPackageWriteInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => registerV13ReplayPrivatePackage(props.session.email, input)),
+  )
+
+  registerTool(
+    'get_v13_replay_private_receipt',
+    {
+      title: 'Get V13 replay private receipt',
+      description: 'Read a signed replay receipt digest and identity. Recorded unverified; policy verification remains incomplete.',
+      inputSchema: v13ReplayPrivateLookupInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchV13ReplayPrivateReceipt(input)),
+  )
+
+  registerTool(
+    'get_v13_replay_private_statistics',
+    {
+      title: 'Get V13 replay private statistics',
+      description: 'Read conservative paired statistics and source-binding status. Signal is not a policy pass or terminal verdict.',
+      inputSchema: v13ReplayPrivateLookupInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchV13ReplayPrivateStatistics(input)),
   )
 
 
@@ -2116,6 +2279,43 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_screener_replay_process_readiness',
+    {
+      title: 'Get independent replay process readiness',
+      description:
+        'Read node-2 key fingerprint, signed worker heartbeat, release gate and readiness. No physical attestation or replay activation. Requires backroom:read.',
+      annotations: toolAnnotations('read'),
+    },
+    async () => result(await fetchReplayProcessReadiness()),
+  )
+
+  registerTool(
+    'register_screener_replay_process_key',
+    {
+      title: 'Register independent replay process key',
+      description:
+        'Register one host-generated Ed25519 public key for subnet-screener-2-worker-1 while replay capacity is zero. Supply exact hotkey and confirmation "REGISTER V13 REPLAY PROCESS subnet-screener-2/subnet-screener-2-worker-1/<sha256-of-32-byte-public-key>". Never send a private key. Requires backroom:write.',
+      inputSchema: registerReplayProcessKeyInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) =>
+      write(() => registerReplayProcessKey(props.session.email, input)),
+  )
+
+  registerTool(
+    'revoke_screener_replay_process_key',
+    {
+      title: 'Revoke independent replay process key',
+      description:
+        'Revoke the exact active key fingerprint for subnet-screener-2, even during a live canary. Supply current hotkey and confirmation "REVOKE V13 REPLAY PROCESS subnet-screener-2/<key_sha256>". This stops lease API access; it does not change replay capacity. Requires backroom:write.',
+      inputSchema: revokeReplayProcessKeyInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) =>
+      write(() => revokeReplayProcessKey(props.session.email, input)),
+  )
+
+  registerTool(
     'get_screener_review_settings',
     {
       title: 'Get screener review settings',
@@ -2147,6 +2347,29 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('read'),
     },
     async (input) => result(await fetchScreenerFanoutShadow(input)),
+  )
+
+  registerTool(
+    'get_l2_report_canary',
+    {
+      title: 'Get report-only L2 canary',
+      description: 'Read the exact source identity, lease outcome, and persisted L2 audit. A report does not certify CLEAR or change miner state. Requires backroom:read.',
+      inputSchema: l2ReportCanaryLookupInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchL2ReportCanary(input)),
+  )
+
+  registerTool(
+    'schedule_l2_report_canary',
+    {
+      title: 'Schedule report-only L2 canary',
+      description: 'Queue a single exact UUID/SHA/source-attempt V13 L2 audit on an enrolled Hetzner node. The status and score count must still match. requestId is the idempotency key; use a new requestId for an append-only replay after a terminal result. candidate_clear is not a certified benign label. Requires backroom:write and confirmation "QUEUE REPORT ONLY L2 CANARY".',
+      inputSchema: scheduleL2ReportCanaryInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) =>
+      write(() => scheduleL2ReportCanary(input, props.session.email)),
   )
 
   registerTool(
@@ -2573,6 +2796,106 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_v13_scorer_cohort',
+    {
+      title: 'Get V13 scorer cohort pin',
+      description: 'Read the exact immutable three-validator scorer pin and signed runtime packet. Null means no pin and no signed L2 lease. Requires backroom:read.',
+      inputSchema: z.object({}),
+      annotations: toolAnnotations('read'),
+    },
+    async () => result(await fetchV13ScorerCohort()),
+  )
+
+  registerTool(
+    'get_v13_scorer_cohort_preflight',
+    {
+      title: 'Get V13 scorer cohort preflight',
+      description: 'Read current signed packets, accepting capacity, issuance pauses, and live V13 ticket counts for exact activation. Requires backroom:read.',
+      inputSchema: z.object({}),
+      annotations: toolAnnotations('read'),
+    },
+    async () => result(await fetchV13ScorerCohortPreflight()),
+  )
+
+  registerTool(
+    'get_v13_scorer_cohort_history',
+    {
+      title: 'Get V13 scorer cohort history',
+      description: 'Read the original immutable pin and all append-only packet rotations. Requires backroom:read.',
+      inputSchema: z.object({}),
+      annotations: toolAnnotations('read'),
+    },
+    async () => result(await fetchV13ScorerCohortHistory()),
+  )
+
+  registerTool(
+    'get_v13_report_only_current_packet',
+    {
+      title: 'Get V13 report-only current packet',
+      description: 'Read unanimous current signed scorer packet for the pinned three validators, including whether it matches the effective primary pin. Never changes authority. Requires backroom:read.',
+      inputSchema: z.object({}),
+      annotations: toolAnnotations('read'),
+    },
+    async () => result(await fetchV13ReportOnlyCurrentPacket()),
+  )
+
+  registerTool(
+    'activate_v13_scorer_cohort',
+    {
+      title: 'Activate V13 scorer cohort pin',
+      description: 'One-way pin of three sorted exact managed validator hotkeys and their signed scorer packet. The Platform refuses unless all other fresh V13 validators are issuance-paused and all nonmember V13 tickets have drained. Requires current validator slot settings revision/checksum and confirmation PIN V13 SCORER COHORT. Requires backroom:write.',
+      inputSchema: z.object({
+        hotkeys: z.tuple([z.string(), z.string(), z.string()]),
+        packet: z.object({
+          source_revision: z.string().regex(/^[0-9a-f]{40}$/),
+          release_descriptor_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+          scorer_image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+          scorer_env_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+          injected_keys: z.array(z.string()).min(1),
+        }),
+        expectedSlotSettingsRevision: z.number().int().min(1),
+        expectedSlotSettingsChecksum: z.string().regex(/^[0-9a-f]{64}$/),
+        reason: z.string().min(8),
+        confirmation: z.literal('PIN V13 SCORER COHORT'),
+      }),
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => activateV13ScorerCohort(input, props.session.email)),
+  )
+
+  registerTool(
+    'rotate_v13_scorer_cohort',
+    {
+      title: 'Rotate V13 scorer cohort packet',
+      description: 'Append one guarded scorer packet rotation for the same three sorted validators. Requires exact current packet and rotation ID, fresh unanimous signed target packet, current slot settings, accepting members, paused nonmembers, zero live V13 tickets, and confirmation ROTATE V13 SCORER PACKET. Requires backroom:write.',
+      inputSchema: z.object({
+        hotkeys: z.tuple([z.string(), z.string(), z.string()]),
+        packet: z.object({
+          source_revision: z.string().regex(/^[0-9a-f]{40}$/),
+          release_descriptor_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+          scorer_image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+          scorer_env_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+          injected_keys: z.array(z.string()).min(1),
+        }),
+        expectedCurrentPacket: z.object({
+          source_revision: z.string().regex(/^[0-9a-f]{40}$/),
+          release_descriptor_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+          scorer_image_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+          scorer_env_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+          injected_keys: z.array(z.string()).min(1),
+        }),
+        expectedCurrentRotationId: z.number().int().min(1).optional(),
+        expectedSlotSettingsRevision: z.number().int().min(1),
+        expectedSlotSettingsChecksum: z.string().regex(/^[0-9a-f]{64}$/),
+        reason: z.string().min(8),
+        confirmation: z.literal('ROTATE V13 SCORER PACKET'),
+      }),
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => rotateV13ScorerCohort(input, props.session.email)),
+  )
+
+  registerTool(
     'get_validator_slot_settings',
     {
       title: 'Get validator slot settings',
@@ -2613,6 +2936,18 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('write', true),
     },
     async (input) => write(() => setValidatorSlotSettings(input, props.session.email)),
+  )
+
+  registerTool(
+    'set_validator_issuance_pause',
+    {
+      title: 'Pause or resume validator ticket issuance',
+      description:
+        'Guarded pause or resume of one validator by hotkey. Existing tickets continue. Requires backroom:write.',
+      inputSchema: setValidatorIssuancePauseInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => setValidatorIssuancePause(input, props.session.email)),
   )
 
   registerTool(

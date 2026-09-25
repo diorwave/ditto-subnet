@@ -289,9 +289,11 @@ async def test_v13_shadow_semantics_require_tool_and_user_specific_memory(
     assert all(marker not in repr(decisions) for marker in memories.values())
 
 
+@pytest.mark.parametrize("replay_probes", [False, True])
 async def test_v13_shadow_observation_runs_only_after_policy_decision(
     make_config: Callable[..., ScreenerConfig],
     tmp_path: Path,
+    replay_probes: bool,
 ) -> None:
     tarball = _valid_tar()
     gate = _gate_with(
@@ -316,8 +318,8 @@ async def test_v13_shadow_observation_runs_only_after_policy_decision(
             tool_key=b"key",
         )
 
-    async def observe(*_args: Any, **_kwargs: Any) -> None:
-        events.append("shadow")
+    async def observe(*_args: Any, **kwargs: Any) -> None:
+        events.append(f"shadow:{kwargs['include_runs']}")
 
     async def export_image(
         image_id: str, *, image_ref: str, deadline: float | None
@@ -351,13 +353,14 @@ async def test_v13_shadow_observation_runs_only_after_policy_decision(
             sha256=hashlib.sha256(tarball).hexdigest(),
             download_url=_URL,
             build_only=True,
+            replay_runtime_probes=replay_probes,
             policy_version=13,
             publish_image=publish_image,
             record_runtime_verification=lambda _code, _digest: asyncio.sleep(0),
         )
 
     assert decision.outcome == ScreeningOutcome.PASS
-    assert events == ["policy", "export", "publish", "shadow"]
+    assert events == ["policy", "export", "publish", f"shadow:{replay_probes}"]
 
 
 async def test_v13_shadow_timeout_does_not_change_decision(
@@ -1376,10 +1379,10 @@ async def test_l3_cleared_static_lead_can_continue_to_build(
     assert any(call[0] == "build" for call in calls)
 
 
-async def test_l4_cleared_static_lead_builds_before_it_passes(
+async def test_v13_l4_cleared_static_lead_holds_before_build(
     make_config: Callable[..., ScreenerConfig],
 ) -> None:
-    """A terminal L4 clear admits only after the full image contract passes."""
+    """A source-only L4 clear cannot authorize v13 build or admission."""
     tarball = _valid_tar(
         **{
             "Dockerfile": b"FROM scratch\nCOPY . .\nRUN ./scripts/local-only.sh\n",
@@ -1397,12 +1400,12 @@ async def test_l4_cleared_static_lead_builds_before_it_passes(
     async with gate._client:
         result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
 
-    assert result.outcome == ScreeningOutcome.PASS
+    assert result.outcome == ScreeningOutcome.QUARANTINE
     assert result.adjudication is not None
     assert result.adjudication["decision"] == "clear"
     assert reviewer.resolve_calls == 1
     assert reviewer.l1_calls == 0
-    assert any(call[0] == "build" for call in calls)
+    assert not any(call[0] == "build" for call in calls)
 
 
 async def test_reports_only_coarse_pipeline_stages(

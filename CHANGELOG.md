@@ -2,6 +2,295 @@
 
 <!-- version list -->
 
+## v0.311.8 (2026-09-25)
+
+### Bug Fixes
+
+- **platform**: Honor V13 scorer pin for maintenance leases
+  ([#2280](https://github.com/ditto-assistant/ditto-subnet/pull/2280),
+  [`094704b`](https://github.com/ditto-assistant/ditto-subnet/commit/094704b1bb3b4a208cac2657320ecac8693dc8a7))
+
+
+## v0.311.7 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Raise bounded L2 effective-input budget
+  ([#2278](https://github.com/ditto-assistant/ditto-subnet/pull/2278),
+  [`85248e2`](https://github.com/ditto-assistant/ditto-subnet/commit/85248e2d8d20dae1cf22ed95ac23b989b4aa1669))
+
+
+## v0.311.6 (2026-09-25)
+
+### Bug Fixes
+
+- **platform**: Rotate V13 scorer packets with guarded history
+  ([#2273](https://github.com/ditto-assistant/ditto-subnet/pull/2273),
+  [`ab20425`](https://github.com/ditto-assistant/ditto-subnet/commit/ab20425d58094c23a13bbd5874249dceb4d48c8e))
+
+
+## v0.311.5 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Align V13 audit and claim wire contracts
+  ([#2272](https://github.com/ditto-assistant/ditto-subnet/pull/2272),
+  [`3fee30d`](https://github.com/ditto-assistant/ditto-subnet/commit/3fee30d1e29085500a4adeb502d65415edbb64b7))
+
+
+## v0.311.4 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Allow higher operator L2 review budgets
+  ([#2271](https://github.com/ditto-assistant/ditto-subnet/pull/2271),
+  [`30daafc`](https://github.com/ditto-assistant/ditto-subnet/commit/30daafc92ea4c8ea93009110853a664c5bfe771f))
+
+
+## v0.311.3 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Keep canary scorer lease valid through L1 review
+  ([#2270](https://github.com/ditto-assistant/ditto-subnet/pull/2270),
+  [`daec802`](https://github.com/ditto-assistant/ditto-subnet/commit/daec802d9802d3005f9244fc15ed43d4ede3cc3c))
+
+
+## v0.311.2 (2026-09-25)
+
+### Bug Fixes
+
+- **platform**: Accept JSON UUIDs for L2 canary scheduling
+  ([#2269](https://github.com/ditto-assistant/ditto-subnet/pull/2269),
+  [`36e1a7b`](https://github.com/ditto-assistant/ditto-subnet/commit/36e1a7b0a999f603d5ba73bf1398d6cda2cf1da7))
+
+
+## v0.311.1 (2026-09-24)
+
+### Bug Fixes
+
+- **backroom**: Expose guarded validator issuance pause in MCP
+  ([#2268](https://github.com/ditto-assistant/ditto-subnet/pull/2268),
+  [`5b121de`](https://github.com/ditto-assistant/ditto-subnet/commit/5b121de573aa932790f4f8fd4beb0825d99836ef))
+
+
+## v0.311.0 (2026-09-24)
+
+### Features
+
+- **platform**: Pin v13 scorer cohort for signed L2 leases
+  ([#2266](https://github.com/ditto-assistant/ditto-subnet/pull/2266),
+  [`f173785`](https://github.com/ditto-assistant/ditto-subnet/commit/f1737858e574089c1e561c1e870997688d99e6a9))
+
+- **screener**: Add isolated L2 report canary queue
+  ([#2265](https://github.com/ditto-assistant/ditto-subnet/pull/2265),
+  [`28b0736`](https://github.com/ditto-assistant/ditto-subnet/commit/28b07367d8bf98333b1a48494c857367aee8cda1))
+
+
+## v0.310.1 (2026-09-24)
+
+### Bug Fixes
+
+- **screener**: Bind L2 to signed scorer cohort evidence
+  ([#2259](https://github.com/ditto-assistant/ditto-subnet/pull/2259),
+  [`e505595`](https://github.com/ditto-assistant/ditto-subnet/commit/e5055957c8c65e824f64d90cee66074d3db73afd))
+
+
+## v0.310.0 (2026-09-24)
+
+### Bug Fixes
+
+- **platform**: Pin first released replay runner
+  ([#2262](https://github.com/ditto-assistant/ditto-subnet/pull/2262),
+  [`bfacdf4`](https://github.com/ditto-assistant/ditto-subnet/commit/bfacdf4e657979858a9f657bf4fb19588e1b007e))
+
+### Features
+
+- Wire independent screener replay host unit
+  ([#2261](https://github.com/ditto-assistant/ditto-subnet/pull/2261),
+  [`218f32c`](https://github.com/ditto-assistant/ditto-subnet/commit/218f32c163ed4af3a697ea265fb76d60c3877988))
+
+
+## v0.309.0 (2026-09-24)
+
+### Features
+
+- **backroom**: Expose guarded V13 replay process controls
+  ([#2196](https://github.com/ditto-assistant/ditto-subnet/pull/2196),
+  [`77e01f8`](https://github.com/ditto-assistant/ditto-subnet/commit/77e01f8087cfe5901b696d8d871d01e5cc64e046))
+
+- **platform**: Bind V13 replay leases to registered process keys
+  ([#2194](https://github.com/ditto-assistant/ditto-subnet/pull/2194),
+  [`3d42b61`](https://github.com/ditto-assistant/ditto-subnet/commit/3d42b615f1331fd872e384ff527a5b507e41581c))
+
+- **platform**: Verify v13 replay process proofs
+  ([#2192](https://github.com/ditto-assistant/ditto-subnet/pull/2192),
+  [`72173ba`](https://github.com/ditto-assistant/ditto-subnet/commit/72173ba2425a3166f0d6cb737beaffb552c92d58))
+
+- **screening**: Define v13 replay process proof contract
+  ([#2190](https://github.com/ditto-assistant/ditto-subnet/pull/2190),
+  [`30ea10b`](https://github.com/ditto-assistant/ditto-subnet/commit/30ea10bbd6c66a8e29d74c0611b086929ba27866))
+
+
+## v0.308.1 (2026-09-24)
+
+### Bug Fixes
+
+- **platform**: Tolerate capped stale migration statuses
+  ([#2255](https://github.com/ditto-assistant/ditto-subnet/pull/2255),
+  [`4594918`](https://github.com/ditto-assistant/ditto-subnet/commit/4594918dc3a837f4aff08673d0e4cfa473fd1f4f))
+
+
+## v0.308.0 (2026-09-24)
+
+### Bug Fixes
+
+- **platform**: Avoid duplicate migration sweep statuses
+  ([#2215](https://github.com/ditto-assistant/ditto-subnet/pull/2215),
+  [`211ff33`](https://github.com/ditto-assistant/ditto-subnet/commit/211ff33b97081e8e8d8a9726f82864612a9976f7))
+
+- **screener**: Admit failed source reviews to v13 replay
+  ([#2254](https://github.com/ditto-assistant/ditto-subnet/pull/2254),
+  [`730d7eb`](https://github.com/ditto-assistant/ditto-subnet/commit/730d7eb53ce5378b2749152f53a7536d62c1ceb2))
+
+### Features
+
+- **backroom**: Expose v13 private provenance controls
+  ([#2249](https://github.com/ditto-assistant/ditto-subnet/pull/2249),
+  [`f396629`](https://github.com/ditto-assistant/ditto-subnet/commit/f3966299ace40f86893c42c5433b2c3ab4b6da27))
+
+- **platform**: Bind v13 private generation to replay images
+  ([#2238](https://github.com/ditto-assistant/ditto-subnet/pull/2238),
+  [`ec8940e`](https://github.com/ditto-assistant/ditto-subnet/commit/ec8940efa8923dee993c20f890e63dcc336ba1b1))
+
+- **platform**: Report conservative v13 private statistics
+  ([#2244](https://github.com/ditto-assistant/ditto-subnet/pull/2244),
+  [`963c8fb`](https://github.com/ditto-assistant/ditto-subnet/commit/963c8fbd16f121c7244265cce9b95546ef3ec780))
+
+- **screener**: Cap matched v13 private replay spending
+  ([#2245](https://github.com/ditto-assistant/ditto-subnet/pull/2245),
+  [`a589090`](https://github.com/ditto-assistant/ditto-subnet/commit/a589090f006d5784cb63a6cad8247e93e2647666))
+
+- **screener**: Execute replay-bound v13 private cases with signed reports
+  ([#2243](https://github.com/ditto-assistant/ditto-subnet/pull/2243),
+  [`539b475`](https://github.com/ditto-assistant/ditto-subnet/commit/539b4753e025ab49061aa822c295ecac1d16db5a))
+
+- **screener**: Record signed v13 replay observations
+  ([#2235](https://github.com/ditto-assistant/ditto-subnet/pull/2235),
+  [`56604a7`](https://github.com/ditto-assistant/ditto-subnet/commit/56604a7132362da99214caf7fbd0f12a92b1870c))
+
+- **screener**: Verify replay image tar identity
+  ([#2236](https://github.com/ditto-assistant/ditto-subnet/pull/2236),
+  [`f2f1bd5`](https://github.com/ditto-assistant/ditto-subnet/commit/f2f1bd56528b4ebd4cae7a6085175aa64a7ef533))
+
+
+## v0.307.7 (2026-09-24)
+
+### Bug Fixes
+
+- **screener**: Honor configured L3 review step budget
+  ([#2252](https://github.com/ditto-assistant/ditto-subnet/pull/2252),
+  [`4a2718d`](https://github.com/ditto-assistant/ditto-subnet/commit/4a2718d8be64cf0cf574bc17344ddadfc2770eb3))
+
+
+## v0.307.6 (2026-09-24)
+
+### Bug Fixes
+
+- **dashboard**: Label incomplete screening accurately
+  ([#2251](https://github.com/ditto-assistant/ditto-subnet/pull/2251),
+  [`44c2070`](https://github.com/ditto-assistant/ditto-subnet/commit/44c207027afbb221b907c77840f2bc2bf8ed451c))
+
+
+## v0.307.5 (2026-09-24)
+
+### Bug Fixes
+
+- **dittobench-api**: Key practice limiter on trusted client IP
+  ([#2239](https://github.com/ditto-assistant/ditto-subnet/pull/2239),
+  [`515ca20`](https://github.com/ditto-assistant/ditto-subnet/commit/515ca20a646c9550a9e4ba1f15c6b946afabfcd7))
+
+
+## v0.307.4 (2026-09-24)
+
+### Bug Fixes
+
+- **platform**: Acknowledge disputes after exact rescreen pass
+  ([#2248](https://github.com/ditto-assistant/ditto-subnet/pull/2248),
+  [`6f3f19a`](https://github.com/ditto-assistant/ditto-subnet/commit/6f3f19a3204d3884111a9e036a09969472e5e292))
+
+- **platform**: Remove the no-op AuthPassThroughMiddleware from the Platform and relay stacks
+  ([#2241](https://github.com/ditto-assistant/ditto-subnet/pull/2241),
+  [`5d9ae35`](https://github.com/ditto-assistant/ditto-subnet/commit/5d9ae3580bde1d4aea8639525f7b843ce6b6ccfa))
+
+- **screener**: Pin the Packer googlecompute plugin to an exact reviewed version
+  ([#2240](https://github.com/ditto-assistant/ditto-subnet/pull/2240),
+  [`32d37a4`](https://github.com/ditto-assistant/ditto-subnet/commit/32d37a46849c23dafa033280daa3144d015e7c57))
+
+- **screener**: Retain bounded L2 failure diagnostics
+  ([#2250](https://github.com/ditto-assistant/ditto-subnet/pull/2250),
+  [`249e512`](https://github.com/ditto-assistant/ditto-subnet/commit/249e512ca04f6f6a4d0ee94b4603cc7ef87a95a1))
+
+
+## v0.307.3 (2026-09-24)
+
+### Bug Fixes
+
+- **screener**: Accept configured source review step budgets
+  ([#2247](https://github.com/ditto-assistant/ditto-subnet/pull/2247),
+  [`a2e9eb7`](https://github.com/ditto-assistant/ditto-subnet/commit/a2e9eb761c0f022ee7626a4d70d779c16f718400))
+
+
+## v0.307.2 (2026-09-24)
+
+### Bug Fixes
+
+- **platform**: Admit audited Subtensor v467 source receipts
+  ([#2037](https://github.com/ditto-assistant/ditto-subnet/pull/2037),
+  [`4f3b8de`](https://github.com/ditto-assistant/ditto-subnet/commit/4f3b8de5bab9146a7d01e5da13a0b88646d8e0ba))
+
+
+## v0.307.1 (2026-09-24)
+
+### Bug Fixes
+
+- **screener**: Bound L4 review with v13 evidence fence
+  ([#2166](https://github.com/ditto-assistant/ditto-subnet/pull/2166),
+  [`1b589b3`](https://github.com/ditto-assistant/ditto-subnet/commit/1b589b351a9428c409765b0cbf963127c6ad7e8f))
+
+- **screener**: Require scored I6 endpoint proof in L4
+  ([#2233](https://github.com/ditto-assistant/ditto-subnet/pull/2233),
+  [`98c0d82`](https://github.com/ditto-assistant/ditto-subnet/commit/98c0d8265de1edcdc3ae6a31c97bae0606582169))
+
+### Chores
+
+- **tests**: Pin screener negative control boundaries
+  ([#2232](https://github.com/ditto-assistant/ditto-subnet/pull/2232),
+  [`4e2ccb1`](https://github.com/ditto-assistant/ditto-subnet/commit/4e2ccb191c9106eab6bb8ba392aeaec3c75cfd66))
+
+
+## v0.307.0 (2026-09-24)
+
+### Features
+
+- **platform**: Publish benchmark rollout promotion progress
+  ([#2108](https://github.com/ditto-assistant/ditto-subnet/pull/2108),
+  [`e664368`](https://github.com/ditto-assistant/ditto-subnet/commit/e664368970c847750ada739a8e4791a91dd098c0))
+
+- **platform**: Record immutable screening review events
+  ([#2217](https://github.com/ditto-assistant/ditto-subnet/pull/2217),
+  [`a61a5fa`](https://github.com/ditto-assistant/ditto-subnet/commit/a61a5fa393fc9e06bad9692abbde72b777e9d721))
+
+
+## v0.306.3 (2026-09-24)
+
+### Bug Fixes
+
+- **validator**: Resolve burn target from registered owner
+  ([#2205](https://github.com/ditto-assistant/ditto-subnet/pull/2205),
+  [`bbbefb9`](https://github.com/ditto-assistant/ditto-subnet/commit/bbbefb9bf149324ad65f28316bb233a9d514a363))
+
+
 ## v0.306.2 (2026-09-24)
 
 ### Bug Fixes
