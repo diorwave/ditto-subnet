@@ -2534,6 +2534,7 @@ export async function retryValidation(rawInput: unknown, actor: string) {
         request_id: requestId,
         expected_snapshot: input.expectedSnapshot,
         reason: input.reason,
+        acknowledge_provider_outage: input.acknowledgeProviderOutage,
       } satisfies RetryRequest,
     },
   )
@@ -2680,7 +2681,11 @@ export async function batchRetryValidation(rawInput: unknown, actor: string) {
     {
       method: 'POST',
       actor,
-      body: { reason: input.reason, items },
+      body: {
+        reason: input.reason,
+        items,
+        acknowledge_provider_outage: input.acknowledgeProviderOutage,
+      },
     },
   )
   return batchRetryValidationResponseSchema.parse(payload)

@@ -387,9 +387,10 @@ describe('Backroom MCP tools', () => {
     // Eight digest-only V13 provenance/analysis tools and three process-key
     // tools add bounded entries. Detailed procedures remain in tool help.
     // The scorer-pin rotation/history/current-packet controls add bounded entries.
-    // The two terminal-review eligibility reads (#2041) add a settings-history
-    // input and one uuid input; measured 164,921 bytes together.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(165_000)
+    // The two validator-retry inputs gain acknowledgeProviderOutage (#2087);
+    // the two terminal-review eligibility reads (#2041) add a settings-history
+    // input and one uuid input; measured 165,132 bytes together.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(165_500)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -414,8 +415,8 @@ describe('Backroom MCP tools', () => {
       // source-review queue-age SLO, failure taxonomy route_basis,
       // reopened-hold reason, three process-key summaries, and current V13
       // provenance reads plus scorer pin rotation and history, plus the two
-      // one-line terminal-review eligibility reads (#2041); measured at 29,435.
-      29_550,
+      // one-line terminal-review eligibility reads (#2041); measured at 29,564.
+      29_700,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
@@ -6976,6 +6977,15 @@ describe('Backroom MCP tools', () => {
       arguments: { agentId },
     })
     expect(allowed.isError).not.toBe(true)
+    // This payload has an older Platform's shape: no omission fields, so the
+    // tool reports none it can name and leaves completeness unknown (null)
+    // rather than claiming the total is complete.
+    expect(readJsonResult(allowed)).toMatchObject({
+      custom_added_lines: 3,
+      omitted_file_count: 0,
+      omitted_paths: [],
+      custom_added_lines_complete: null,
+    })
     expect(fetchMock).toHaveBeenCalledWith(
       `https://platform-api.heyditto.ai/api/v1/admin/screening-submissions/${agentId}/baseline-diff`,
       expect.objectContaining({
@@ -7566,6 +7576,8 @@ describe('Backroom MCP tools', () => {
         blocking_reason: null,
         recommended_action: null,
         dominant_failure_code: null,
+        provider_outage: null,
+        provider_outage_blocks_retry: null,
         earliest_retry_after: null,
         attempts_used: 3,
         exhausted_validator_count: 3,
@@ -7837,6 +7849,7 @@ describe('Backroom MCP tools', () => {
               expected_snapshot: snapshotB,
             },
           ],
+          acknowledge_provider_outage: false,
         }),
       }),
     )

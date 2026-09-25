@@ -506,6 +506,7 @@ export const l2ReportCanaryViewSchema = z.object({
   review_label: z.string(),
   status: z.string(),
   claimed_instance_id: z.string().nullable(),
+  lease_expires_at: z.string().nullable().optional(),
   report: z.record(z.string(), z.unknown()).nullable(),
   error_code: z.string().nullable(),
   created_at: z.string(),
@@ -5663,6 +5664,34 @@ export const validationQueueReinstatementSchema = z.object({
   created_at: z.string(),
 })
 
+// The relay-owned, provider-WIDE outage circuit. Attached to a retry row while
+// it is open (then it is why the grant is refused, whatever the slot failed on),
+// and while closed if a remaining slot carries `provider_outage_parked`.
+// `closed_at` is the last time a provider request succeeded and closed it — a
+// current-state observation, not proof the route is healthy now.
+export const validationProviderOutageSchema = z.object({
+  provider: z.string(),
+  state: z.enum(['open', 'closed']),
+  epoch: z.string(),
+  opened_at: z.string(),
+  retry_at: z.string(),
+  last_failure_at: z.string(),
+  closed_at: z.string().nullable(),
+  failure_count: z.number().int(),
+  last_status: z.number().int().nullable(),
+  last_error_code: z.string(),
+  probe_kind: z.string().nullable(),
+  probe_key: z.string().nullable(),
+  probe_expires_at: z.string().nullable(),
+})
+
+// Nullish-tolerant for the same split-deploy reason as the eviction fields:
+// an older platform omits both, which means "cannot tell you".
+const providerOutageRetryFields = {
+  provider_outage: validationProviderOutageSchema.nullish().default(null),
+  provider_outage_blocks_retry: z.boolean().nullish().default(null),
+}
+
 export const validationRetryDetailSchema = z.object({
   agent_id: z.string().uuid(),
   miner_hotkey: z.string(),
@@ -5677,6 +5706,7 @@ export const validationRetryDetailSchema = z.object({
   blocking_reason: z.string().nullable(),
   recommended_action: z.enum(['retry', 'withdraw']).nullish().default(null),
   dominant_failure_code: z.string().nullish().default(null),
+  ...providerOutageRetryFields,
   withdrawal_allowed: z.boolean(),
   withdrawal_blocking_reason: z.string().nullable(),
   // Eviction reporting is nullish-tolerant because Backroom and the platform
@@ -5708,6 +5738,9 @@ export const retryValidationInputSchema = z.object({
   agentId: z.string().uuid(),
   expectedSnapshot: z.string().regex(/^[0-9a-f]{64}$/),
   reason: auditReasonSchema(3),
+  // Required to grant while provider_outage_blocks_retry is true: the
+  // provider-wide circuit is open, so every restored lease is parked again.
+  acknowledgeProviderOutage: z.boolean().default(false),
 })
 
 export const retryValidationResponseSchema = z.object({
@@ -5837,6 +5870,7 @@ export const stuckSubmissionSchema = z.object({
   blocking_reason: z.string().nullable(),
   recommended_action: z.enum(['retry', 'withdraw']).nullish().default(null),
   dominant_failure_code: z.string().nullish().default(null),
+  ...providerOutageRetryFields,
   earliest_retry_after: z.string().nullable(),
   attempts_used: z.number().int().nonnegative(),
   exhausted_validator_count: z.number().int().nonnegative(),
@@ -5925,6 +5959,8 @@ export const batchRetryValidationItemSchema = z.object({
 
 export const batchRetryValidationInputSchema = z.object({
   reason: auditReasonSchema(3),
+  // Applies to every item; see retryValidationInputSchema.
+  acknowledgeProviderOutage: z.boolean().default(false),
   items: z
     .array(batchRetryValidationItemSchema)
     .min(1)
@@ -7708,6 +7744,11 @@ export const sourceDiffManifestSchema = z.object({
   removed_count: z.number().int().nonnegative(),
   renamed_count: z.number().int().nonnegative().default(0),
   truncated: z.boolean(),
+  // Files the Platform's bounded source read skipped in either artifact: not
+  // compared, so absent from `files` and every count. Older Platforms omit
+  // these fields.
+  omitted_file_count: z.number().int().nonnegative().nullish().transform((value) => value ?? 0),
+  omitted_paths: z.array(z.string()).nullish().transform((value) => value ?? []),
 })
 
 export const sourceDiffFileInputSchema = z.object({
@@ -7772,6 +7813,13 @@ export const baselineDiffManifestSchema = z.object({
   custom_added_lines: z.number().int().nonnegative(),
   path_aligned: z.boolean(),
   truncated: z.boolean(),
+  // Files the Platform's bounded source read skipped: not compared, so absent
+  // from `files` and every count. When any exist custom_added_lines is a lower
+  // bound and custom_added_lines_complete is false. An older Platform omits all
+  // three, and its completeness is unknown (null), not assumed.
+  omitted_file_count: z.number().int().nonnegative().nullish().transform((value) => value ?? 0),
+  omitted_paths: z.array(z.string()).nullish().transform((value) => value ?? []),
+  custom_added_lines_complete: z.boolean().nullish().transform((value) => value ?? null),
 })
 
 export const baselineDiffFileInputSchema = z.object({
