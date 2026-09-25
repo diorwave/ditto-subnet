@@ -23835,7 +23835,7 @@ export interface components {
             quality_factors?: components["schemas"]["PublicBenchmarkQualityFactor"][];
             /**
              * Token Efficiency Multiplier
-             * @description Benchmark-v5 token multiplier; null when token efficiency does not apply or was unavailable.
+             * @description Signed token multiplier (a neutral 1.0 under the bench v7+ quality-only contract); null when it was unavailable.
              */
             token_efficiency_multiplier?: number | null;
             /**
@@ -26435,7 +26435,8 @@ export interface components {
         };
         /**
          * PublicTokenEfficiency
-         * @description Auditable v5 relay-token waste penalty.
+         * @description Auditable relay-token decision: the v5 waste penalty, or the neutral
+         *     bench v7+ quality-only record that meters usage without scoring it.
          */
         PublicTokenEfficiency: {
             /** Adjusted Composite */
