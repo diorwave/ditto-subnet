@@ -30,6 +30,8 @@ import {
   screeningDisputeListSchema,
   screeningDisputeSchema,
   screeningQuarantineListSchema,
+  screeningReviewEventListSchema,
+  minerQuarantineSummarySchema,
   screeningQuarantineBatchExecuteInputSchema,
   screeningQuarantineBatchPreviewInputSchema,
   screeningArtifactSchema,
@@ -39,6 +41,7 @@ import {
   screenerReviewControlSchema,
   screenerReviewSettingsSchema,
   screenReviewAuditSchema,
+  screeningFailureDiagnosticSchema,
   applyScreenerReviewSettingsInputSchema,
   efficiencyBonusConfirmation,
   efficiencyBonusSettingsControlSchema,
@@ -541,7 +544,7 @@ describe('admin API schemas', () => {
           policy_version: 7,
           manifest_digest: 'manifest',
           finding_digest: 'finding',
-          reason_code: 'source_review_suspicious',
+          screening_reason_code: 'source_review_suspicious',
           status: 'active',
           created_at: '2026-07-14T12:00:00Z',
           resolved_at: null,
@@ -553,6 +556,95 @@ describe('admin API schemas', () => {
     })
     expect(result.items[0].policy_version).toBe(7)
     expect(result.items[0].agent_version).toBeNull()
+  })
+
+  it('coalesces the deprecated reason_code alias across a rolling deploy', () => {
+    // Platform and Backroom deploy in parallel from one release, so for one
+    // release the screening-origin code has two possible names on the wire:
+    // Platform-first sends only the old one, Backroom-first sees both. The
+    // console must read the code either way and must never see the alias as a
+    // second field it could mistake for the operator's ruling.
+    const quarantineItem = {
+      quarantine_id: 'e3bb1518-530f-42d7-a50b-b21ac9853798',
+      agent_id: '90cb5697-cbc1-40f4-a27e-439a7986a054',
+      attempt_id: '20236f60-c143-43b0-b03e-2cbe51f281d8',
+      miner_hotkey: '5Miner',
+      agent_name: 'memory-agent',
+      artifact_sha256: 'artifact',
+      policy_version: 7,
+      manifest_digest: 'manifest',
+      finding_digest: 'finding',
+      status: 'active',
+      created_at: '2026-07-14T12:00:00Z',
+      resolved_at: null,
+      resolved_by: null,
+      resolution: null,
+      resolution_reason: null,
+    }
+    const platformFirst = screeningQuarantineListSchema.parse({
+      count: 1,
+      items: [{ ...quarantineItem, reason_code: 'behavioral-oracle-passed' }],
+    }).items[0]
+    const backroomFirst = screeningQuarantineListSchema.parse({
+      count: 1,
+      items: [
+        {
+          ...quarantineItem,
+          screening_reason_code: 'behavioral-oracle-passed',
+          reason_code: 'stale-alias',
+        },
+      ],
+    }).items[0]
+
+    expect(platformFirst.screening_reason_code).toBe('behavioral-oracle-passed')
+    expect(backroomFirst.screening_reason_code).toBe('behavioral-oracle-passed')
+    expect('reason_code' in platformFirst).toBe(false)
+
+    expect(
+      screeningReviewEventListSchema.parse({
+        items: [
+          {
+            event_id: '5b1a5f6c-4a2f-4b4f-9d2c-1f0b2c3d4e5f',
+            agent_id: '90cb5697-cbc1-40f4-a27e-439a7986a054',
+            attempt_id: '20236f60-c143-43b0-b03e-2cbe51f281d8',
+            quarantine_id: null,
+            resolution_id: null,
+            previous_event_id: null,
+            event_kind: 'automated',
+            artifact_sha256: 'a'.repeat(64),
+            policy_version: 7,
+            actor: 'screener',
+            reviewer_model: null,
+            outcome: 'reject',
+            effective_decision: 'reject',
+            reason_code: 'behavioral-oracle-passed',
+            reason: null,
+            prior_agent_status: 'screening',
+            next_agent_status: 'screening_failed',
+            evidence: {},
+            created_at: '2026-07-14T12:00:00Z',
+          },
+        ],
+        count: 1,
+        limit: 50,
+        offset: 0,
+      }).items[0].screening_reason_code,
+    ).toBe('behavioral-oracle-passed')
+
+    expect(
+      minerQuarantineSummarySchema.parse({
+        quarantine_id: 'e3bb1518-530f-42d7-a50b-b21ac9853798',
+        agent_id: '90cb5697-cbc1-40f4-a27e-439a7986a054',
+        agent_name: 'memory-agent',
+        reason_code: 'behavioral-oracle-passed',
+        status: 'resolved',
+        resolution: 'reject',
+        resolution_reason: 'Static answer table confirmed',
+        resolution_reason_code: 'operator-rejected-quarantine',
+        created_at: '2026-07-14T12:00:00Z',
+        resolved_at: '2026-07-15T09:00:00Z',
+      }).screening_reason_code,
+    ).toBe('behavioral-oracle-passed')
   })
 
   it('requires an auditable quarantine resolution reason', () => {
@@ -1956,6 +2048,18 @@ describe('screener review settings schemas', () => {
     audit_retention_days: 30,
   }
 
+  it('accepts opt-in GPT-6 review stages', () => {
+    const parsed = screenerReviewSettingsSchema.parse({
+      ...settings,
+      l2_model: 'openai/gpt-6-sol',
+      source_review_model: 'openai/gpt-6-luna',
+      l3_model: 'openai/gpt-6-sol',
+    })
+    expect(parsed.l2_model).toBe('openai/gpt-6-sol')
+    expect(parsed.source_review_model).toBe('openai/gpt-6-luna')
+    expect(parsed.l3_model).toBe('openai/gpt-6-sol')
+  })
+
   it('parses current, history, and signed worker application status', () => {
     const parsed = screenerReviewControlSchema.parse({
       current: [],
@@ -2098,6 +2202,37 @@ describe('screen review audit schema', () => {
     expect(screenReviewAuditSchema.parse(audit)).toMatchObject(audit)
     expect(() => screenReviewAuditSchema.parse({ ...audit, max_steps: 257 })).toThrow()
     expect(() => screenReviewAuditSchema.parse({ ...audit, output_tokens_used: 1_000_001 })).toThrow()
+  })
+
+  it('preserves exact V13 preflight cause and budgets in Backroom diagnostics', () => {
+    const audit = {
+      stage: 'l2', reason_code: 'l2-runtime-evidence-unavailable', prompt_revision: 'l2-v13',
+      max_steps: 256, steps_used: 0,
+      max_input_tokens: 5_000_000, input_tokens_used: 0,
+      max_output_tokens: 1_000_000, output_tokens_used: 0,
+      max_cost_usd: 25, cost_usd_used: 0,
+      requested_model: 'openai/gpt-6-sol', response_provider: null,
+      final_stage: 'preflight', cause_detail: 'lease_unavailable',
+      max_elapsed_ms: 1_800_000, elapsed_ms: 0,
+    }
+    const diagnostic = screeningFailureDiagnosticSchema.parse({
+      agent_id: '4e35f415-2c3c-4a47-a32f-b62754537174',
+      artifact_sha256: 'a'.repeat(64),
+      agent_status: 'screening_failed',
+      attempt_id: '2e4a13f9-ff60-49c8-9a06-07b0684ba717',
+      policy_version: 13,
+      attempt_status: 'expired',
+      started_at: '2026-09-25T09:36:28Z',
+      deadline: '2026-09-25T09:53:54Z',
+      finished_at: '2026-09-25T09:45:19Z',
+      reason: 'Screening was inconclusive; manual retry required',
+      reason_code: 'behavioral-oracle-passed',
+      private_failure_detail: 'private policy audit inconclusive',
+      private_failure_log_tail: 'private policy audit inconclusive',
+      l2_review_diagnostic: audit,
+    })
+    expect(diagnostic.l2_review_diagnostic).toMatchObject(audit)
+    expect(JSON.stringify(diagnostic)).not.toContain('source_text')
   })
 })
 

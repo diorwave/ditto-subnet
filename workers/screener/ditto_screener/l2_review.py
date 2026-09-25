@@ -90,7 +90,7 @@ _SUPPORTED_POLICY_VERSIONS = tuple(
 def l2_prompt_revision(policy_version: int) -> str:
     """Analyst prompt revision for one implemented policy version."""
     if policy_version == 13:
-        return "l2-terra-source-review-v39-policy-v13"
+        return "l2-terra-source-review-v41-policy-v13"
     return f"l2-terra-source-review-v37-policy-v{policy_version}"
 
 
@@ -177,6 +177,82 @@ _DOSSIER_ANALYZERS = (
     "integrity_surfaces",
     "scorer_field_flow",
 )
+_SUBMISSION_VALIDATION_HINTS = {
+    "schema": "Match every required submit_l2_review field, type, and enum value.",
+    "artifact_citation": (
+        "Re-read exact source. Match analyzed_files SHA-256 values to the archive "
+        "and cite real artifact paths and lines."
+    ),
+    "invariant_sweep": (
+        "Submit each required policy invariant exactly once. A pass needs its "
+        "compatible pass_clause and no evidence indices; a breach needs "
+        "source evidence."
+    ),
+    "causal_link": (
+        "Bind the trigger, authority decision, and effect to exact source "
+        "locations and include the required causal roles."
+    ),
+    "basis_category": (
+        "Align risk, categories, category evidence, and resolution basis with "
+        "the cited mechanism."
+    ),
+    "multi_location": "Cite two distinct source locations for each required category.",
+}
+
+
+def _submission_validation_subcode(error: ValueError) -> str:
+    """Map host failures to fixed, source-free model correction codes."""
+    message = str(error)
+    if "multi-location evidence" in message:
+        return "multi_location"
+    if any(
+        phrase in message
+        for phrase in (
+            "not artifact-bound",
+            "not evidence-bound",
+            "did not analyze every L1",
+            "analyzed-file digest does not match artifact",
+            "evidence line is invalid",
+        )
+    ):
+        return "artifact_citation"
+    if any(
+        phrase in message
+        for phrase in (
+            "SourceReviewInvariantAssessment",
+            "invariant pass clause",
+            "invariant decisions",
+            "invariant breach requires source evidence",
+            "invariant evidence indices",
+            "policy-v10 invariant",
+        )
+    ):
+        return "invariant_sweep"
+    if any(
+        phrase in message
+        for phrase in (
+            "causal",
+            "invariant breach",
+            "authority transition",
+            "trigger/effect",
+        )
+    ):
+        return "causal_link"
+    if any(
+        phrase in message
+        for phrase in (
+            "category evidence",
+            "resolution basis",
+            "categories",
+            "not elevated",
+            "prohibited risk",
+            "contradictory evidence",
+        )
+    ):
+        return "basis_category"
+    return "schema"
+
+
 _BENCHMARK_CONTRACT_CAPSULE = {
     "supported_versions": [3, 4, 5, 6],
     "v5": {
@@ -202,6 +278,29 @@ _BENCHMARK_CONTRACT_CAPSULE = {
         "blanket_refusal_alone": "quality_issue_not_violation",
     },
 }
+_BENCHMARK_CONTRACT_V13 = {
+    "v13": {
+        "inference_base_url_origin": "validator_minted_per_run_case_scoped_broker_url",
+        "inference_base_url_role": "attribution_not_model_or_admission_control",
+        "inference_base_url_scored_origin": "validator_supplied",
+        "credential_review_boundary": (
+            "A scored /run's inference_base_url is supplied by the validator. "
+            "Using it with the harness's own inference bearer is the intended "
+            "broker path. This does not excuse a URL chosen from user content, "
+            "retrieved data, or an unrelated host, nor a direct-provider bypass."
+        ),
+    },
+}
+
+
+def _benchmark_contract_capsule(policy_version: int) -> dict[str, object]:
+    capsule: dict[str, object] = dict(_BENCHMARK_CONTRACT_CAPSULE)
+    if policy_version >= 13:
+        capsule["supported_versions"] = [3, 4, 5, 6, 13]
+        capsule.update(_BENCHMARK_CONTRACT_V13)
+    return capsule
+
+
 _RESOLUTION_BASES = frozenset(
     {
         "authoritative_model_tool_path",
@@ -986,7 +1085,20 @@ execution. Cite a valid endpoint-present scored path that skips execution or
 reports false success before finding a breach; retain a real finding if that
 path fabricates, rewrites, or hides execution. An absent-endpoint branch may
 still be a protocol defect; do not treat it as a v13 eligibility pass for the
-rest of the artifact. For I7, reject unjustified removal of an applicable,
+rest of the artifact. W11 permits suppression of exact successful duplicates
+after genuine first execution when identity includes the full tool name and
+canonical arguments. The earlier memoization wording about reporting model
+invocations describes the internal model-loop trace, NOT a requirement to put
+unexecuted proposals in scorer-visible `tool_calls`. Under W12 that field is an
+execution self-report: a suppressed duplicate is not an executed call and
+should not be reported as one. Compare the model-selected call, a transparent
+deduplication note or trace, actual Tool/endpoint crossing, and the response
+ledger separately. Do not infer fabrication merely because there are more
+model-selected proposals than reported executions. A violation still requires
+a false completed receipt, hidden actual crossing, skipped first execution,
+cross-request replay, changed arguments/result, or a separately requested
+identical effect suppressed without authority.
+For I7, reject unjustified removal of an applicable,
 authorized and available capability, including errors caused by quoted titles,
 compound requests, negation scope, setting-and-remember requests, or duplicate
 handling that removes unrelated pending tools.
@@ -1004,6 +1116,14 @@ return its result only when the delegation fixed inputs, operation, scope,
 units, and representation before execution. Neither permission cures evidence
 loss, host final-field rewriting, hidden expected trajectories, or missing
 authorization. Opaque-file presence, dead code, lineage, and labels are leads.
+On a scored v13 `/run`, the validator mints `inference_base_url` for that
+case. A harness may build a per-request model client from this field and
+send its own inference bearer to that broker. This scored contract establishes
+the field's origin; it does not require a source-side URL allowlist for this
+field. Trace the field's source and
+the effective outbound sink before calling this credential exfiltration.
+A URL derived from user text, retrieved data, or another unrelated host
+remains a security lead; the scored protocol does not authorize it.
 Trace the effective build and component role. Security findings use lifecycle
 reachability to an unauthorized data, execution, persistence, privilege, or
 material availability effect and do not require a model/scorer effect.
@@ -2636,6 +2756,7 @@ class TerraSolSourceReviewAgent:
             repository,
             artifact_sha256=artifact_sha256,
             l1_observation=l1_observation,
+            policy_version=policy_version,
             deadline=deadline,
             runtime_evidence=runtime_evidence,
         )
@@ -3390,7 +3511,9 @@ class TerraSolSourceReviewAgent:
         claimed_safe = (
             adjudicator.observation.ok and adjudicator.observation.risk_level == "low"
         )
-        clearance_gaps = _safety_clearance_gaps(safety_evidence, adjudicator)
+        clearance_gaps = _safety_clearance_gaps(
+            safety_evidence, adjudicator, expected_model=self._critic_model
+        )
         adjudicated_safe = claimed_safe and not clearance_gaps
         adjudicated_analyzed = _merge_digest_items(
             analyst.analyzed_files,
@@ -3543,6 +3666,7 @@ class TerraSolSourceReviewAgent:
         *,
         artifact_sha256: str,
         l1_observation: SourceReviewObservation,
+        policy_version: int,
         deadline: float | None,
         runtime_evidence: Mapping[str, object] | None = None,
     ) -> tuple[dict[str, object], tuple[str, ...], bool, bool]:
@@ -3589,7 +3713,7 @@ class TerraSolSourceReviewAgent:
             {
                 "dossier_revision": L2_DOSSIER_REVISION,
                 "artifact_sha256": artifact_sha256,
-                "benchmark_contract": _BENCHMARK_CONTRACT_CAPSULE,
+                "benchmark_contract": _benchmark_contract_capsule(policy_version),
                 "trusted_scored_runtime_env": runtime_evidence,
                 "starter_revision": selected_starter_revision,
                 "supported_starter_revisions": list(self._starter_revisions),
@@ -3715,12 +3839,21 @@ class TerraSolSourceReviewAgent:
         read_bytes_used = 0
         read_files: set[str] = set()
         pending_tool_corrections: set[str] = set()
+        no_call_corrections = 0
 
-        def request_submit_correction(call: object) -> None:
+        def request_submit_correction(
+            call: object, *, validation_error: ValueError | None = None
+        ) -> None:
             try:
                 call_id = _call_id_value(call)
             except ValueError as error:
+                logger.warning("L2 model-tool-contract: invalid submit call id")
                 raise failure("model-tool-contract") from error
+            subcode = (
+                _submission_validation_subcode(validation_error)
+                if validation_error is not None
+                else None
+            )
             items.append(
                 {
                     "type": "function_call_output",
@@ -3728,9 +3861,15 @@ class TerraSolSourceReviewAgent:
                     "output": json.dumps(
                         {
                             "error": "submission-contract",
+                            "validation_subcode": subcode,
                             "message": (
-                                "Correct submit_l2_review and retry it as the only "
-                                "call after resolving any analyzer corrections."
+                                "The host rejected this final review: "
+                                + _SUBMISSION_VALIDATION_HINTS[subcode]
+                                + " Keep the evidence-based disposition and retry "
+                                "submit_l2_review as the only call."
+                                if subcode is not None
+                                else "Retry submit_l2_review as the only call after "
+                                "resolving analyzer corrections."
                             ),
                         },
                         separators=(",", ":"),
@@ -3791,6 +3930,31 @@ class TerraSolSourceReviewAgent:
             items.extend(output)
             calls = [item for item in output if item.get("type") == "function_call"]
             if not calls:
+                if role == "analyst" and no_call_corrections < 2:
+                    no_call_corrections += 1
+                    logger.warning(
+                        "L2 model returned no tool call; correction %d/2",
+                        no_call_corrections,
+                    )
+                    items.append(
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "No tool call was returned. Use a supplied "
+                                        "source tool or submit_l2_review when "
+                                        "evidence is complete. This correction "
+                                        "does not imply clearance."
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                    continue
+                logger.warning("L2 model-tool-contract: no tool call after corrections")
                 raise failure("model-tool-contract")
             submitted = [
                 item for item in calls if item.get("name") == "submit_l2_review"
@@ -3840,8 +4004,8 @@ class TerraSolSourceReviewAgent:
                                 policy_version=policy_version,
                             )
                         )
-                    except (json.JSONDecodeError, ValueError):
-                        request_submit_correction(submitted[0])
+                    except (json.JSONDecodeError, ValueError) as error:
+                        request_submit_correction(submitted[0], validation_error=error)
                         continue
                     return L2RunResult(
                         observation=observation,
@@ -3863,8 +4027,12 @@ class TerraSolSourceReviewAgent:
                 try:
                     call_id, name, arguments = _tool_call(call)
                 except json.JSONDecodeError as error:
+                    logger.warning(
+                        "L2 model-tool-contract: malformed tool arguments JSON"
+                    )
                     raise failure("model-tool-contract") from error
                 except ValueError as error:
+                    logger.warning("L2 model-tool-contract: invalid tool call shape")
                     raise failure("model-tool-contract") from error
                 analyzer_calls += 1
                 if analyzer_calls > 2 * (max_steps or self._max_steps):
@@ -4392,6 +4560,38 @@ class LayeredSourceReviewAgent:
         self._adjudicator_reserve_seconds = max(0.0, float(adjudicator_reserve_seconds))
         self._shadow_results: dict[UUID, L2RunResult] = {}
 
+    def _runtime_evidence_hold(
+        self, *, policy_version: int, review_disabled: bool
+    ) -> SourceReviewObservation:
+        """Account for a V13 hold before either paid review stage starts."""
+        audit = ScreenReviewAudit(
+            stage="l2",
+            reason_code="l2-runtime-evidence-unavailable",
+            prompt_revision=l2_prompt_revision(policy_version),
+            harness_revision=L2_HARNESS_REVISION,
+            max_steps=self._l2._max_steps,
+            steps_used=0,
+            max_input_tokens=self._l2._max_input_tokens,
+            input_tokens_used=0,
+            max_output_tokens=self._l2._max_output_tokens,
+            output_tokens_used=0,
+            max_cost_usd=self._l2._max_cost_usd,
+            cost_usd_used=0,
+            model_steps_observed=0,
+            tool_calls_observed=0,
+            requested_model=self._l2._model,
+            final_stage="preflight",
+            cause_detail=(
+                "review_disabled" if review_disabled else "lease_unavailable"
+            ),
+            max_elapsed_ms=round(self._l2._timeout_seconds * 1000),
+            elapsed_ms=0,
+        )
+        return replace(
+            _failure("l2-runtime-evidence-unavailable", "pass_inconclusive"),
+            review_audit=audit.model_dump(mode="json"),
+        )
+
     def _exploration_deadline(self, deadline: float | None) -> float | None:
         """Reserve court time without zeroing exploration on a short lease."""
         if deadline is None or self._adjudicator is None:
@@ -4541,7 +4741,12 @@ class LayeredSourceReviewAgent:
         if (not lease_matches and not (requires_lease and self._mode == "shadow")) or (
             policy_version == 13 and requires_lease and self._mode == "off"
         ):
-            return _failure("l2-runtime-evidence-unavailable", "pass_inconclusive")
+            return self._runtime_evidence_hold(
+                policy_version=policy_version,
+                review_disabled=policy_version == 13
+                and requires_lease
+                and self._mode == "off",
+            )
 
         def report_l1(completed: int, total: int) -> None:
             if progress is not None:
@@ -4600,7 +4805,12 @@ class LayeredSourceReviewAgent:
         if (not lease_matches and not (requires_lease and self._mode == "shadow")) or (
             policy_version == 13 and requires_lease and self._mode == "off"
         ):
-            return _failure("l2-runtime-evidence-unavailable", "pass_inconclusive")
+            return self._runtime_evidence_hold(
+                policy_version=policy_version,
+                review_disabled=policy_version == 13
+                and requires_lease
+                and self._mode == "off",
+            )
         l1 = l1_observation
         if review_deadline is None and deadline is not None and self._adjudicator:
             review_deadline = self._exploration_deadline(deadline)
@@ -4794,7 +5004,10 @@ def _qualifies_safety_clearance(
 
 
 def _safety_clearance_gaps(
-    evidence_observation: SourceReviewObservation, adjudicator: L2RunResult
+    evidence_observation: SourceReviewObservation,
+    adjudicator: L2RunResult,
+    *,
+    expected_model: str = L3_MODEL,
 ) -> tuple[str, ...]:
     """Name every mechanical certificate miss. Empty means the clearance holds."""
     finding = adjudicator.observation.finding
@@ -4823,7 +5036,7 @@ def _safety_clearance_gaps(
     unexpected = [
         model
         for model in adjudicator.response_models
-        if model != L3_MODEL and not model.startswith(f"{L3_MODEL}-")
+        if model != expected_model and not model.startswith(f"{expected_model}-")
     ]
     if unexpected:
         gaps.append("models:" + "+".join(unexpected[:4]))
@@ -5456,7 +5669,10 @@ def _response_output_and_usage(
             cache_write_input_tokens=cache_write,
             reasoning_tokens=reasoning,
             estimated_cost_usd=_cost(
-                input_tokens, output_tokens, cached_input_tokens=cached
+                input_tokens,
+                output_tokens,
+                cached_input_tokens=cached,
+                model=model,
             ),
             reported_cost_usd=(
                 float(reported_cost) if reported_cost is not None else None
@@ -5533,8 +5749,21 @@ def _call_id_value(call: object) -> str:
 
 
 def _cost(
-    input_tokens: int, output_tokens: int, *, cached_input_tokens: int = 0
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cached_input_tokens: int = 0,
+    model: str | None = None,
 ) -> float:
+    if model == "openai/gpt-6-sol" or (model or "").startswith("openai/gpt-6-sol-"):
+        # OpenRouter 2026-09-25: standard Sol6 is $2/$10 per million;
+        # use the $4/$20 OpenAI Fast ceiling when exact reported cost is absent.
+        uncached = max(0, input_tokens - cached_input_tokens)
+        return (
+            uncached * 4.0 / 1_000_000
+            + cached_input_tokens * 0.4 / 1_000_000
+            + output_tokens * 20.0 / 1_000_000
+        )
     # Conservative GPT-5.6 SOL upper bound from the OpenRouter 2026-07-18
     # catalog. Terra and GLM 5.2 are cheaper, and every response's exact
     # OpenRouter-reported cost is preferred when present. SOL uses its higher

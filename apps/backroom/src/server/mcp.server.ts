@@ -320,6 +320,8 @@ export type McpGrantProps = {
    * listed (and revocable) on the Agent access page.
    */
   grant?: { id: string; clientId: string }
+  /** Absolute expiry of this access token. Absent on tokens issued before it. */
+  accessExpiresAt?: string
 }
 
 /**
@@ -935,6 +937,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         grant: props.grant ?? null,
         scopes: effectiveScopes(props),
         grantedScopes: props.scopes,
+        expires_at: props.accessExpiresAt ?? null,
         accessLevel: hasWriteAccess(props)
           ? hasArtifactAccess(props)
             ? 'full'
@@ -965,7 +968,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'List screening quarantines',
       description:
-        'Page active, resolved, or all SN118 screening quarantines. Defaults newest first by created_at then quarantine_id; pass sort=oldest for chronology. detail=summary (default) returns evidence counts/codes and finding summaries; detail=full returns every screener and source-review evidence row. Use exact context before decisions. The review queue remains oldest first for fairness.',
+        'Page active, resolved, or all SN118 screening quarantines. Defaults newest first by created_at then quarantine_id; pass sort=oldest for chronology. detail=summary (default) returns evidence counts/codes and finding summaries; detail=full returns every screener and source-review evidence row. Use exact context before decisions. The review queue remains oldest first for fairness. Every row carries two codes that are never interchangeable: screening_reason_code is why the screener held the submission and is preserved across the resolution, and resolution_reason_code derives from resolution and names the operator ruling. Read screening_reason_code as the lead the operator ruled on, never as the ruling itself or as the miner\'s final outcome.',
       inputSchema: {
         status: z.enum(['active', 'resolved', 'all']).default('active'),
         sort: z.enum(['oldest', 'newest']).default('newest'),
@@ -992,7 +995,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'List screening review events',
       description:
-        'Read immutable automated source-review results and manual quarantine rulings. The event records the exact attempt, artifact SHA, governing policy version, reviewer model or operator, evidence digests and receipts available at the decision, and before/after state. Receipt presence never establishes a policy PASS.',
+        'Read immutable automated source-review results and manual quarantine rulings. The event records the exact attempt, artifact SHA, governing policy version, reviewer model or operator, evidence digests and receipts available at the decision, and before/after state. Receipt presence never establishes a policy PASS. Each event carries two codes: screening_reason_code is the screening-origin code snapshotted verbatim (on a manual event, the code of the quarantine that was ruled on), and resolution_reason_code is the operator\'s own basis, non-null only on a manual event, because an automated reject is the screener\'s verdict and never an operator ruling.',
       inputSchema: {
         agentId: z.string().uuid().optional(),
         limit: z.number().int().min(1).max(20).default(10),
