@@ -13,6 +13,10 @@ import tarfile
 
 import pytest
 
+from ditto.api_server.source_diff import (
+    build_source_diff_manifest,
+    unified_diff_for_file,
+)
 from ditto.api_server.source_inspect import (
     OMIT_REASON_BYTE_BUDGET,
     OMIT_REASON_FILE_LIMIT,
@@ -178,3 +182,62 @@ def test_default_budget_is_the_text_size_limit() -> None:
     assert snapshot.omitted == (
         OmittedTextFile("big.txt", half + 10, OMIT_REASON_BYTE_BUDGET),
     )
+
+
+# A tar may repeat a path. Only the LAST entry survives extraction, so every
+# reader must bind to that exact entry. The bodies below have EQUAL size but
+# different content, which defeats any name + size match.
+_SHADOWED = b"fn run() { honest(); }\n"
+_EXTRACTED = b"fn run() { cheats(); }\n"
+assert len(_SHADOWED) == len(_EXTRACTED)
+
+
+def _extracted_bytes(tar_bytes: bytes, path: str, tmp_path) -> bytes:
+    """What extraction actually leaves on disk for ``path``."""
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as archive:
+        archive.extractall(tmp_path, filter="data")
+    return (tmp_path / path).read_bytes()
+
+
+@pytest.mark.parametrize(
+    "first_name",
+    ["src/code.rs", "./src/code.rs"],
+    ids=["same-spelling", "dot-prefixed"],
+)
+def test_duplicate_path_of_equal_size_binds_every_reader_to_the_extracted_entry(
+    first_name: str, tmp_path
+) -> None:
+    tar_bytes = _tarball([(first_name, _SHADOWED), ("src/code.rs", _EXTRACTED)])
+    assert _extracted_bytes(tar_bytes, "src/code.rs", tmp_path) == _EXTRACTED
+    inspector = TarSourceInspector(tar_bytes)
+    expected = _EXTRACTED.decode()
+
+    assert inspector.read_text_snapshot().texts == {"src/code.rs": expected}
+    assert inspector.read_full_text("src/code.rs") == expected
+    assert inspector.read("src/code.rs", 1, 1)["lines"] == [
+        {"line": 1, "text": expected.rstrip("\n")}
+    ]
+    assert inspector.search("cheats")["match_count"] == 1
+    # The shadowed body is never read, so it cannot contribute search hits.
+    assert inspector.search("honest")["match_count"] == 0
+
+
+def test_duplicate_path_manifest_and_file_diff_agree_with_extraction() -> None:
+    # The reference matches the SHADOWED body; the code that actually ships is
+    # the later entry. Binding to the wrong entry would make the manifest call
+    # the file unchanged and hide the change from a source review.
+    reference = {"src/code.rs": _SHADOWED.decode()}
+    candidate_inspector = TarSourceInspector(
+        _tarball([("src/code.rs", _SHADOWED), ("src/code.rs", _EXTRACTED)])
+    )
+    candidate = candidate_inspector.read_text_snapshot().texts
+
+    manifest = build_source_diff_manifest(candidate, reference)
+    (row,) = manifest["files"]
+    assert row["path"] == "src/code.rs"
+    assert row["status"] == "modified"
+
+    diff = unified_diff_for_file("src/code.rs", candidate, reference)
+    assert diff["identical"] is False
+    assert "+fn run() { cheats(); }" in diff["diff_lines"]
+    assert candidate["src/code.rs"] == candidate_inspector.read_full_text("src/code.rs")

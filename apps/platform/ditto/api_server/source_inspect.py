@@ -62,6 +62,11 @@ class _Member:
     archive_name: str
     size: int
     is_text: bool
+    # Zero-based position of this entry among ALL archive members, in stream
+    # order. A tar may repeat a path (or spell it ``./x`` and ``x``); only the
+    # last entry survives extraction, and every reader binds to this exact
+    # position so the manifest, search, excerpt and extracted bytes agree.
+    index: int
 
 
 # Why :meth:`TarSourceInspector.read_text_snapshot` left a text member out.
@@ -104,6 +109,13 @@ def _safe_name(member: tarfile.TarInfo) -> str | None:
     ):
         return None
     return normalized
+
+
+def _is_inventoried_entry(member: tarfile.TarInfo, info: _Member) -> bool:
+    """Whether the entry at ``info.index`` is still the one that was inventoried."""
+    return (
+        member.isreg() and member.name == info.archive_name and member.size == info.size
+    )
 
 
 def _compile_search(pattern: str, mode: str, ignore_case: bool) -> re.Pattern[str]:
@@ -179,6 +191,7 @@ class TarSourceInspector:
                             member.name,
                             member.size,
                             self._member_is_text(archive, member),
+                            count - 1,
                         )
                     )
         except SourceInspectError:
@@ -187,6 +200,8 @@ class TarSourceInspector:
             raise SourceInspectError(
                 "artifact-unreadable", f"artifact is not a readable tarball: {error}"
             ) from error
+        # Last entry wins per normalized path, matching extraction: a later
+        # member with the same path overwrites the earlier one on disk.
         self._members = {member.name: member for member in members}
 
     @staticmethod
@@ -263,7 +278,7 @@ class TarSourceInspector:
         own) are never text candidates; :meth:`listing` reports them.
         """
         budget = TEXT_SIZE_LIMIT if max_total_bytes is None else max_total_bytes
-        wanted: dict[str, _Member] = {}
+        wanted: dict[int, _Member] = {}
         omitted: list[OmittedTextFile] = []
         total = 0
         for candidate in sorted(
@@ -276,7 +291,7 @@ class TarSourceInspector:
                 reason = OMIT_REASON_BYTE_BUDGET
             else:
                 total += candidate.size
-                wanted[candidate.archive_name] = candidate
+                wanted[candidate.index] = candidate
                 continue
             omitted.append(OmittedTextFile(candidate.name, candidate.size, reason))
         out: dict[str, str] = {}
@@ -284,13 +299,22 @@ class TarSourceInspector:
             with tarfile.open(
                 fileobj=io.BytesIO(self._tar_bytes), mode="r|gz"
             ) as archive:
-                for member in archive:
-                    info = wanted.get(member.name)
-                    # A name repeated in a hostile archive only loads the entry
-                    # that was sized (and budgeted) above, and only once.
-                    if info is None or member.size != info.size:
+                for position, member in enumerate(archive):
+                    # Bind to the exact inventoried entry by position. Matching
+                    # on name (even name + size) would load an EARLIER entry
+                    # that a later same-named one overwrites on extraction.
+                    info = wanted.pop(position, None)
+                    if info is None:
                         continue
-                    del wanted[member.name]
+                    if not _is_inventoried_entry(member, info):
+                        omitted.append(
+                            OmittedTextFile(
+                                info.name, info.size, OMIT_REASON_UNREADABLE
+                            )
+                        )
+                        if not wanted:
+                            break
+                        continue
                     text = self._decode_member(archive, member)
                     if text is None:
                         omitted.append(
@@ -374,7 +398,7 @@ class TarSourceInspector:
         """
         matcher = _compile_search(pattern, mode, ignore_case)
         wanted = {
-            member.archive_name: member
+            member.index: member
             for member in self._members.values()
             if member.is_text and _path_selected(member.name, path_glob)
         }
@@ -389,9 +413,11 @@ class TarSourceInspector:
             with tarfile.open(
                 fileobj=io.BytesIO(self._tar_bytes), mode="r|gz"
             ) as archive:
-                for member in archive:
-                    info = wanted.get(member.name)
-                    if info is None:
+                for position, member in enumerate(archive):
+                    # Search only the entry extraction keeps, by position, so
+                    # a shadowed earlier copy can never contribute hits.
+                    info = wanted.get(position)
+                    if info is None or not _is_inventoried_entry(member, info):
                         continue
                     extracted = archive.extractfile(member)
                     if extracted is None:
@@ -474,7 +500,17 @@ class TarSourceInspector:
         # One targeted decompression per excerpt request; the constructor
         # already proved the member is bounded UTF-8 text.
         with tarfile.open(fileobj=io.BytesIO(self._tar_bytes), mode="r:gz") as archive:
-            member = archive.getmember(member_info.archive_name)
+            # getmember(name) returns the LAST entry with that exact spelling,
+            # which can differ from the inventoried one when a path is also
+            # stored as ``./name``; resolve the same position every reader uses.
+            members = archive.getmembers()
+            member = (
+                members[member_info.index] if member_info.index < len(members) else None
+            )
+            if member is None or not _is_inventoried_entry(member, member_info):
+                raise SourceInspectError(
+                    "file-not-found", f"no file at {member_info.name!r}"
+                )
             extracted = archive.extractfile(member)
             if extracted is None:
                 raise SourceInspectError(
