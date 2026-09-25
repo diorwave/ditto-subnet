@@ -738,7 +738,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_source_review_queue_slo:
     'Read ordinary source-review queue age, throughput, and reconciliation ghosts.',
   get_outlier_escalation:
-    'Read anomalous-score ATH escalation mode, each env value\'s source, and audit-chain holds.',
+    'Read outlier escalation mode, each setting\'s env source, and audit-chain holds.',
   get_inference_failure_taxonomy:
     'Group recent chat and embedding outcomes by model, lane, gateway, upstream route, and error code. route_basis says how much of a route is known; an unknown route never names one.',
   start_runtime_profile:
