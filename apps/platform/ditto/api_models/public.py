@@ -3389,6 +3389,9 @@ class PublicScreeningAttempt(BaseModel):
     review_notes: list[PublicScreeningReviewNote] = Field(default_factory=list)
 
 
+PublicAdmissionLane = Literal["build", "runtime_smoke", "source_review"]
+
+
 class PublicAdmissionRetry(BaseModel):
     """Live admission state for a submission still in build & admission.
 
@@ -3401,6 +3404,11 @@ class PublicAdmissionRetry(BaseModel):
     infrastructure failure is retried automatically with backoff, no earlier than
     that time. After too many consecutive failures, or a long park, it reports
     ``stuck`` and needs a guarded retry like any other.
+
+    ``lane`` names the admission lane (image build, runtime smoke, or source
+    review) the latest attempt is in or stopped in, and is null whenever
+    Platform holds no evidence for it (no attempt yet, a worker-local lane, or
+    a failure that names no lane).
     """
 
     state: Literal["queued", "running", "parked", "stuck", "retry_queued"]
@@ -3410,6 +3418,7 @@ class PublicAdmissionRetry(BaseModel):
     # infrastructure retry reports the earliest time it may start.
     next_retry_at: datetime | None = None
     last_failure_infrastructure: bool = False
+    lane: PublicAdmissionLane | None = None
 
 
 class PublicOrdinaryReview(BaseModel):

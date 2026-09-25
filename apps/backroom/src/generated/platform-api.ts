@@ -22703,10 +22703,17 @@ export interface components {
          *     infrastructure failure is retried automatically with backoff, no earlier than
          *     that time. After too many consecutive failures, or a long park, it reports
          *     ``stuck`` and needs a guarded retry like any other.
+         *
+         *     ``lane`` names the admission lane (image build, runtime smoke, or source
+         *     review) the latest attempt is in or stopped in, and is null whenever
+         *     Platform holds no evidence for it (no attempt yet, a worker-local lane, or
+         *     a failure that names no lane).
          */
         PublicAdmissionRetry: {
             /** Attempt Count */
             attempt_count: number;
+            /** Lane */
+            lane?: ("build" | "runtime_smoke" | "source_review") | null;
             /**
              * Last Failure Infrastructure
              * @default false
