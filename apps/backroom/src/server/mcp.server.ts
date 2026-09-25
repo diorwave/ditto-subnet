@@ -95,6 +95,7 @@ import {
   supersedeCodingCatalogInputSchema,
   agentCodingShadowEvaluationInputSchema,
   agentCoreQualificationInputSchema,
+  claimProvenanceCasesInputSchema,
   getCoreQualificationPolicyInputSchema,
   refreshAgentCoreQualificationInputSchema,
   setCoreQualificationPolicyMcpInputSchema,
@@ -245,6 +246,7 @@ import {
   fetchInferenceRuntimeMetrics,
   fetchSourceReviewQueueSlo,
   fetchOutlierEscalation,
+  fetchClaimProvenanceCases,
   fetchInferenceFailureTaxonomy,
   fetchInferenceTraceObjects,
   createInferenceTraceDownloadUrl,
@@ -737,6 +739,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read inference load and relay health.',
   get_source_review_queue_slo:
     'Read ordinary source-review queue age, throughput, and reconciliation ghosts.',
+  get_claim_provenance_cases:
+    'Explain flagged v13 claim-provenance cases for an exact agent, artifact SHA and run.',
   get_outlier_escalation:
     'Read outlier escalation mode, each setting\'s env source, and audit-chain holds.',
   get_inference_failure_taxonomy:
@@ -3012,6 +3016,20 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('read'),
     },
     async () => result(await fetchSourceReviewQueueSlo()),
+  )
+
+  registerTool(
+    'get_claim_provenance_cases',
+    {
+      title: 'Explain v13 claim-provenance cases',
+      description:
+        'Operator-only per-case view behind a bench v13+ run\'s claim-provenance aggregate (issue #1852), before an exact-artifact ruling. Every key is exact: agentId, artifactSha256 (must equal the agent\'s artifact, else 409) and runId (an accepted score\'s run_id, from get_agent_scores); caseId narrows to one case, finding to one closed-vocabulary gate (e.g. served_text_not_model_emitted, answer_in_prompt, claim_not_applicable). The default set is exactly the stored flagged set (would zero under enforce, or cost-discounted), so matched_cases equals the public flagged_case_count; includeUnflagged returns every case. ' +
+        'Each case shows the persisted claim_provenance record (posture, findings, completions, unattributed_calls, tool_results, claim_tokens count, complete, model_emitted, answer_in_prompt), the catalog record with per-completion relay metadata (attribution_source, claim_corroborated, digests; no text), relation, twin_group, cost_factor, the scorer\'s own notes, and gate_notes whose note_id is the id an owner dispute cites. ' +
+        'not_persisted names what the scorer computes but does not store (credited response field, per-token claim comparison, completion ids, normalization trace): their absence is not evidence either way. Never returns the answer key, prompts, user records, tool results or completion text. Read-only. Requires backroom:read.',
+      inputSchema: claimProvenanceCasesInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchClaimProvenanceCases(input)),
   )
 
   registerTool(

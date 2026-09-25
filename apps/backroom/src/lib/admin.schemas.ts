@@ -9044,3 +9044,124 @@ export const outlierEscalationInputSchema = z.object({
 })
 
 export type OutlierEscalation = z.infer<typeof outlierEscalationSchema>
+
+// Operator-only per-case v13 claim provenance (issue #1852): the persisted
+// per-case record behind a run's shadow claim-provenance aggregate, keyed by
+// exact agent, artifact SHA-256 and accepted run. Verdicts, counts and
+// digests only; never the answer key, prompts, records or completion text.
+type GeneratedAdminClaimProvenanceCases =
+  PlatformComponents['schemas']['AdminClaimProvenanceCases']
+type GeneratedClaimProvenanceCase = PlatformComponents['schemas']['ClaimProvenanceCase']
+type GeneratedCaseGateNote = PlatformComponents['schemas']['CaseGateNote']
+type GeneratedCaseClaimProvenance = PlatformComponents['schemas']['CaseClaimProvenance']
+type GeneratedCaseCatalog = PlatformComponents['schemas']['CaseCatalog']
+type GeneratedCaseCatalogCompletion =
+  PlatformComponents['schemas']['CaseCatalogCompletion']
+
+const caseGateNoteSchema = z.object({
+  gate: z.string(),
+  zeroing: z.boolean(),
+  note_id: z.string(),
+} satisfies PlatformResponseShape<GeneratedCaseGateNote>)
+
+const caseClaimProvenanceSchema = z.object({
+  posture: z.string(),
+  findings: z.array(z.string()).default([]),
+  completions: z.number().int().nonnegative().nullish(),
+  unattributed_calls: z.number().int().nonnegative().default(0),
+  tool_results: z.number().int().nonnegative().default(0),
+  claim_tokens: z.number().int().nonnegative().default(0),
+  complete: z.boolean().default(false),
+  model_emitted: z.boolean().nullish(),
+  answer_in_prompt: z.boolean().nullish(),
+} satisfies PlatformResponseShape<GeneratedCaseClaimProvenance>)
+
+const caseCatalogCompletionSchema = z.object({
+  attribution_source: z.string().default(''),
+  claim_corroborated: z.boolean().default(false),
+  after_last_tool_result: z.boolean().default(false),
+  tool_choice: z.string().default(''),
+  tools_offered: z.number().int().nonnegative().default(0),
+  tools_choosable: z.number().int().nonnegative().default(0),
+  model_emitted_tool_calls: z.array(z.string()).default([]),
+  catalog_sha256: z.string().default(''),
+  system_span_sha256: z.string().default(''),
+} satisfies PlatformResponseShape<GeneratedCaseCatalogCompletion>)
+
+const caseCatalogSchema = z.object({
+  catalog_present: z.boolean().default(false),
+  catalog_present_lower_bound: z.boolean().default(false),
+  tools_offered: z.number().int().nonnegative().default(0),
+  completions_total: z.number().int().nonnegative().nullish(),
+  completions_with_catalog: z.number().int().nonnegative().default(0),
+  claim_attributed_completions: z.number().int().nonnegative().default(0),
+  claim_corroborated_completions: z.number().int().nonnegative().default(0),
+  complete: z.boolean().default(false),
+  findings: z.array(z.string()).default([]),
+  completions: z.array(caseCatalogCompletionSchema).max(32).default([]),
+  completions_truncated: z.boolean().default(false),
+} satisfies PlatformResponseShape<GeneratedCaseCatalog>)
+
+const claimProvenanceCaseSchema = z.object({
+  case_index: z.number().int().nonnegative(),
+  case_id: z.string(),
+  category: z.string(),
+  kind: z.string(),
+  score: z.number(),
+  correct: z.boolean(),
+  gate_notes: z.array(caseGateNoteSchema).default([]),
+  claim_provenance: caseClaimProvenanceSchema.nullish(),
+  catalog: caseCatalogSchema.nullish(),
+  relation: z.string().nullish(),
+  twin_group: z.string().nullish(),
+  cost_factor: z.number().nullish(),
+  scorer_notes: z.array(z.string()).max(8).default([]),
+} satisfies PlatformResponseShape<GeneratedClaimProvenanceCase>)
+
+export const claimProvenanceCasesSchema = z.object({
+  agent_id: z.string().uuid(),
+  artifact_sha256: z.string(),
+  agent_status: z.string(),
+  validator_hotkey: z.string(),
+  run_id: z.string(),
+  bench_version: z.number().int().min(13),
+  composite: z.number(),
+  generated_at: z.string(),
+  posture: gatePostureSchema.nullish(),
+  claim_provenance: claimProvenanceSummarySchema.nullish(),
+  case_id: z.string().nullish(),
+  finding: z.string().nullish(),
+  include_unflagged: z.boolean().default(false),
+  per_case_available: z.boolean(),
+  total_cases: z.number().int().nonnegative(),
+  matched_cases: z.number().int().nonnegative(),
+  malformed_cases: z.number().int().nonnegative().default(0),
+  limit: z.number().int().min(1).max(100),
+  truncated: z.boolean(),
+  cases: z.array(claimProvenanceCaseSchema).max(100).default([]),
+  not_persisted: z
+    .array(
+      z.enum([
+        'credited_response_field',
+        'claim_token_comparison',
+        'attributed_completion_ids',
+        'normalization_explanation',
+      ]),
+    )
+    .default([]),
+  not_persisted_reason: z.string().default(''),
+} satisfies PlatformResponseShape<GeneratedAdminClaimProvenanceCases>)
+
+export const claimProvenanceCasesInputSchema = z.object({
+  agentId: z.string().uuid(),
+  artifactSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/, 'artifactSha256 must be 64 lowercase hex characters'),
+  runId: z.string().min(1).max(200),
+  caseId: z.string().min(1).max(200).optional(),
+  finding: z.string().min(1).max(64).optional(),
+  includeUnflagged: z.boolean().default(false),
+  limit: z.number().int().min(1).max(100).default(50),
+})
+
+export type ClaimProvenanceCases = z.infer<typeof claimProvenanceCasesSchema>

@@ -35,6 +35,22 @@ flags older ones), and the count of pending outlier ATH reviews. The tool is
 read-only. It is not `/admin/score-outliers`, which covers validator
 disagreement inside one quorum.
 
+`get_claim_provenance_cases` explains the bench v13+ claim-provenance
+aggregate on one accepted score, case by case, through
+`GET /api/v1/admin/agents/{agent_id}/claim-provenance`. Every key is exact: the
+agent, its artifact SHA-256 (a different artifact returns 409), and the run id
+from `get_agent_scores`. `caseId` narrows the read to one case and `finding` to
+one closed-vocabulary gate. The default set is the stored flagged set, so
+`matched_cases` equals the public `flagged_case_count`. Each case returns the
+persisted `claim_provenance` record (verdicts and counts), the catalog record
+with per-completion relay metadata (digests, no text), the relation, twin group
+and cost factor, the scorer's own notes, and gate notes whose `note_id` is what
+an owner dispute cites. `not_persisted` names the fields the scorer computes
+but does not store: the credited response field, the per-token claim
+comparison, completion ids and the normalization trace. Their absence is not
+evidence either way. The tool never returns the answer key, prompts, user
+records, tool results or completion text.
+
 `https://backroom.dittobench.ai/mcp` is an OAuth-protected Streamable HTTP MCP
 server exposing the same operations as the console: screening quarantines and
 disputes, validator queue/slot/inference policy, benchmark rollouts, scoring

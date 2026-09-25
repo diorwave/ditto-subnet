@@ -106,6 +106,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/agents/{agent_id}/claim-provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Claim Provenance Cases */
+        get: operations["get_claim_provenance_cases_api_v1_admin_agents__agent_id__claim_provenance_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/agents/{agent_id}/coding-certifications": {
         parameters: {
             query?: never;
@@ -8675,6 +8692,75 @@ export interface components {
             /** History */
             history: components["schemas"]["BurnSettingsRevision"][];
         };
+        /**
+         * AdminClaimProvenanceCases
+         * @description Per-case claim provenance for one exact agent, artifact and accepted run.
+         */
+        AdminClaimProvenanceCases: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Agent Status */
+            agent_status: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Bench Version */
+            bench_version: number;
+            /** Case Id */
+            case_id?: string | null;
+            /** Cases */
+            cases?: components["schemas"]["ClaimProvenanceCase"][];
+            /** @description The run-level aggregate this per-case view explains. */
+            claim_provenance?: components["schemas"]["ClaimProvenanceSummary"] | null;
+            /** Composite */
+            composite: number;
+            /** Finding */
+            finding?: string | null;
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /**
+             * Include Unflagged
+             * @default false
+             */
+            include_unflagged: boolean;
+            /** Limit */
+            limit: number;
+            /**
+             * Malformed Cases
+             * @description Stored cases that no longer parse; skipped.
+             * @default 0
+             */
+            malformed_cases: number;
+            /** Matched Cases */
+            matched_cases: number;
+            /** Not Persisted */
+            not_persisted?: ("credited_response_field" | "claim_token_comparison" | "attributed_completion_ids" | "normalization_explanation")[];
+            /**
+             * Not Persisted Reason
+             * @default The scorer computes the credited span/field and the per-token claim comparison while grading, but its ClaimProvenanceEvidence wire record carries only verdicts and counts, the claim-span ledger keeps no per-completion identifiers, and no normalization trace is recorded. Showing them needs a scorer and wire change; their absence here is not evidence either way.
+             */
+            not_persisted_reason: string;
+            /**
+             * Per Case Available
+             * @description False when the accepted row stored no per-case breakdown.
+             */
+            per_case_available: boolean;
+            /** Posture */
+            posture?: ("off" | "shadow" | "observe" | "enforce") | null;
+            /** Run Id */
+            run_id: string;
+            /** Total Cases */
+            total_cases: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Validator Hotkey */
+            validator_hotkey: string;
+        };
         /** AdminCodingCatalogResponse */
         AdminCodingCatalogResponse: {
             /** Releases */
@@ -14020,6 +14106,171 @@ export interface components {
             settings: components["schemas"]["BurnSettings"];
         };
         /**
+         * CaseCatalog
+         * @description The persisted per-case ``catalog`` record, bounded.
+         */
+        CaseCatalog: {
+            /**
+             * Catalog Present
+             * @default false
+             */
+            catalog_present: boolean;
+            /**
+             * Catalog Present Lower Bound
+             * @default false
+             */
+            catalog_present_lower_bound: boolean;
+            /**
+             * Claim Attributed Completions
+             * @default 0
+             */
+            claim_attributed_completions: number;
+            /**
+             * Claim Corroborated Completions
+             * @default 0
+             */
+            claim_corroborated_completions: number;
+            /**
+             * Complete
+             * @default false
+             */
+            complete: boolean;
+            /** Completions */
+            completions?: components["schemas"]["CaseCatalogCompletion"][];
+            /** Completions Total */
+            completions_total?: number | null;
+            /**
+             * Completions Truncated
+             * @default false
+             */
+            completions_truncated: boolean;
+            /**
+             * Completions With Catalog
+             * @default 0
+             */
+            completions_with_catalog: number;
+            /** Findings */
+            findings?: string[];
+            /**
+             * Tools Offered
+             * @default 0
+             */
+            tools_offered: number;
+        };
+        /**
+         * CaseCatalogCompletion
+         * @description Relay metadata for one attributed completion (digests, no text).
+         */
+        CaseCatalogCompletion: {
+            /**
+             * After Last Tool Result
+             * @default false
+             */
+            after_last_tool_result: boolean;
+            /**
+             * Attribution Source
+             * @default
+             */
+            attribution_source: string;
+            /**
+             * Catalog Sha256
+             * @default
+             */
+            catalog_sha256: string;
+            /**
+             * Claim Corroborated
+             * @default false
+             */
+            claim_corroborated: boolean;
+            /** Model Emitted Tool Calls */
+            model_emitted_tool_calls?: string[];
+            /**
+             * System Span Sha256
+             * @default
+             */
+            system_span_sha256: string;
+            /**
+             * Tool Choice
+             * @default
+             */
+            tool_choice: string;
+            /**
+             * Tools Choosable
+             * @default 0
+             */
+            tools_choosable: number;
+            /**
+             * Tools Offered
+             * @default 0
+             */
+            tools_offered: number;
+        };
+        /**
+         * CaseClaimProvenance
+         * @description The persisted per-case ``claim_provenance`` record.
+         */
+        CaseClaimProvenance: {
+            /**
+             * Answer In Prompt
+             * @description Claim tokens already present in harness-sent input.
+             */
+            answer_in_prompt?: boolean | null;
+            /**
+             * Claim Tokens
+             * @description Tokens in the credited claim span (count only).
+             * @default 0
+             */
+            claim_tokens: number;
+            /**
+             * Complete
+             * @description Whether the case's completion attribution was complete.
+             * @default false
+             */
+            complete: boolean;
+            /**
+             * Completions
+             * @description Model completions attributed to the case; null if unknown.
+             */
+            completions?: number | null;
+            /** Findings */
+            findings?: string[];
+            /**
+             * Model Emitted
+             * @description Claim tokens found in a model completion; null if unsettled.
+             */
+            model_emitted?: boolean | null;
+            /** Posture */
+            posture: string;
+            /**
+             * Tool Results
+             * @default 0
+             */
+            tool_results: number;
+            /**
+             * Unattributed Calls
+             * @default 0
+             */
+            unattributed_calls: number;
+        };
+        /**
+         * CaseGateNote
+         * @description One closed-vocabulary finding on the case, with its dispute id.
+         */
+        CaseGateNote: {
+            /** Gate */
+            gate: string;
+            /**
+             * Note Id
+             * @description The id an owner dispute cites for this note (same derivation as the miner gate-notes read).
+             */
+            note_id: string;
+            /**
+             * Zeroing
+             * @description Whether this finding zeroes the case under enforce.
+             */
+            zeroing: boolean;
+        };
+        /**
          * CaseScore
          * @description Per-case breakdown inside a :class:`ScoreReport`.
          *
@@ -14382,6 +14633,42 @@ export interface components {
              * @default 0
              */
             std_err: number;
+        };
+        /**
+         * ClaimProvenanceCase
+         * @description One case's persisted gate evidence, as an operator reads it.
+         */
+        ClaimProvenanceCase: {
+            /** Case Id */
+            case_id: string;
+            /** Case Index */
+            case_index: number;
+            catalog?: components["schemas"]["CaseCatalog"] | null;
+            /** Category */
+            category: string;
+            claim_provenance?: components["schemas"]["CaseClaimProvenance"] | null;
+            /** Correct */
+            correct: boolean;
+            /**
+             * Cost Factor
+             * @description Shadow inference-cost factor (1.0 = no discount).
+             */
+            cost_factor?: number | null;
+            /** Gate Notes */
+            gate_notes?: components["schemas"]["CaseGateNote"][];
+            /** Kind */
+            kind: string;
+            /** Relation */
+            relation?: string | null;
+            /** Score */
+            score: number;
+            /**
+             * Scorer Notes
+             * @description The scorer's own per-case notes, bounded. v13 grader notes never quote a hidden value (expected, distractor, forbidden).
+             */
+            scorer_notes?: string[];
+            /** Twin Group */
+            twin_group?: string | null;
         };
         /**
          * ClaimProvenanceEvidence
@@ -34193,6 +34480,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_claim_provenance_cases_api_v1_admin_agents__agent_id__claim_provenance_get: {
+        parameters: {
+            query: {
+                /** @description The agent's exact artifact SHA-256 (lowercase hex). */
+                artifact_sha256: string;
+                /** @description The accepted run id. */
+                run_id: string;
+                /** @description One exact case id. */
+                case_id?: string | null;
+                /** @description Only cases carrying this closed-vocabulary finding. */
+                finding?: string | null;
+                /** @description Also return cases no gate would zero or discount. Ignored when case_id or finding selects the cases. */
+                include_unflagged?: boolean;
+                limit?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminClaimProvenanceCases"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -252,6 +252,7 @@ describe('Backroom MCP tools', () => {
         'issue_coding_shadow_ticket_set',
         'get_validator_weight_diagnostics',
         'get_agent_core_qualification',
+        'get_claim_provenance_cases',
         'get_agent_scores',
         'get_leaderboard',
         'get_ledger_epoch_snapshots',
@@ -391,7 +392,9 @@ describe('Backroom MCP tools', () => {
     // The no-input outlier-escalation read adds about 360 bytes; its bounds
     // live on the Platform endpoint. With later main tools the catalog measured
     // 164,066 bytes, so the bound keeps the same ~0.5 KB headroom as before.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(164_500)
+    // The exact-key per-case claim-provenance read (#1852) adds a seven-field
+    // input; measured 165,115 bytes together.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(165_500)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -3609,6 +3612,137 @@ describe('Backroom MCP tools', () => {
 
       const bad = await client.callTool({ name: 'get_outlier_escalation', arguments: {} })
       expect(bad.isError).toBe(true)
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  const claimProvenancePayload = () => ({
+    agent_id: '11111111-2222-4333-8444-555555555555',
+    artifact_sha256: 'ae'.repeat(32),
+    agent_status: 'scored',
+    validator_hotkey: '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
+    run_id: 'run_gate_1',
+    bench_version: 13,
+    composite: 0.7,
+    generated_at: '2026-09-23T00:19:00Z',
+    posture: 'shadow',
+    claim_provenance: { posture: 'shadow', settled_cases: 153, not_model_emitted_cases: 4 },
+    case_id: null,
+    finding: 'served_text_not_model_emitted',
+    include_unflagged: false,
+    per_case_available: true,
+    total_cases: 250,
+    matched_cases: 4,
+    malformed_cases: 0,
+    limit: 50,
+    truncated: false,
+    cases: [
+      {
+        case_index: 17,
+        case_id: 'memory-9f3a-0017',
+        category: 'temporal_reasoning',
+        kind: 'memory',
+        score: 1,
+        correct: true,
+        expected: ['must-not-escape'],
+        gate_notes: [
+          { gate: 'served_text_not_model_emitted', zeroing: true, note_id: '0123456789abcdef' },
+        ],
+        claim_provenance: {
+          posture: 'shadow',
+          findings: ['served_text_not_model_emitted'],
+          completions: 2,
+          unattributed_calls: 0,
+          tool_results: 0,
+          claim_tokens: 3,
+          complete: true,
+          model_emitted: false,
+          answer_in_prompt: false,
+        },
+        catalog: null,
+        relation: null,
+        twin_group: null,
+        cost_factor: null,
+        scorer_notes: [
+          'v13 claim provenance flagged (served_text_not_model_emitted); shadow posture, score unchanged',
+        ],
+      },
+    ],
+    not_persisted: [
+      'credited_response_field',
+      'claim_token_comparison',
+      'attributed_completion_ids',
+      'normalization_explanation',
+    ],
+    not_persisted_reason: 'absence here is not evidence either way.',
+  })
+
+  it('reads per-case claim provenance for an exact agent, artifact and run', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json(claimProvenancePayload()))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    try {
+      const response = await client.callTool({
+        name: 'get_claim_provenance_cases',
+        arguments: {
+          agentId: '11111111-2222-4333-8444-555555555555',
+          artifactSha256: 'ae'.repeat(32),
+          runId: 'run_gate_1',
+          finding: 'served_text_not_model_emitted',
+        },
+      })
+
+      expect(response.isError).not.toBe(true)
+      const body = readJsonResult(response) as ReturnType<typeof claimProvenancePayload>
+      expect(body).toMatchObject({ matched_cases: 4, total_cases: 250, truncated: false })
+      expect(body.cases[0].claim_provenance).toMatchObject({
+        model_emitted: false,
+        claim_tokens: 3,
+      })
+      expect(body.cases[0].gate_notes[0].note_id).toBe('0123456789abcdef')
+      expect(body.not_persisted).toContain('claim_token_comparison')
+      // The answer key never survives the Backroom schema, even if sent.
+      expect(JSON.stringify(body)).not.toContain('must-not-escape')
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(String(url)).toBe(
+        'https://platform-api.heyditto.ai/api/v1/admin/agents/11111111-2222-4333-8444-555555555555/claim-provenance?' +
+          `artifact_sha256=${'ae'.repeat(32)}&run_id=run_gate_1&include_unflagged=false&limit=50&finding=served_text_not_model_emitted`,
+      )
+      expect(init.method ?? 'GET').toBe('GET')
+
+      const help = await client.callTool({
+        name: 'get_backroom_tool_help',
+        arguments: { tool: 'get_claim_provenance_cases' },
+      })
+      const guidance = (readJsonResult(help) as { guidance: string }).guidance
+      expect(guidance).toContain('not_persisted')
+      expect(guidance).toContain('flagged_case_count')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
+  it('refuses a non-exact artifact key before calling the Platform', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    try {
+      const response = await client.callTool({
+        name: 'get_claim_provenance_cases',
+        arguments: {
+          agentId: '11111111-2222-4333-8444-555555555555',
+          artifactSha256: 'AE'.repeat(32),
+          runId: 'run_gate_1',
+        },
+      })
+      expect(response.isError).toBe(true)
+      expect(fetchMock).not.toHaveBeenCalled()
     } finally {
       await client.close()
       await server.close()

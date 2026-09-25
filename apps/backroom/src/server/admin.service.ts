@@ -247,6 +247,8 @@ import {
   sourceReviewQueueSloSchema,
   outlierEscalationInputSchema,
   outlierEscalationSchema,
+  claimProvenanceCasesInputSchema,
+  claimProvenanceCasesSchema,
   queuePolicySettingsControlSchema,
   setInferenceConcurrencySettingsInputSchema,
   runtimeProfileArtifactSchema,
@@ -1424,6 +1426,23 @@ export async function fetchOutlierEscalation(rawInput: unknown = {}) {
     { retries: 1 },
   )
   return outlierEscalationSchema.parse(payload)
+}
+
+export async function fetchClaimProvenanceCases(rawInput: unknown) {
+  const input = claimProvenanceCasesInputSchema.parse(rawInput)
+  const params = new URLSearchParams({
+    artifact_sha256: input.artifactSha256,
+    run_id: input.runId,
+    include_unflagged: String(input.includeUnflagged),
+    limit: String(input.limit),
+  })
+  if (input.caseId) params.set('case_id', input.caseId)
+  if (input.finding) params.set('finding', input.finding)
+  const payload = await platformAdminRequest(
+    `/api/v1/admin/agents/${encodeURIComponent(input.agentId)}/claim-provenance?${params.toString()}`,
+    { retries: 1 },
+  )
+  return claimProvenanceCasesSchema.parse(payload)
 }
 
 export async function fetchInferenceFailureTaxonomy() {
