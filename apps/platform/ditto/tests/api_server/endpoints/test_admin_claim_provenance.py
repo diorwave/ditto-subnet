@@ -55,7 +55,7 @@ def _url(agent_id: UUID) -> str:
 
 
 async def _get(
-    client: httpx.AsyncClient, agent_id: UUID, sha: str, **params: object
+    client: httpx.AsyncClient, agent_id: UUID, sha: str, **params: str | int
 ) -> httpx.Response:
     return await client.get(
         _url(agent_id),
