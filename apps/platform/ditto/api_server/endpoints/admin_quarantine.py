@@ -98,6 +98,8 @@ from ditto.api_models.admin_quarantine import (
     AdminValidatorAssignmentList,
     AdminValidatorAssignmentReleaseRequest,
     AdminValidatorAssignmentReleaseResponse,
+    resolution_reason_code,
+    review_event_resolution_reason_code,
 )
 from ditto.api_models.agent_status import AgentStatus
 from ditto.api_models.benchmark_contract import benchmark_contract
@@ -254,7 +256,14 @@ async def list_screening_review_events(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> AdminScreeningReviewEventList:
-    """Read immutable snapshots; a missing receipt remains missing, never CLEAR."""
+    """Read immutable snapshots; a missing receipt remains missing, never CLEAR.
+
+    Each event reports two distinct codes: ``screening_reason_code`` is the
+    screening-origin code the screener's verdict carried, and
+    ``resolution_reason_code`` is the operator ruling's own code, non-null only
+    on a manual event. They disagree by design on a manual ruling, because the
+    ruling is a decision *about* the screening lead, not a replacement for it.
+    """
     predicate = (
         ScreeningReviewEvent.agent_id == agent_id if agent_id is not None else None
     )
@@ -275,13 +284,48 @@ async def list_screening_review_events(
     ).all()
     count = int(await session.scalar(count_statement) or 0)
     return AdminScreeningReviewEventList(
-        items=[
-            AdminScreeningReviewEvent.model_validate(row, from_attributes=True)
-            for row in rows
-        ],
+        items=[_review_event(row) for row in rows],
         count=count,
         limit=limit,
         offset=offset,
+    )
+
+
+def _review_event(row: ScreeningReviewEvent) -> AdminScreeningReviewEvent:
+    """Project one immutable ledger row onto the wire.
+
+    The ledger stores exactly one code per event and is append-only, so it is
+    never restated here: ``screening_reason_code`` passes the stored value
+    through verbatim, which on a manual event is the screening-origin code of
+    the quarantine the operator ruled on. The operator's own basis is derived
+    from ``effective_decision`` at read time and is ``None`` for automated
+    events — an automated rejection is the screener's verdict arriving over the
+    signed screening path, never an operator ruling. Deriving it keeps every
+    row already in the ledger correct without rewriting an append-only table.
+    """
+    return AdminScreeningReviewEvent(
+        event_id=row.event_id,
+        agent_id=row.agent_id,
+        attempt_id=row.attempt_id,
+        quarantine_id=row.quarantine_id,
+        resolution_id=row.resolution_id,
+        previous_event_id=row.previous_event_id,
+        event_kind=row.event_kind,  # type: ignore[arg-type]
+        artifact_sha256=row.artifact_sha256,
+        policy_version=row.policy_version,
+        actor=row.actor,
+        reviewer_model=row.reviewer_model,
+        outcome=row.outcome,
+        effective_decision=row.effective_decision,
+        screening_reason_code=row.reason_code,
+        resolution_reason_code=review_event_resolution_reason_code(
+            row.event_kind, row.effective_decision
+        ),
+        reason=row.reason,
+        prior_agent_status=row.prior_agent_status,
+        next_agent_status=row.next_agent_status,
+        evidence=row.evidence,
+        created_at=row.created_at,
     )
 
 
@@ -359,7 +403,7 @@ def _item(
         policy_version=row.policy_version,
         manifest_digest=row.manifest_digest,
         finding_digest=row.finding_digest,
-        reason_code=row.reason_code,
+        screening_reason_code=row.reason_code,
         review_audit_digest=(
             row.review_audit_digest if review_audit is not None else None
         ),
@@ -377,12 +421,14 @@ def _item(
         resolved_by=row.resolved_by,
         resolution=row.resolution,  # type: ignore[arg-type]
         resolution_reason=row.resolution_reason,
+        resolution_reason_code=resolution_reason_code(row.resolution),
         resolution_history=[
             AdminQuarantineResolutionEvent(
                 resolution=event.resolution,  # type: ignore[arg-type]
                 reason=event.reason,
                 actor=event.actor,
                 created_at=event.created_at,
+                resolution_reason_code=resolution_reason_code(event.resolution),
             )
             for event in history or []
         ],
@@ -1071,6 +1117,9 @@ async def execute_quarantine_batch(
                 now = datetime.now(UTC)
                 agent.status = target
                 agent.screening_reason = decision.reason
+                agent.screening_reason_code = resolution_reason_code(
+                    decision.resolution
+                )
                 await _apply_dataset(session, agent, new_dataset)
                 quarantine.status = "resolved"
                 quarantine.resolved_at = now
@@ -1259,10 +1308,11 @@ async def _build_quarantine_context(
             quarantine_id=row.quarantine_id,
             agent_id=row.agent_id,
             agent_name=other.name,
-            reason_code=row.reason_code,
+            screening_reason_code=row.reason_code,
             status=row.status,  # type: ignore[arg-type]
             resolution=row.resolution,  # type: ignore[arg-type]
             resolution_reason=row.resolution_reason,
+            resolution_reason_code=resolution_reason_code(row.resolution),
             created_at=row.created_at,
             resolved_at=row.resolved_at,
         )
@@ -1526,6 +1576,10 @@ async def resolve_quarantine(
         }[payload.resolution]
         agent.status = target
         agent.screening_reason = payload.reason
+        # The miner-facing pair must agree: ``screening_reason`` is the
+        # operator's prose for this outcome, so its code is the operator's
+        # ruling, not the screening-origin code the hold was opened under.
+        agent.screening_reason_code = resolution_reason_code(payload.resolution)
         await _apply_dataset(session, agent, new_dataset)
         quarantine.status = "resolved"
         quarantine.resolved_at = datetime.now(UTC)
@@ -1756,6 +1810,7 @@ async def resolve_screening_dispute(
             prior_agent_status = agent.status
             agent.status = AgentStatus.EVALUATING
             agent.screening_reason = payload.reason
+            agent.screening_reason_code = resolution_reason_code("release")
             await _apply_dataset(session, agent, new_dataset)
             quarantine.resolved_at = now
             quarantine.resolved_by = x_admin_actor
@@ -2875,6 +2930,12 @@ async def rescreen_rejected_submission(
             raise HTTPException(status_code=409, detail="screening attempt is missing")
         agent.status = AgentStatus.SCREENING_FAILED
         agent.screening_reason = "Operator requested a screening retry"
+        # The submission is going back to the screener, so no verdict describes
+        # it right now. Leaving the previous attempt's code in place would pair
+        # this operator prose with a screening code the retry has superseded --
+        # the conflation #2260 is about. The code is repopulated when the new
+        # attempt concludes, and the attempt row keeps the old lead verbatim.
+        agent.screening_reason_code = None
         await _authorize_screening_retry(
             session,
             agent=agent,

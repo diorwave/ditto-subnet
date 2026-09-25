@@ -247,14 +247,67 @@ def test_source_review_audit_accepts_configured_l1_step_budget() -> None:
     assert request.review_audit.max_steps == 160
     assert request.review_audit.steps_used == 159
 
-    with pytest.raises(ValidationError, match="less than or equal to 240"):
+    with pytest.raises(ValidationError, match="less than or equal to 256"):
         ScreenReviewAudit.model_validate(
-            {**audit.model_dump(mode="json"), "max_steps": 241}
+            {**audit.model_dump(mode="json"), "max_steps": 257}
         )
     with pytest.raises(ValidationError, match="review steps used exceed"):
         ScreenReviewAudit.model_validate(
             {**audit.model_dump(mode="json"), "steps_used": 161}
         )
+
+
+def test_l2_review_audit_accepts_operator_budget_ceiling() -> None:
+    audit = ScreenReviewAudit(
+        stage="l2",
+        reason_code="l2-model-inconclusive",
+        prompt_revision="l2-v13",
+        max_steps=256,
+        steps_used=256,
+        max_input_tokens=1_000_000,
+        input_tokens_used=2_700_000,
+        max_output_tokens=1_000_000,
+        output_tokens_used=1_000_000,
+        max_cost_usd=25,
+        cost_usd_used=20,
+    )
+    parsed = ScreenReviewAudit.model_validate(audit.model_dump(mode="json"))
+    assert parsed.canonical_digest() == audit.canonical_digest()
+
+    with pytest.raises(ValidationError, match="less than or equal to 1000000"):
+        ScreenReviewAudit.model_validate(
+            {**audit.model_dump(mode="json"), "max_output_tokens": 1_000_001}
+        )
+
+
+def test_preflight_hold_audit_round_trips_with_signed_request() -> None:
+    audit = ScreenReviewAudit(
+        stage="l2",
+        reason_code="l2-runtime-evidence-unavailable",
+        prompt_revision="l2-v13",
+        max_steps=256,
+        steps_used=0,
+        max_input_tokens=5_000_000,
+        input_tokens_used=0,
+        max_output_tokens=1_000_000,
+        output_tokens_used=0,
+        max_cost_usd=25,
+        cost_usd_used=0,
+        requested_model="openai/gpt-6-sol",
+        final_stage="preflight",
+        cause_detail="lease_unavailable",
+        max_elapsed_ms=1_800_000,
+        elapsed_ms=0,
+    )
+    request = _request(
+        outcome=ScreenResultOutcome.INCONCLUSIVE,
+        review_audit=audit,
+        review_audit_digest=audit.canonical_digest(),
+    )
+    assert request.review_audit == audit
+    assert (
+        ScreenResultRequest.model_validate(request.model_dump(mode="json")) == request
+    )
 
 
 def test_legacy_outcome_rejects_image_metadata() -> None:
