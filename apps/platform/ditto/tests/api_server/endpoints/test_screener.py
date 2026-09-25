@@ -25,7 +25,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -104,6 +105,7 @@ from ditto.db.models import (
     ScreeningQuarantineResolution,
     ScreeningRetryOverride,
     ScreeningReviewDeadlineActivation,
+    ScreeningReviewEvent,
     ScreeningReviewWindow,
     ScreeningVerificationReceipt,
     SubmissionImageBuild,
@@ -5294,11 +5296,13 @@ class TestClaim:
             assert attempt is not None and attempt.status == "quarantined"
             assert len(quarantines) == 1
 
-    async def test_local_adjudicated_reject_is_executed_from_bound_settings(
+    @pytest.mark.parametrize("policy_version", [10, 13])
+    async def test_local_adjudicated_reject_is_bound_and_v13_stays_held(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
+        policy_version: int,
     ) -> None:
         agent_id = await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
         settings = ScreenerReviewSettings(mode="enforce", adjudicator_mode="enforce")
@@ -5317,8 +5321,32 @@ class TestClaim:
             revision_id = revision.revision
         _install_db(app, session_maker)
         _install_chain(app)
-        claimed = await client.post(_CLAIM_URL, headers=_AUTH_HEADER)
-        attempt_id = UUID(claimed.json()["items"][0]["attempt_id"])
+        if policy_version == 10:
+            claimed = await client.post(_CLAIM_URL, headers=_AUTH_HEADER)
+            attempt_id = UUID(claimed.json()["items"][0]["attempt_id"])
+        else:
+            attempt_id = uuid4()
+            now = datetime.now(UTC)
+            async with session_maker() as session, session.begin():
+                agent = await session.get(Agent, agent_id)
+                assert agent is not None
+                agent.status = AgentStatus.SCREENING
+                session.add(
+                    ScreeningAttempt(
+                        attempt_id=attempt_id,
+                        agent_id=agent_id,
+                        artifact_sha256=_SHA256,
+                        screener_hotkey=_SCREENER_HOTKEY,
+                        policy_version=13,
+                        status="running",
+                        started_at=now - timedelta(minutes=1),
+                        deadline=now + timedelta(minutes=9),
+                        review_settings_revision=revision_id,
+                        review_settings_instance_id="ditto-screener-prod",
+                        review_settings_scope="*",
+                        review_settings_checksum=checksum,
+                    )
+                )
         adjudication = SourceReviewAdjudication(
             decision="reject",
             reason=(
@@ -5360,6 +5388,7 @@ class TestClaim:
         payload = _result_payload(
             agent_id,
             passed=False,
+            policy_version=policy_version,
             attempt_id=attempt_id,
             outcome="quarantine",
             manifest_digest="12" * 32,
@@ -5388,6 +5417,43 @@ class TestClaim:
             f"/api/v1/screener/agent/{agent_id}/result", json=tampered
         )
         assert rejected.status_code in {401, 403}, rejected.text
+        if policy_version == 13:
+            clear_data = adjudication.model_dump(mode="json")
+            clear_data.update(
+                decision="clear",
+                reject_invariant=None,
+                clear_clause="model_authors_graded_slot",
+            )
+            clear_adjudication = SourceReviewAdjudication.model_validate(clear_data)
+            assert clear_adjudication.completion_receipt is not None
+            clear_receipt_signature = _sign(
+                completion_receipt_signing_message(
+                    screener_hotkey=_SCREENER_HOTKEY,
+                    agent_id=agent_id,
+                    attempt_id=attempt_id,
+                    artifact_sha256=_SHA256,
+                    adjudication_digest=clear_adjudication.canonical_digest(),
+                    receipt=clear_adjudication.completion_receipt,
+                )
+            )
+            legacy_pass = _result_payload(
+                agent_id,
+                passed=True,
+                policy_version=13,
+                attempt_id=attempt_id,
+                manifest_digest="12" * 32,
+                review_settings_revision=revision_id,
+                review_settings_instance_id="ditto-screener-prod",
+                review_settings_scope="*",
+                review_settings_checksum=checksum,
+                adjudication_digest=clear_adjudication.canonical_digest(),
+                adjudication=clear_adjudication.model_dump(mode="json"),
+                completion_receipt_signature=clear_receipt_signature,
+            )
+            refused_pass = await client.post(
+                f"/api/v1/screener/agent/{agent_id}/result", json=legacy_pass
+            )
+            assert refused_pass.status_code == 409, refused_pass.text
         response = await client.post(
             f"/api/v1/screener/agent/{agent_id}/result", json=payload
         )
@@ -5397,7 +5463,10 @@ class TestClaim:
 
         assert response.status_code == 200, response.text
         assert replay.status_code == 200, replay.text
-        assert response.json()["status"] == AgentStatus.REJECTED
+        expected_status = (
+            AgentStatus.QUARANTINED if policy_version == 13 else AgentStatus.REJECTED
+        )
+        assert response.json()["status"] == expected_status
         async with session_maker() as session:
             agent = await session.get(Agent, agent_id)
             attempt = await session.get(ScreeningAttempt, attempt_id)
@@ -5406,17 +5475,35 @@ class TestClaim:
                     ScreeningQuarantine.attempt_id == attempt_id
                 )
             )
-            assert agent is not None and agent.status == AgentStatus.REJECTED
-            assert agent.screening_reason == adjudication.reason
+            assert agent is not None and agent.status == expected_status
             assert len(adjudication.reason) > 600
-            assert attempt is not None and attempt.status == "rejected"
-            assert attempt.public_reason == adjudication.reason
-            assert retained is not None and retained.status == "resolved"
+            assert attempt is not None and attempt.status == (
+                "quarantined" if policy_version == 13 else "rejected"
+            )
+            assert attempt.public_reason == (
+                "Submission held for anti-cheat review"
+                if policy_version == 13
+                else adjudication.reason
+            )
+            assert retained is not None and retained.status == (
+                "active" if policy_version == 13 else "resolved"
+            )
             assert retained.evidence is not None
             assert retained.evidence[-1]["code"] == ("adjudicated-source-review-reject")
             assert retained.court_completion_receipt is not None
             assert retained.court_completion_receipt["observed_upstream"] == "together"
             assert retained.court_completion_receipt["first_tool_call_ms"] == 2000
+            event = await session.scalar(
+                select(ScreeningReviewEvent).where(
+                    ScreeningReviewEvent.attempt_id == attempt_id
+                )
+            )
+            assert event is not None
+            assert event.outcome == "quarantine"
+            assert event.effective_decision == (
+                "hold" if policy_version == 13 else "reject"
+            )
+            assert event.next_agent_status == expected_status
 
     async def test_completed_court_refusal_retains_signed_telemetry_without_release(
         self,
@@ -6134,11 +6221,33 @@ class TestClaim:
                 "Late deep-review evidence retained after operator action"
             )
 
+    @pytest.mark.parametrize(
+        ("outcome", "reason_code", "detail", "expected_reason"),
+        [
+            (
+                "deterministic_reject",
+                "health-contract",
+                "serve check failed: /health never healthy within 90s",
+                "Deferred source review runtime verification was interrupted; "
+                "manual retry required",
+            ),
+            (
+                "retryable_infra",
+                "source-review-unavailable",
+                "source review provider unavailable",
+                "Deferred source review was interrupted; manual retry required",
+            ),
+        ],
+    )
     async def test_deferred_review_health_miss_parks_the_hold(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
+        outcome: str,
+        reason_code: str,
+        detail: str,
+        expected_reason: str,
     ) -> None:
         agent_id = await _seed_agent(
             session_maker,
@@ -6185,9 +6294,9 @@ class TestClaim:
             agent_id,
             passed=False,
             attempt_id=attempt_id,
-            outcome="deterministic_reject",
-            reason_code="health-contract",
-            detail="serve check failed: /health never healthy within 90s",
+            outcome=outcome,
+            reason_code=reason_code,
+            detail=detail,
         )
         response = await client.post(
             f"/api/v1/screener/agent/{agent_id}/result", json=payload
@@ -6206,14 +6315,20 @@ class TestClaim:
             )
             assert agent is not None
             assert agent.status == AgentStatus.ATH_PENDING_REVIEW
-            assert agent.screening_reason == (
-                "Deferred source review runtime verification was interrupted; "
-                "manual retry required"
-            )
-            assert agent.screening_reason_code == "health-contract"
+            assert agent.screening_reason == expected_reason
+            assert agent.screening_reason_code == reason_code
             assert attempt is not None and attempt.status == "failed"
             assert review is not None and review.status == "pending"
             assert review.resolution is None
+            event = await session.scalar(
+                select(ScreeningReviewEvent).where(
+                    ScreeningReviewEvent.attempt_id == attempt_id
+                )
+            )
+            assert event is not None
+            assert event.outcome == outcome
+            assert event.effective_decision == "hold"
+            assert event.next_agent_status == AgentStatus.ATH_PENDING_REVIEW
         parked = await client.post(_CLAIM_URL)
         assert parked.status_code == 200
         assert parked.json()["items"] == []
@@ -6570,6 +6685,11 @@ class TestQuarantineAdmin:
             ]
         )
         assert len(detailed_reason) > 500
+        expected_code = {
+            "release": "operator-released-quarantine",
+            "rescreen": "operator-rescreened-quarantine",
+            "reject": "operator-rejected-quarantine",
+        }[resolution]
         app.state.config = replace(
             app.state.config,
             admin_api_token="test-admin-token-at-least-32-characters",
@@ -6603,7 +6723,9 @@ class TestQuarantineAdmin:
         assert listing.status_code == 200
         item = listing.json()["items"][0]
         assert item["agent_id"] == str(agent_id)
-        assert item["reason_code"] == "agentic-source-review-tripwire"
+        assert item["screening_reason_code"] == "agentic-source-review-tripwire"
+        assert item["resolution"] is None
+        assert item["resolution_reason_code"] is None
         assert "source" not in item
 
         blank_reason = await client.post(
@@ -6629,16 +6751,70 @@ class TestQuarantineAdmin:
         assert resolved.json()["agent_status"] == expected_status
         resolved_quarantine = resolved.json()["quarantine"]
         assert resolved_quarantine["resolution_reason"] == detailed_reason
+        # The resolution names the operator's ruling; the screening-origin code
+        # it ruled on is preserved rather than overwritten by it.
+        assert resolved_quarantine["resolution_reason_code"] == expected_code
+        assert (
+            resolved_quarantine["screening_reason_code"]
+            == "agentic-source-review-tripwire"
+        )
         assert len(resolved_quarantine["resolution_history"]) == 1
         history_event = resolved_quarantine["resolution_history"][0]
         assert history_event["resolution"] == resolution
         assert history_event["reason"] == detailed_reason
         assert history_event["actor"] == "backroom:test-user"
+        assert history_event["resolution_reason_code"] == expected_code
         assert conflict.status_code == 409
+        audit = await client.get(
+            f"/api/v1/admin/screening-review-events?agent_id={agent_id}",
+            headers=admin_headers,
+        )
+        assert audit.status_code == 200
+        assert audit.json()["count"] == 2
+        manual, automated = audit.json()["items"]
+        assert automated["event_kind"] == "automated"
+        assert automated["attempt_id"] == str(attempt_id)
+        assert automated["artifact_sha256"] == item["artifact_sha256"]
+        assert automated["policy_version"] == item["policy_version"]
+        assert automated["outcome"] == "quarantine"
+        assert automated["effective_decision"] == "hold"
+        assert automated["prior_agent_status"] == AgentStatus.SCREENING
+        assert automated["next_agent_status"] == AgentStatus.QUARANTINED
+        assert automated["evidence"]["manifest_digest"] == "56" * 32
+        assert automated["screening_reason_code"] == "agentic-source-review-tripwire"
+        # An automated hold is the screener's own verdict, never an operator
+        # ruling, so it must not claim an operator basis.
+        assert automated["resolution_reason_code"] is None
+        assert manual["event_kind"] == "manual"
+        assert manual["resolution_id"] is not None
+        assert manual["previous_event_id"] == automated["event_id"]
+        assert manual["actor"] == "backroom:test-user"
+        assert manual["outcome"] == resolution
+        assert manual["effective_decision"] == resolution
+        # The append-only ledger stores one code and cannot be restated: the
+        # screening-origin code stays as the lead the operator ruled on, and
+        # the ruling itself is derived next to it.
+        assert manual["screening_reason_code"] == "agentic-source-review-tripwire"
+        assert manual["resolution_reason_code"] == expected_code
+        assert manual["reason"] == detailed_reason
+        assert manual["prior_agent_status"] == AgentStatus.QUARANTINED
+        assert manual["next_agent_status"] == expected_status
+        assert manual["evidence"]["reason"] == detailed_reason
+        async with session_maker() as session:
+            with pytest.raises(DBAPIError, match="append-only"):
+                async with session.begin():
+                    await session.execute(
+                        update(ScreeningReviewEvent)
+                        .where(
+                            ScreeningReviewEvent.event_id == UUID(manual["event_id"])
+                        )
+                        .values(outcome="reject")
+                    )
         async with session_maker() as session:
             agent = await session.get(Agent, agent_id)
             assert agent is not None
             assert agent.screening_reason == detailed_reason
+            assert agent.screening_reason_code == expected_code
 
     async def test_rejected_quarantine_can_be_corrected_to_release_with_history(
         self,
@@ -6704,11 +6880,47 @@ class TestQuarantineAdmin:
         assert corrected.status_code == 200
         assert corrected.json()["agent_status"] == AgentStatus.EVALUATING
         assert corrected.json()["quarantine"]["resolution"] == "release"
+        assert corrected.json()["quarantine"]["resolution_reason_code"] == (
+            "operator-released-quarantine"
+        )
         assert [
             event["resolution"]
             for event in corrected.json()["quarantine"]["resolution_history"]
         ] == ["reject", "release"]
+        # Each entry in the append-only history carries its own ruling code, so
+        # a correction reads as two distinct operator decisions rather than one
+        # overwritten field.
+        assert [
+            event["resolution_reason_code"]
+            for event in corrected.json()["quarantine"]["resolution_history"]
+        ] == ["operator-rejected-quarantine", "operator-released-quarantine"]
         assert repeated.status_code == 409
+        audit = await client.get(
+            f"/api/v1/admin/screening-review-events?agent_id={agent_id}",
+            headers=admin_headers,
+        )
+        assert audit.status_code == 200
+        assert [event["outcome"] for event in audit.json()["items"]] == [
+            "release",
+            "reject",
+            "quarantine",
+        ]
+        released_event, rejected_event, automated_event = audit.json()["items"]
+        assert [event["resolution_reason_code"] for event in audit.json()["items"]] == [
+            "operator-released-quarantine",
+            "operator-rejected-quarantine",
+            None,
+        ]
+        # Every event on this agent keeps the same screening-origin code: the
+        # ledger records what the screener held, and correcting the ruling does
+        # not rewrite it.
+        assert {event["screening_reason_code"] for event in audit.json()["items"]} == {
+            "agentic-source-review-tripwire"
+        }
+        assert released_event["previous_event_id"] == rejected_event["event_id"]
+        assert rejected_event["previous_event_id"] == automated_event["event_id"]
+        assert released_event["prior_agent_status"] == AgentStatus.REJECTED
+        assert released_event["actor"] == "backroom:second-reviewer"
 
         detail = await client.get(
             f"/api/v1/admin/screening-quarantines/{quarantine['quarantine_id']}",
@@ -6738,7 +6950,122 @@ class TestQuarantineAdmin:
             assert agent is not None
             assert agent.status == AgentStatus.EVALUATING
             assert agent.screening_reason == "Second review confirmed a false positive"
+            assert agent.screening_reason_code == "operator-released-quarantine"
             assert [event.resolution for event in history] == ["reject", "release"]
+
+    async def test_manual_rejection_does_not_present_a_clear_side_code_as_the_ruling(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A quarantine opened under a CLEAR-side code must not hand it to the
+        operator's rejection.
+
+        ``behavioral-oracle-passed`` is emitted with ``ModuleDisposition.CLEAR``
+        by the screener, so a rejected submission advertising it as its reason
+        code reads as a flat contradiction. The quarantine keeps that code as
+        screening-origin provenance and the ruling is reported separately.
+        """
+        app.state.config = replace(
+            app.state.config,
+            admin_api_token="test-admin-token-at-least-32-characters",
+        )
+        agent_id = await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
+        _install_db(app, session_maker)
+        _install_chain(app)
+        claimed = await client.post(_CLAIM_URL)
+        attempt_id = UUID(claimed.json()["items"][0]["attempt_id"])
+        held = await client.post(
+            f"/api/v1/screener/agent/{agent_id}/result",
+            json=_result_payload(
+                agent_id,
+                passed=False,
+                attempt_id=attempt_id,
+                outcome="quarantine",
+                manifest_digest="56" * 32,
+                finding_digest="78" * 32,
+                reason_code="behavioral-oracle-passed",
+            ),
+        )
+        assert held.status_code == 200
+
+        admin_headers = {
+            "Authorization": "Bearer test-admin-token-at-least-32-characters",
+            "X-Admin-Actor": "backroom:test-user",
+        }
+        quarantine = (
+            await client.get(
+                "/api/v1/admin/screening-quarantines", headers=admin_headers
+            )
+        ).json()["items"][0]
+        assert quarantine["screening_reason_code"] == "behavioral-oracle-passed"
+        assert quarantine["resolution_reason_code"] is None
+        # The deprecated wire alias carried for the rollout holds the same
+        # screening-origin code, so a Backroom that has not been redeployed
+        # still reads the value it requires.
+        assert quarantine["reason_code"] == "behavioral-oracle-passed"
+
+        reason = "Operator review found a replayed oracle transcript."
+        rejected = await client.post(
+            f"/api/v1/admin/screening-quarantines/{quarantine['quarantine_id']}/resolve",
+            headers=admin_headers,
+            json={"resolution": "reject", "reason": reason},
+        )
+        assert rejected.status_code == 200
+        assert rejected.json()["agent_status"] == AgentStatus.REJECTED
+        resolved = rejected.json()["quarantine"]
+        assert resolved["resolution"] == "reject"
+        assert resolved["resolution_reason_code"] == "operator-rejected-quarantine"
+        assert resolved["screening_reason_code"] == "behavioral-oracle-passed"
+        assert resolved["reason_code"] == "behavioral-oracle-passed"
+
+        audit = await client.get(
+            f"/api/v1/admin/screening-review-events?agent_id={agent_id}",
+            headers=admin_headers,
+        )
+        assert audit.status_code == 200
+        manual, automated = audit.json()["items"]
+        assert automated["screening_reason_code"] == "behavioral-oracle-passed"
+        assert automated["resolution_reason_code"] is None
+        # The append-only ledger cannot be restated, so the manual event keeps
+        # the screening-origin code verbatim and reports the ruling separately.
+        assert manual["screening_reason_code"] == "behavioral-oracle-passed"
+        assert manual["effective_decision"] == "reject"
+        assert manual["resolution_reason_code"] == "operator-rejected-quarantine"
+        assert automated["reason_code"] == "behavioral-oracle-passed"
+        assert manual["reason_code"] == "behavioral-oracle-passed"
+
+        async with session_maker() as session:
+            agent = await session.get(Agent, agent_id)
+            assert agent is not None
+            assert agent.status == AgentStatus.REJECTED
+            # The miner-facing pair now agrees with itself: the operator's own
+            # words carry the operator's own code, while the screening code it
+            # ruled on lives on, on the quarantine and in the ledger.
+            assert agent.screening_reason == reason
+            assert agent.screening_reason_code == "operator-rejected-quarantine"
+
+        # The miner-facing read is where the contradiction used to surface: the
+        # prose and the code documented as the "machine-readable screening
+        # outcome code" now describe the same decision.
+        miner_status = await client.get(f"/api/v1/retrieval/agent/{agent_id}/status")
+        assert miner_status.status_code == 200
+        assert miner_status.json()["screening_reason"] == reason
+        assert miner_status.json()["screening_reason_code"] == (
+            "operator-rejected-quarantine"
+        )
+
+        async with session_maker() as session:
+            with pytest.raises(DBAPIError, match="append-only"):
+                async with session.begin():
+                    await session.execute(
+                        update(ScreeningReviewEvent)
+                        .where(
+                            ScreeningReviewEvent.event_id == UUID(manual["event_id"])
+                        )
+                        .values(reason_code="operator-rejected-quarantine")
+                    )
 
     async def test_release_pins_dataset_when_generation_is_enabled(
         self,
@@ -7159,6 +7486,127 @@ class TestQuarantineAdmin:
         assert upheld.json()["agent_status"] == AgentStatus.REJECTED
         assert upheld.json()["dispute"]["resolution"] == "uphold"
 
+    async def test_release_acknowledges_later_exact_artifact_pass_without_rescoring(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        app.state.config = replace(
+            app.state.config,
+            admin_api_token="test-admin-token-at-least-32-characters",
+        )
+        agent_id = await _seed_agent(session_maker, status=AgentStatus.SCORED)
+        quarantine_id, dispute_id, rejected_attempt_id = uuid4(), uuid4(), uuid4()
+        rejected_at = datetime.now(UTC) - timedelta(days=1)
+        history_id = uuid4()
+        async with session_maker() as session, session.begin():
+            session.add_all(
+                [
+                    ScreeningAttempt(
+                        attempt_id=rejected_attempt_id,
+                        agent_id=agent_id,
+                        artifact_sha256=_SHA256,
+                        screener_hotkey=_SCREENER_HOTKEY,
+                        policy_version=SCREENING_POLICY_VERSION,
+                        status="quarantined",
+                        started_at=rejected_at - timedelta(minutes=10),
+                        deadline=rejected_at + timedelta(minutes=10),
+                        finished_at=rejected_at,
+                    ),
+                    ScreeningAttempt(
+                        attempt_id=uuid4(),
+                        agent_id=agent_id,
+                        artifact_sha256=_SHA256,
+                        screener_hotkey=_SCREENER_HOTKEY,
+                        policy_version=SCREENING_POLICY_VERSION,
+                        status="passed",
+                        started_at=rejected_at + timedelta(hours=1),
+                        deadline=rejected_at + timedelta(hours=2),
+                        finished_at=rejected_at + timedelta(hours=1, minutes=5),
+                    ),
+                ]
+            )
+            await session.flush()
+            session.add(
+                ScreeningQuarantine(
+                    quarantine_id=quarantine_id,
+                    agent_id=agent_id,
+                    attempt_id=rejected_attempt_id,
+                    screener_hotkey=_SCREENER_HOTKEY,
+                    policy_version=SCREENING_POLICY_VERSION,
+                    manifest_digest="56" * 32,
+                    finding_digest="78" * 32,
+                    reason_code="agentic-source-review-tripwire",
+                    status="resolved",
+                    created_at=rejected_at - timedelta(minutes=10),
+                    resolved_at=rejected_at,
+                    resolved_by="backroom:first-reviewer",
+                    resolution="reject",
+                    resolution_reason="Original rejection",
+                )
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    ScreeningQuarantineResolution(
+                        resolution_id=history_id,
+                        quarantine_id=quarantine_id,
+                        resolution="reject",
+                        reason="Original rejection",
+                        actor="backroom:first-reviewer",
+                        created_at=rejected_at,
+                    ),
+                    ScreeningDispute(
+                        dispute_id=dispute_id,
+                        agent_id=agent_id,
+                        quarantine_id=quarantine_id,
+                        miner_hotkey=_MINER_HOTKEY,
+                        message="The rejection was resolved by a later clean pass.",
+                        status="pending",
+                        created_at=rejected_at + timedelta(minutes=1),
+                    ),
+                ]
+            )
+        _install_db(app, session_maker)
+        _install_chain(app)
+        headers = {
+            "Authorization": "Bearer test-admin-token-at-least-32-characters",
+            "X-Admin-Actor": "backroom:appeals-reviewer",
+        }
+        url = f"/api/v1/admin/screening-disputes/{dispute_id}/resolve"
+        stale_uphold = await client.post(
+            url,
+            headers=headers,
+            json={"resolution": "uphold", "reason": "Still rejected"},
+        )
+        assert stale_uphold.status_code == 409
+        acknowledged = await client.post(
+            url,
+            headers=headers,
+            json={
+                "resolution": "release",
+                "reason": "Later exact-artifact pass restored the agent",
+            },
+        )
+        assert acknowledged.status_code == 200
+        assert acknowledged.json()["agent_status"] == AgentStatus.SCORED
+        assert acknowledged.json()["dispute"]["resolution"] == "release"
+        async with session_maker() as session:
+            agent = await session.get(Agent, agent_id)
+            quarantine = await session.get(ScreeningQuarantine, quarantine_id)
+            dispute = await session.get(ScreeningDispute, dispute_id)
+            resolutions = (
+                await session.scalars(select(ScreeningQuarantineResolution))
+            ).all()
+            assert agent is not None and agent.status == AgentStatus.SCORED
+            assert quarantine is not None and quarantine.resolution == "reject"
+            assert (
+                dispute is not None
+                and dispute.resolved_by == "backroom:appeals-reviewer"
+            )
+            assert len(resolutions) == 1 and resolutions[0].resolution_id == history_id
+
     async def test_lists_all_screening_outcomes_and_issues_audited_artifact_url(
         self,
         app: FastAPI,
@@ -7349,6 +7797,24 @@ class TestQuarantineAdmin:
         )
         attempt_id = uuid4()
         other_attempt_id = uuid4()
+        l2_audit = ScreenReviewAudit(
+            stage="l2",
+            reason_code="l2-runtime-evidence-unavailable",
+            prompt_revision="l2-v13",
+            max_steps=256,
+            steps_used=0,
+            max_input_tokens=5_000_000,
+            input_tokens_used=0,
+            max_output_tokens=1_000_000,
+            output_tokens_used=0,
+            max_cost_usd=25,
+            cost_usd_used=0,
+            requested_model="openai/gpt-6-sol",
+            final_stage="preflight",
+            cause_detail="lease_unavailable",
+            max_elapsed_ms=1_800_000,
+            elapsed_ms=0,
+        )
         now = datetime.now(UTC)
         async with session_maker() as session, session.begin():
             for owner_id, owner_attempt_id in (
@@ -7377,6 +7843,20 @@ class TestQuarantineAdmin:
                         ),
                     )
                 )
+            session.add(
+                ScreeningQuarantine(
+                    quarantine_id=uuid4(),
+                    agent_id=agent_id,
+                    attempt_id=attempt_id,
+                    screener_hotkey=_SCREENER_HOTKEY,
+                    policy_version=SCREENING_POLICY_VERSION,
+                    manifest_digest=_SHA256,
+                    reason_code="source-review-inconclusive",
+                    review_audit_digest=l2_audit.canonical_digest(),
+                    review_audit=l2_audit.model_dump(mode="json"),
+                    status="active",
+                )
+            )
         _install_db(app, session_maker)
         headers = {
             "Authorization": "Bearer test-admin-token-at-least-32-characters",
@@ -7423,6 +7903,7 @@ class TestQuarantineAdmin:
             "private_failure_log_tail": (
                 "source_review: ValidationError: malformed finding"
             ),
+            "l2_review_diagnostic": l2_audit.model_dump(mode="json"),
             "court_diagnostic": None,
             "court_completion_receipt": None,
         }
@@ -8395,6 +8876,77 @@ class TestQuarantineAdmin:
         assert unauthenticated.status_code == 401
         assert missing.status_code == 404
         assert missing.json()["message"] == "screening submission not found"
+
+    async def test_rescreen_clears_the_superseded_screening_code(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A retry request must not pair operator prose with the old verdict's code.
+
+        The submission is headed back to the screener, so the rejection the
+        previous attempt recorded no longer describes it. Leaving that code on
+        the row is what made a resolved submission look like the operator's
+        ruling was the screener's CLEAR-side lead (#2260).
+        """
+        app.state.config = replace(
+            app.state.config,
+            admin_api_token="test-admin-token-at-least-32-characters",
+        )
+        agent_id = await _seed_agent(
+            session_maker,
+            status=AgentStatus.REJECTED,
+            screening_policy_version=SCREENING_POLICY_VERSION,
+        )
+        await _seed_score(session_maker, agent_id=agent_id)
+        attempt_id = uuid4()
+        now = datetime.now(UTC)
+        async with session_maker() as session, session.begin():
+            session.add(
+                ScreeningAttempt(
+                    attempt_id=attempt_id,
+                    agent_id=agent_id,
+                    screener_hotkey=_SCREENER_HOTKEY,
+                    policy_version=SCREENING_POLICY_VERSION,
+                    status="rejected",
+                    started_at=now - timedelta(minutes=2),
+                    deadline=now + timedelta(minutes=28),
+                    finished_at=now,
+                    public_reason="Submission held for anti-cheat review",
+                    reason_code="agentic-source-review-tripwire",
+                )
+            )
+            seeded = await session.get(Agent, agent_id)
+            assert seeded is not None
+            seeded.screening_reason = "Submission held for anti-cheat review"
+            seeded.screening_reason_code = "agentic-source-review-tripwire"
+        _install_db(app, session_maker)
+        response = await client.post(
+            f"/api/v1/admin/screening-submissions/{agent_id}/rescreen",
+            headers={
+                "Authorization": "Bearer test-admin-token-at-least-32-characters",
+                "X-Admin-Actor": "backroom:test-user",
+            },
+            json={
+                "reason": "Build was interrupted by a worker deployment",
+                "expected_sha256": _SHA256,
+                "expected_score_count": 1,
+            },
+        )
+        assert response.status_code == 200, response.text
+        async with session_maker() as session:
+            agent = await session.get(Agent, agent_id)
+            attempt = await session.get(ScreeningAttempt, attempt_id)
+            assert agent is not None
+            assert agent.screening_reason == "Operator requested a screening retry"
+            # The prose is the operator's, and there is no current verdict, so
+            # the pair no longer mixes the two vocabularies.
+            assert agent.screening_reason_code is None
+            # Clearing the agent's copy is not destructive: the lead the old
+            # attempt recorded survives verbatim on the attempt row.
+            assert attempt is not None
+            assert attempt.reason_code == "agentic-source-review-tripwire"
 
     async def test_rejected_rescreen_preserves_score_and_attempt_history(
         self,
@@ -10615,6 +11167,18 @@ class TestSubmitResult:
         assert first.status_code == 200
         assert second.status_code == 200
         assert second.json()["status"] == AgentStatus.EVALUATING
+        async with session_maker() as session:
+            events = (
+                await session.scalars(
+                    select(ScreeningReviewEvent).where(
+                        ScreeningReviewEvent.attempt_id == attempt_id
+                    )
+                )
+            ).all()
+            assert len(events) == 1
+            assert events[0].outcome == "pass"
+            assert events[0].effective_decision == "pass"
+            assert events[0].policy_version > 0
 
     async def test_pass_pins_dataset_when_enabled(
         self,
@@ -11870,6 +12434,12 @@ class TestQuarantineReviewContext:
         assert [q["agent_name"] for q in body["miner"]["recent_quarantines"]] == [
             "alpha-agent-v1"
         ]
+        # Every renamed surface keeps emitting the screening-origin code under
+        # the deprecated `reason_code` name too: Platform and Backroom deploy in
+        # parallel from one release, and a Backroom that has not been redeployed
+        # still requires the old name. Same value, never a second fact.
+        summary = body["miner"]["recent_quarantines"][0]
+        assert summary["reason_code"] == summary["screening_reason_code"]
         # The coldkey behind ``same_owner`` is now named, so a reviewer can see
         # WHY two hotkeys were treated as one owner instead of trusting a flag.
         assert body["agent"]["miner_coldkey"] == "5SharedPaymentOwner"

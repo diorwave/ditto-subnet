@@ -79,6 +79,8 @@ from ditto.api_models.admin_quarantine import (
     AdminScreeningRetryNowResponse,
     AdminScreeningReviewDeadlineAttempt,
     AdminScreeningReviewDeadlineDiagnostic,
+    AdminScreeningReviewEvent,
+    AdminScreeningReviewEventList,
     AdminScreeningSubmission,
     AdminScreeningSubmissionList,
     AdminScreeningVerificationCheck,
@@ -95,6 +97,8 @@ from ditto.api_models.admin_quarantine import (
     AdminValidatorAssignmentList,
     AdminValidatorAssignmentReleaseRequest,
     AdminValidatorAssignmentReleaseResponse,
+    resolution_reason_code,
+    review_event_resolution_reason_code,
 )
 from ditto.api_models.agent_status import AgentStatus
 from ditto.api_models.benchmark_contract import benchmark_contract
@@ -158,6 +162,7 @@ from ditto.db.models import (
     ScreeningQuarantineResolution,
     ScreeningRetryOverride,
     ScreeningReviewDeadlineActivation,
+    ScreeningReviewEvent,
     ScreeningVerificationReceipt,
     SubmissionImageBuild,
     SubmissionSourceReview,
@@ -195,6 +200,7 @@ from ditto.db.queries.payments import (
     get_miner_coldkeys_for_agents,
 )
 from ditto.db.queries.screening_review_deadlines import review_deadline_binding
+from ditto.db.queries.screening_review_events import append_manual_review_event
 from ditto.db.queries.tickets import RETRY_COOLDOWN, ticket_attempt_cap
 from ditto.screener_policy_state import effective_screening_policy_version
 from ditto_screening_protocol import (
@@ -238,6 +244,87 @@ async def require_admin(
 
 
 AdminDep = Annotated[None, Depends(require_admin)]
+
+
+@router.get("/screening-review-events", response_model=AdminScreeningReviewEventList)
+async def list_screening_review_events(
+    _admin: AdminDep,
+    session: SessionDep,
+    agent_id: UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminScreeningReviewEventList:
+    """Read immutable snapshots; a missing receipt remains missing, never CLEAR.
+
+    Each event reports two distinct codes: ``screening_reason_code`` is the
+    screening-origin code the screener's verdict carried, and
+    ``resolution_reason_code`` is the operator ruling's own code, non-null only
+    on a manual event. They disagree by design on a manual ruling, because the
+    ruling is a decision *about* the screening lead, not a replacement for it.
+    """
+    predicate = (
+        ScreeningReviewEvent.agent_id == agent_id if agent_id is not None else None
+    )
+    statement = select(ScreeningReviewEvent)
+    count_statement = select(func.count()).select_from(ScreeningReviewEvent)
+    if predicate is not None:
+        statement = statement.where(predicate)
+        count_statement = count_statement.where(predicate)
+    rows = (
+        await session.scalars(
+            statement.order_by(
+                ScreeningReviewEvent.created_at.desc(),
+                ScreeningReviewEvent.event_id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    count = int(await session.scalar(count_statement) or 0)
+    return AdminScreeningReviewEventList(
+        items=[_review_event(row) for row in rows],
+        count=count,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _review_event(row: ScreeningReviewEvent) -> AdminScreeningReviewEvent:
+    """Project one immutable ledger row onto the wire.
+
+    The ledger stores exactly one code per event and is append-only, so it is
+    never restated here: ``screening_reason_code`` passes the stored value
+    through verbatim, which on a manual event is the screening-origin code of
+    the quarantine the operator ruled on. The operator's own basis is derived
+    from ``effective_decision`` at read time and is ``None`` for automated
+    events — an automated rejection is the screener's verdict arriving over the
+    signed screening path, never an operator ruling. Deriving it keeps every
+    row already in the ledger correct without rewriting an append-only table.
+    """
+    return AdminScreeningReviewEvent(
+        event_id=row.event_id,
+        agent_id=row.agent_id,
+        attempt_id=row.attempt_id,
+        quarantine_id=row.quarantine_id,
+        resolution_id=row.resolution_id,
+        previous_event_id=row.previous_event_id,
+        event_kind=row.event_kind,  # type: ignore[arg-type]
+        artifact_sha256=row.artifact_sha256,
+        policy_version=row.policy_version,
+        actor=row.actor,
+        reviewer_model=row.reviewer_model,
+        outcome=row.outcome,
+        effective_decision=row.effective_decision,
+        screening_reason_code=row.reason_code,
+        resolution_reason_code=review_event_resolution_reason_code(
+            row.event_kind, row.effective_decision
+        ),
+        reason=row.reason,
+        prior_agent_status=row.prior_agent_status,
+        next_agent_status=row.next_agent_status,
+        evidence=row.evidence,
+        created_at=row.created_at,
+    )
 
 
 def _review_payloads(
@@ -314,7 +401,7 @@ def _item(
         policy_version=row.policy_version,
         manifest_digest=row.manifest_digest,
         finding_digest=row.finding_digest,
-        reason_code=row.reason_code,
+        screening_reason_code=row.reason_code,
         review_audit_digest=(
             row.review_audit_digest if review_audit is not None else None
         ),
@@ -332,12 +419,14 @@ def _item(
         resolved_by=row.resolved_by,
         resolution=row.resolution,  # type: ignore[arg-type]
         resolution_reason=row.resolution_reason,
+        resolution_reason_code=resolution_reason_code(row.resolution),
         resolution_history=[
             AdminQuarantineResolutionEvent(
                 resolution=event.resolution,  # type: ignore[arg-type]
                 reason=event.reason,
                 actor=event.actor,
                 created_at=event.created_at,
+                resolution_reason_code=resolution_reason_code(event.resolution),
             )
             for event in history or []
         ],
@@ -1017,6 +1106,7 @@ async def execute_quarantine_batch(
                         status_code=409,
                         detail="quarantine changed after preview",
                     )
+                prior_agent_status = agent.status
                 target = {
                     "release": AgentStatus.EVALUATING,
                     "rescreen": AgentStatus.SCREENING_FAILED,
@@ -1025,6 +1115,9 @@ async def execute_quarantine_batch(
                 now = datetime.now(UTC)
                 agent.status = target
                 agent.screening_reason = decision.reason
+                agent.screening_reason_code = resolution_reason_code(
+                    decision.resolution
+                )
                 await _apply_dataset(session, agent, new_dataset)
                 quarantine.status = "resolved"
                 quarantine.resolved_at = now
@@ -1049,15 +1142,28 @@ async def execute_quarantine_batch(
                         actor=x_admin_actor,
                         now=now,
                     )
+                resolution_id = uuid4()
                 session.add(
                     ScreeningQuarantineResolution(
-                        resolution_id=uuid4(),
+                        resolution_id=resolution_id,
                         quarantine_id=quarantine.quarantine_id,
                         resolution=decision.resolution,
                         reason=decision.reason,
                         actor=x_admin_actor,
                         created_at=now,
                     )
+                )
+                await append_manual_review_event(
+                    session,
+                    agent=agent,
+                    quarantine=quarantine,
+                    resolution_id=resolution_id,
+                    resolution=decision.resolution,
+                    reason=decision.reason,
+                    actor=x_admin_actor,
+                    prior_agent_status=prior_agent_status,
+                    next_agent_status=target,
+                    created_at=now,
                 )
             results.append(
                 AdminQuarantineBatchExecuteItem(
@@ -1200,10 +1306,11 @@ async def _build_quarantine_context(
             quarantine_id=row.quarantine_id,
             agent_id=row.agent_id,
             agent_name=other.name,
-            reason_code=row.reason_code,
+            screening_reason_code=row.reason_code,
             status=row.status,  # type: ignore[arg-type]
             resolution=row.resolution,  # type: ignore[arg-type]
             resolution_reason=row.resolution_reason,
+            resolution_reason_code=resolution_reason_code(row.resolution),
             created_at=row.created_at,
             resolved_at=row.resolved_at,
         )
@@ -1459,6 +1566,7 @@ async def resolve_quarantine(
                 detail="quarantine is not active or a correctable rejection",
             )
 
+        prior_agent_status = agent.status
         target = {
             "release": AgentStatus.EVALUATING,
             "rescreen": AgentStatus.SCREENING_FAILED,
@@ -1466,6 +1574,10 @@ async def resolve_quarantine(
         }[payload.resolution]
         agent.status = target
         agent.screening_reason = payload.reason
+        # The miner-facing pair must agree: ``screening_reason`` is the
+        # operator's prose for this outcome, so its code is the operator's
+        # ruling, not the screening-origin code the hold was opened under.
+        agent.screening_reason_code = resolution_reason_code(payload.resolution)
         await _apply_dataset(session, agent, new_dataset)
         quarantine.status = "resolved"
         quarantine.resolved_at = datetime.now(UTC)
@@ -1490,15 +1602,28 @@ async def resolve_quarantine(
                 actor=x_admin_actor,
                 now=quarantine.resolved_at,
             )
+        resolution_id = uuid4()
         session.add(
             ScreeningQuarantineResolution(
-                resolution_id=uuid4(),
+                resolution_id=resolution_id,
                 quarantine_id=quarantine.quarantine_id,
                 resolution=payload.resolution,
                 reason=payload.reason,
                 actor=x_admin_actor,
                 created_at=quarantine.resolved_at,
             )
+        )
+        await append_manual_review_event(
+            session,
+            agent=agent,
+            quarantine=quarantine,
+            resolution_id=resolution_id,
+            resolution=payload.resolution,
+            reason=payload.reason,
+            actor=x_admin_actor,
+            prior_agent_status=prior_agent_status,
+            next_agent_status=target,
+            created_at=quarantine.resolved_at,
         )
 
     history = await _resolution_history(session, [quarantine.quarantine_id])
@@ -1576,10 +1701,21 @@ async def resolve_screening_dispute(
     existing = await session.get(ScreeningDispute, dispute_id)
     existing_kind = existing.kind if existing is not None else None
     existing_quarantine_id = existing.quarantine_id if existing is not None else None
+    existing_agent_status = (
+        await session.scalar(
+            select(Agent.status).where(Agent.agent_id == existing.agent_id)
+        )
+        if existing is not None
+        else None
+    )
     await session.rollback()
     if existing is None:
         raise HTTPException(status_code=404, detail="dispute not found")
-    if payload.resolution == "release" and existing_kind == "screening":
+    if (
+        payload.resolution == "release"
+        and existing_kind == "screening"
+        and existing_agent_status == AgentStatus.REJECTED
+    ):
         if existing_quarantine_id is None:
             raise HTTPException(status_code=404, detail="dispute not found")
         new_dataset = await _prepare_release_dataset(
@@ -1610,7 +1746,6 @@ async def resolve_screening_dispute(
             raise HTTPException(status_code=409, detail="dispute is already resolved")
         if dispute.kind == "screening" and (
             quarantine is None
-            or agent.status != AgentStatus.REJECTED
             or quarantine.status != "resolved"
             or quarantine.resolution != "reject"
         ):
@@ -1618,30 +1753,89 @@ async def resolve_screening_dispute(
                 status_code=409,
                 detail="the disputed rejection is no longer current",
             )
+        already_restored = False
+        if dispute.kind == "screening" and agent.status != AgentStatus.REJECTED:
+            # A later, exact-artifact pass can restore the submission while its
+            # earlier rejection appeal remains pending. Record the appeal's
+            # release verdict without changing that scored submission or the
+            # original quarantine history.
+            latest_attempt = await session.scalar(
+                select(ScreeningAttempt)
+                .where(ScreeningAttempt.agent_id == agent.agent_id)
+                .order_by(
+                    ScreeningAttempt.started_at.desc(),
+                    ScreeningAttempt.attempt_id.desc(),
+                )
+                .limit(1)
+            )
+            already_restored = (
+                payload.resolution == "release"
+                and agent.status == AgentStatus.SCORED
+                and latest_attempt is not None
+                and latest_attempt.status == "passed"
+                and latest_attempt.finished_at is not None
+                and quarantine is not None
+                and quarantine.resolved_at is not None
+                and latest_attempt.finished_at > quarantine.resolved_at
+                and latest_attempt.artifact_sha256 is not None
+                and latest_attempt.artifact_sha256.lower() == agent.sha256.lower()
+            )
+            if not already_restored:
+                raise HTTPException(
+                    status_code=409,
+                    detail="the disputed rejection is no longer current",
+                )
+        if (
+            dispute.kind == "screening"
+            and agent.status == AgentStatus.REJECTED
+            and existing_agent_status != AgentStatus.REJECTED
+        ):
+            raise HTTPException(
+                status_code=409, detail="submission changed during resolution"
+            )
 
         now = datetime.now(UTC)
         # A gate-notes dispute appeals shadow evidence on a scored submission:
         # either resolution records the operator's verdict on the cited notes
         # and NEVER releases, re-evaluates or re-scores the agent. Only a
         # screening release moves the agent.
-        if payload.resolution == "release" and dispute.kind == "screening":
+        if (
+            payload.resolution == "release"
+            and dispute.kind == "screening"
+            and not already_restored
+        ):
             assert quarantine is not None
+            prior_agent_status = agent.status
             agent.status = AgentStatus.EVALUATING
             agent.screening_reason = payload.reason
+            agent.screening_reason_code = resolution_reason_code("release")
             await _apply_dataset(session, agent, new_dataset)
             quarantine.resolved_at = now
             quarantine.resolved_by = x_admin_actor
             quarantine.resolution = "release"
             quarantine.resolution_reason = payload.reason
+            resolution_id = uuid4()
             session.add(
                 ScreeningQuarantineResolution(
-                    resolution_id=uuid4(),
+                    resolution_id=resolution_id,
                     quarantine_id=quarantine.quarantine_id,
                     resolution="release",
                     reason=payload.reason,
                     actor=x_admin_actor,
                     created_at=now,
                 )
+            )
+            await append_manual_review_event(
+                session,
+                agent=agent,
+                quarantine=quarantine,
+                resolution_id=resolution_id,
+                resolution="release",
+                reason=payload.reason,
+                actor=x_admin_actor,
+                prior_agent_status=prior_agent_status,
+                next_agent_status=agent.status,
+                created_at=now,
             )
         dispute.status = "resolved"
         dispute.resolved_at = now
@@ -2421,9 +2615,39 @@ async def get_screening_failure_diagnostic(
         reason_code=attempt.reason_code,
         private_failure_detail=attempt.private_failure_detail,
         private_failure_log_tail=attempt.private_failure_log_tail,
+        l2_review_diagnostic=await _l2_review_diagnostic(session, agent_id, attempt_id),
         court_diagnostic=await _court_diagnostic(session, attempt_id),
         court_completion_receipt=await _court_completion_receipt(session, attempt_id),
     )
+
+
+async def _l2_review_diagnostic(
+    session: AsyncSession, agent_id: UUID, attempt_id: UUID
+) -> ScreenReviewAudit | None:
+    """Return only an exact-attempt, digest-verified L2 audit."""
+    quarantine = await session.scalar(
+        select(ScreeningQuarantine).where(
+            ScreeningQuarantine.attempt_id == attempt_id,
+            ScreeningQuarantine.agent_id == agent_id,
+        )
+    )
+    if (
+        quarantine is None
+        or not isinstance(quarantine.review_audit, dict)
+        or quarantine.review_audit_digest is None
+    ):
+        return None
+    try:
+        audit = ScreenReviewAudit.model_validate(quarantine.review_audit)
+    except ValidationError:
+        logger.warning("screening L2 diagnostic rejected attempt_id=%s", attempt_id)
+        return None
+    if (
+        audit.stage != "l2"
+        or audit.canonical_digest() != quarantine.review_audit_digest
+    ):
+        return None
+    return audit
 
 
 async def _court_diagnostic(
@@ -2704,6 +2928,12 @@ async def rescreen_rejected_submission(
             raise HTTPException(status_code=409, detail="screening attempt is missing")
         agent.status = AgentStatus.SCREENING_FAILED
         agent.screening_reason = "Operator requested a screening retry"
+        # The submission is going back to the screener, so no verdict describes
+        # it right now. Leaving the previous attempt's code in place would pair
+        # this operator prose with a screening code the retry has superseded --
+        # the conflation #2260 is about. The code is repopulated when the new
+        # attempt concludes, and the attempt row keeps the old lead verbatim.
+        agent.screening_reason_code = None
         await _authorize_screening_retry(
             session,
             agent=agent,
