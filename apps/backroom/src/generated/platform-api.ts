@@ -1308,7 +1308,9 @@ export interface paths {
          *
          *     ``/admin/inference-runtime-metrics`` already reports failures per lane per
          *     window; this splits the same bounded windows by the dimensions an upstream
-         *     rate-limit burst actually moves. Counts and identifiers only.
+         *     rate-limit burst actually moves, and flags a report-only five-minute
+         *     ``upstream_http_429`` burst per lane with the tickets it touched. Counts
+         *     and identifiers only.
          */
         get: operations["get_inference_failure_taxonomy_api_v1_admin_inference_failure_taxonomy_get"];
         put?: never;
@@ -20046,6 +20048,8 @@ export interface components {
              * Format: date-time
              */
             observed_at: string;
+            /** Rate Limit Bursts */
+            rate_limit_bursts: components["schemas"]["InferenceRateLimitBurst"][];
             /** Window Seconds */
             window_seconds: number[];
         };
@@ -20141,6 +20145,64 @@ export interface components {
             tokens_per_second: number;
             /** Window Seconds */
             window_seconds: number;
+        };
+        /**
+         * InferenceRateLimitBurst
+         * @description Report-only five-minute upstream rate-limit signal for one lane.
+         *
+         *     ``active`` means the lane's ``upstream_http_429`` count reached the
+         *     provisional ``threshold`` while the local global in-flight peak stayed below
+         *     the configured limit -- the upstream pool, not Ditto's own admission, was
+         *     the bottleneck. Nothing is enforced, rerouted, or retried on it.
+         */
+        InferenceRateLimitBurst: {
+            /** Active */
+            active: boolean;
+            /** Global Concurrency Limit */
+            global_concurrency_limit: number;
+            /** Peak Global Concurrency */
+            peak_global_concurrency: number;
+            /** Rate Limited Failures */
+            rate_limited_failures: number;
+            /**
+             * Request Kind
+             * @enum {string}
+             */
+            request_kind: "chat" | "embedding";
+            /** Threshold */
+            threshold: number;
+            /** Tickets */
+            tickets: components["schemas"]["InferenceRateLimitedTicket"][];
+            /** Tickets Total */
+            tickets_total: number;
+            /** Tickets Truncated */
+            tickets_truncated: boolean;
+            /** Window Seconds */
+            window_seconds: number;
+        };
+        /**
+         * InferenceRateLimitedTicket
+         * @description One validator ticket whose calls hit ``upstream_http_429`` in the window.
+         */
+        InferenceRateLimitedTicket: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Bench Version */
+            bench_version: number;
+            /** Rate Limited Failures */
+            rate_limited_failures: number;
+            /** Slot Id */
+            slot_id: string;
+            /**
+             * Ticket Deadline
+             * Format: date-time
+             */
+            ticket_deadline: string;
+            /** Validator Hotkey */
+            validator_hotkey: string;
         };
         /** InferenceRouteView */
         InferenceRouteView: {
