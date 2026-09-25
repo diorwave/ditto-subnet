@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.314.0 (2026-09-25)
+
+### Features
+
+- **platform**: Expose the outlier escalation posture and activity to Backroom
+  ([#2303](https://github.com/ditto-assistant/ditto-subnet/pull/2303),
+  [`b70b5df`](https://github.com/ditto-assistant/ditto-subnet/commit/b70b5df011f050f1bb245f66045c85ccf4e55999))
+
+
 ## v0.313.4 (2026-09-25)
 
 ### Bug Fixes
