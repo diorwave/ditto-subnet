@@ -2,6 +2,141 @@
 
 <!-- version list -->
 
+## v0.312.0 (2026-09-25)
+
+### Features
+
+- **screener**: Allow GPT-6 reviewer models as opt-in settings
+  ([#2294](https://github.com/ditto-assistant/ditto-subnet/pull/2294),
+  [`39ead80`](https://github.com/ditto-assistant/ditto-subnet/commit/39ead800ff5a8c7b9e4a98937c06d8b46cb61a5c))
+
+
+## v0.311.20 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Grant the worker the rootless socket only after the daemon is ready
+  ([#2212](https://github.com/ditto-assistant/ditto-subnet/pull/2212),
+  [`b918967`](https://github.com/ditto-assistant/ditto-subnet/commit/b918967ebc30853142f011034cf906f0c6ad2bf9))
+
+
+## v0.311.19 (2026-09-25)
+
+### Bug Fixes
+
+- **backroom**: Keep interactive MCP access tokens valid for 24 hours
+  ([#2203](https://github.com/ditto-assistant/ditto-subnet/pull/2203),
+  [`88693ef`](https://github.com/ditto-assistant/ditto-subnet/commit/88693ef64dbbf3bbc60178f4f3bbd3adf83c5abb))
+
+- **backroom**: Label the capacity success clock as the last GCE fleet read
+  ([#2206](https://github.com/ditto-assistant/ditto-subnet/pull/2206),
+  [`259556e`](https://github.com/ditto-assistant/ditto-subnet/commit/259556e919115e0f7488bb3853debb1baa442e22))
+
+
+## v0.311.18 (2026-09-25)
+
+### Bug Fixes
+
+- **infra**: Deny public /metrics and make the Platform proxy denials take effect behind the relay
+  pool ([#2214](https://github.com/ditto-assistant/ditto-subnet/pull/2214),
+  [`f9e2ccc`](https://github.com/ditto-assistant/ditto-subnet/commit/f9e2cccd5b3cf9d86fdacf0ad15891b162c8854a))
+
+- **validator**: Bind the sandbox Docker daemon API to loopback only
+  ([#2207](https://github.com/ditto-assistant/ditto-subnet/pull/2207),
+  [`1db16b9`](https://github.com/ditto-assistant/ditto-subnet/commit/1db16b9bf4a7df86f2bbd8d3d62d27c099e4d427))
+
+
+## v0.311.17 (2026-09-25)
+
+### Bug Fixes
+
+- **platform**: Separate the screening reason code from the operator ruling
+  ([#2279](https://github.com/ditto-assistant/ditto-subnet/pull/2279),
+  [`14ab026`](https://github.com/ditto-assistant/ditto-subnet/commit/14ab02680777955b79145e749cc51142b5b8c594))
+
+### Documentation
+
+- **dittobench-api**: State that scored runs complete when a harness ignores tool_endpoint
+  ([#2282](https://github.com/ditto-assistant/ditto-subnet/pull/2282),
+  [`7728902`](https://github.com/ditto-assistant/ditto-subnet/commit/7728902366281dd8902814f4b3c1b3d5197eb43e))
+
+
+## v0.311.16 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Classify L2 submission validation feedback
+  ([#2292](https://github.com/ditto-assistant/ditto-subnet/pull/2292),
+  [`585d40f`](https://github.com/ditto-assistant/ditto-subnet/commit/585d40f0da8ae29f8f9efbe87e026b4ad529f0a5))
+
+
+## v0.311.15 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Audit v13 preflight review holds
+  ([#2291](https://github.com/ditto-assistant/ditto-subnet/pull/2291),
+  [`7322852`](https://github.com/ditto-assistant/ditto-subnet/commit/7322852b5ed7bfa1b132cc6700b8b0915fd755ee))
+
+
+## v0.311.14 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Clear proven unreachable preflight leads
+  ([#2288](https://github.com/ditto-assistant/ditto-subnet/pull/2288),
+  [`1a97adf`](https://github.com/ditto-assistant/ditto-subnet/commit/1a97adfe50b00a9daca169772e698765fc2b9aa4))
+
+
+## v0.311.13 (2026-09-25)
+
+### Bug Fixes
+
+- **infra**: Pin Docker apt signing key everywhere it is fetched
+  ([#2216](https://github.com/ditto-assistant/ditto-subnet/pull/2216),
+  [`c61a474`](https://github.com/ditto-assistant/ditto-subnet/commit/c61a47426166e03fa0089fbde30e8eea2f3a0eee))
+
+
+## v0.311.12 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Identify trusted v13 inference URL provenance
+  ([#2285](https://github.com/ditto-assistant/ditto-subnet/pull/2285),
+  [`48b0986`](https://github.com/ditto-assistant/ditto-subnet/commit/48b0986d96d3ca07c7a963d2d1133cb09dce0ee8))
+
+
+## v0.311.11 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Distinguish suppressed calls from executed ledger
+  ([#2284](https://github.com/ditto-assistant/ditto-subnet/pull/2284),
+  [`3ca26bd`](https://github.com/ditto-assistant/ditto-subnet/commit/3ca26bd97dd8cba170ab3503a9ef905ca87ee7b7))
+
+- **screener**: Retain image evidence for v13 source holds
+  ([#2209](https://github.com/ditto-assistant/ditto-subnet/pull/2209),
+  [`04343d3`](https://github.com/ditto-assistant/ditto-subnet/commit/04343d380ca7e3cfb5c0ba82f6e42fc7de68a5a7))
+
+
+## v0.311.10 (2026-09-25)
+
+### Bug Fixes
+
+- **starter-kit**: Keep abstention model authored
+  ([#2281](https://github.com/ditto-assistant/ditto-subnet/pull/2281),
+  [`c97f28c`](https://github.com/ditto-assistant/ditto-subnet/commit/c97f28c8f0a373b90cd48c1fe81479c4d433b752))
+
+
+## v0.311.9 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Preserve report-only canary completion
+  ([#2283](https://github.com/ditto-assistant/ditto-subnet/pull/2283),
+  [`e33555f`](https://github.com/ditto-assistant/ditto-subnet/commit/e33555f543da0276cdbdd72e3b1133369bcfa1cb))
+
+
 ## v0.311.8 (2026-09-25)
 
 ### Bug Fixes

@@ -289,6 +289,75 @@ async def test_v13_shadow_semantics_require_tool_and_user_specific_memory(
     assert all(marker not in repr(decisions) for marker in memories.values())
 
 
+async def test_v13_incomplete_source_hold_retains_verified_image_without_passing(
+    make_config: Callable[..., ScreenerConfig], tmp_path: Path
+) -> None:
+    tarball = _valid_tar()
+    gate = _gate_with(make_config(), _ok_run(), tarball=tarball)
+    held = ScreeningDecision(
+        outcome=ScreeningOutcome.QUARANTINE,
+        detail="source review incomplete",
+        manifest_digest="ab" * 32,
+        evidence=(
+            PolicyEvidence(
+                "adjudication", "adjudicated-source-review-escalate", "held"
+            ),
+        ),
+        policy_version=13,
+    )
+    uploads: list[str] = []
+
+    async def evaluate(*_args: Any, **_kwargs: Any) -> ScreeningDecision:
+        return held
+
+    async def run_and_probe(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        return gate_module._StageResult(True, ""), gate_module._AuditRuntime(
+            harness_base="http://harness:8080",
+            gateway_response_token="secret-a",
+            oracle_answer="secret-b",
+            gateway_state_file="/state/model-called",
+            tool_route="route",
+            tool_key=b"key",
+        )
+
+    async def export_image(
+        image_id: str, *, image_ref: str, deadline: float | None
+    ) -> BuiltImageArtifact:
+        assert deadline is None
+        path = tmp_path / "held-image.tar"
+        path.write_bytes(b"held image")
+        return BuiltImageArtifact(
+            path=str(path),
+            sha256=hashlib.sha256(b"held image").hexdigest(),
+            size_bytes=10,
+            image_id=image_id,
+            image_ref=image_ref,
+        )
+
+    async def publish_held(image: BuiltImageArtifact) -> None:
+        uploads.append(image.sha256)
+
+    gate._policy.evaluate = evaluate  # type: ignore[method-assign]
+    gate._run_and_probe = run_and_probe  # type: ignore[method-assign]
+    gate._export_image = export_image  # type: ignore[method-assign]
+    async with gate._client:
+        result = await gate.screen(
+            agent_id=_AGENT,
+            attempt_id=_ATTEMPT,
+            bench_version=13,
+            miner_hotkey=_MINER,
+            sha256=hashlib.sha256(tarball).hexdigest(),
+            download_url=_URL,
+            policy_version=13,
+            publish_image=lambda _image: asyncio.sleep(0),
+            publish_held_image=publish_held,
+        )
+
+    assert result.outcome == ScreeningOutcome.QUARANTINE
+    assert uploads == [hashlib.sha256(b"held image").hexdigest()]
+    assert not (tmp_path / "held-image.tar").exists()
+
+
 @pytest.mark.parametrize("replay_probes", [False, True])
 async def test_v13_shadow_observation_runs_only_after_policy_decision(
     make_config: Callable[..., ScreenerConfig],
@@ -1082,10 +1151,11 @@ async def test_static_malicious_preflight_quarantines_before_docker(
 ) -> None:
     tarball = _valid_tar(
         **{
+            "Dockerfile": b"FROM scratch\nCOPY src/main.rs /src/main.rs\n",
             "src/main.rs": (
                 b'let endpoint = "/var/run/docker.sock";\n'
                 b"connect_control_socket(endpoint);\n"
-            )
+            ),
         }
     )
     calls: list[list[str]] = []
@@ -1222,7 +1292,7 @@ async def test_static_preflight_v2_enforce_reviews_helper_before_build(
     assert result.finding["prompt_revision"] == "static-malicious-preflight-v1"
 
 
-async def test_static_preflight_v2_shadow_preserves_v1_and_journals_delta(
+async def test_static_preflight_v2_shadow_clears_excluded_helper_and_journals_delta(
     make_config: Callable[..., ScreenerConfig], tmp_path: Path
 ) -> None:
     tarball = _valid_tar(
@@ -1252,13 +1322,11 @@ async def test_static_preflight_v2_shadow_preserves_v1_and_journals_delta(
     async with gate._client:
         result = await _screen(gate, hashlib.sha256(tarball).hexdigest())
 
-    assert result.outcome == ScreeningOutcome.QUARANTINE
-    assert result.finding is not None
-    assert result.finding["prompt_revision"] == "static-malicious-preflight-v1"
-    assert not any(call[0] in {"build", "run", "exec"} for call in calls)
+    assert result.outcome == ScreeningOutcome.PASS
+    assert any(call[0] == "build" for call in calls)
     record = json.loads(audit_path.read_text())
     assert record["mode"] == "shadow"
-    assert record["legacy_decisive"] is True
+    assert record["legacy_decisive"] is False
     assert record["candidate_decisive"] is False
     assert record["artifact_sha256"] == hashlib.sha256(tarball).hexdigest()
     assert "collector.invalid" not in audit_path.read_text()

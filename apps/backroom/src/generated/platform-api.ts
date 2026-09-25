@@ -2271,6 +2271,12 @@ export interface paths {
         /**
          * List Screening Review Events
          * @description Read immutable snapshots; a missing receipt remains missing, never CLEAR.
+         *
+         *     Each event reports two distinct codes: ``screening_reason_code`` is the
+         *     screening-origin code the screener's verdict carried, and
+         *     ``resolution_reason_code`` is the operator ruling's own code, non-null only
+         *     on a manual event. They disagree by design on a manual ruling, because the
+         *     ruling is a decision *about* the screening lead, not a replacement for it.
          */
         get: operations["list_screening_review_events_api_v1_admin_screening_review_events_get"];
         put?: never;
@@ -10148,14 +10154,26 @@ export interface components {
              * Format: uuid
              */
             quarantine_id: string;
-            /** Reason Code */
-            reason_code: string;
+            /**
+             * Reason Code
+             * @deprecated
+             * @description Deprecated alias for ``screening_reason_code``, kept for the rollout.
+             *
+             *     Same value, same screening-origin meaning, and lost as soon as the
+             *     console reads only the new name — see ``AdminQuarantineItem.reason_code``
+             *     for why the transition needs it.
+             */
+            readonly reason_code: string;
             /** Resolution */
             resolution: ("release" | "rescreen" | "reject") | null;
             /** Resolution Reason */
             resolution_reason: string | null;
+            /** Resolution Reason Code */
+            resolution_reason_code?: ("operator-released-quarantine" | "operator-rescreened-quarantine" | "operator-rejected-quarantine") | null;
             /** Resolved At */
             resolved_at: string | null;
+            /** Screening Reason Code */
+            screening_reason_code: string;
             /**
              * Status
              * @enum {string}
@@ -10584,14 +10602,26 @@ export interface components {
              * Format: uuid
              */
             quarantine_id: string;
-            /** Reason Code */
-            reason_code: string;
+            /**
+             * Reason Code
+             * @deprecated
+             * @description Deprecated alias for ``screening_reason_code``, kept for the rollout.
+             *
+             *     Platform and Backroom deploy in parallel from one release, so a Backroom
+             *     that has not been redeployed still requires this field and would reject
+             *     every quarantine item if it disappeared. It always carries the same
+             *     screening-origin code as ``screening_reason_code`` — never the operator's
+             *     ruling — and is removed once the console reads only the new name.
+             */
+            readonly reason_code: string;
             /** Resolution */
             resolution: ("release" | "rescreen" | "reject") | null;
             /** Resolution History */
             resolution_history?: components["schemas"]["AdminQuarantineResolutionEvent"][];
             /** Resolution Reason */
             resolution_reason: string | null;
+            /** Resolution Reason Code */
+            resolution_reason_code?: ("operator-released-quarantine" | "operator-rescreened-quarantine" | "operator-rejected-quarantine") | null;
             /** Resolved At */
             resolved_at: string | null;
             /** Resolved By */
@@ -10603,6 +10633,8 @@ export interface components {
             review_notes?: components["schemas"]["SourceReviewNote"][] | null;
             /** Review Notes Digest */
             review_notes_digest?: string | null;
+            /** Screening Reason Code */
+            screening_reason_code: string;
             /**
              * Status
              * @enum {string}
@@ -10632,6 +10664,8 @@ export interface components {
              * @enum {string}
              */
             resolution: "release" | "rescreen" | "reject";
+            /** Resolution Reason Code */
+            resolution_reason_code?: ("operator-released-quarantine" | "operator-rescreened-quarantine" | "operator-rejected-quarantine") | null;
         };
         /** AdminQuarantineResolveRequest */
         AdminQuarantineResolveRequest: {
@@ -11698,12 +11732,24 @@ export interface components {
             quarantine_id: string | null;
             /** Reason */
             reason: string | null;
-            /** Reason Code */
-            reason_code: string | null;
+            /**
+             * Reason Code
+             * @deprecated
+             * @description Deprecated alias for ``screening_reason_code``, kept for the rollout.
+             *
+             *     Same value, same screening-origin meaning, and lost as soon as the
+             *     console reads only the new name — see ``AdminQuarantineItem.reason_code``
+             *     for why the transition needs it.
+             */
+            readonly reason_code: string | null;
             /** Resolution Id */
             resolution_id: string | null;
+            /** Resolution Reason Code */
+            resolution_reason_code?: ("operator-released-quarantine" | "operator-rescreened-quarantine" | "operator-rejected-quarantine") | null;
             /** Reviewer Model */
             reviewer_model: string | null;
+            /** Screening Reason Code */
+            screening_reason_code: string | null;
         };
         /** AdminScreeningReviewEventList */
         AdminScreeningReviewEventList: {
@@ -20469,6 +20515,8 @@ export interface components {
             expected_agent_status: string;
             /** Expected Score Count */
             expected_score_count: number;
+            /** Lease Expires At */
+            lease_expires_at: string | null;
             /** Report */
             report: {
                 [key: string]: unknown;
@@ -27964,14 +28012,22 @@ export interface components {
         ScreenReviewAudit: {
             /** Budget Stop Reason */
             budget_stop_reason?: ("none" | "step" | "tool" | "aggregate" | "token" | "cost" | "time") | null;
+            /** Cause Detail */
+            cause_detail?: ("lease_unavailable" | "review_disabled") | null;
             /** Cost Usd Used */
             cost_usd_used?: number | null;
+            /** Elapsed Ms */
+            elapsed_ms?: number | null;
+            /** Final Stage */
+            final_stage?: ("preflight" | "analyst" | "critic" | "adjudicator") | null;
             /** Harness Revision */
             harness_revision?: string | null;
             /** Input Tokens Used */
             input_tokens_used?: number | null;
             /** Max Cost Usd */
             max_cost_usd?: number | null;
+            /** Max Elapsed Ms */
+            max_elapsed_ms?: number | null;
             /** Max Input Tokens */
             max_input_tokens?: number | null;
             /** Max Output Tokens */
@@ -27992,8 +28048,12 @@ export interface components {
             read_bytes_used?: number | null;
             /** Reason Code */
             reason_code: string;
+            /** Requested Model */
+            requested_model?: string | null;
             /** Resolution Basis */
             resolution_basis?: "insufficient_static_evidence" | null;
+            /** Response Provider */
+            response_provider?: string | null;
             /**
              * Stage
              * @enum {string}
@@ -29371,13 +29431,13 @@ export interface components {
              *       "openai/gpt-5.6-sol"
              *     ]
              */
-            l2_fallback_models: ("openai/gpt-5.6-terra" | "moonshotai/kimi-k3" | "z-ai/glm-5.2" | "openai/gpt-5.6-sol")[];
+            l2_fallback_models: ("openai/gpt-5.6-terra" | "openai/gpt-6-sol" | "moonshotai/kimi-k3" | "z-ai/glm-5.2" | "openai/gpt-5.6-sol")[];
             /**
              * L2 Model
              * @default openai/gpt-5.6-terra
              * @enum {string}
              */
-            l2_model: "openai/gpt-5.6-terra" | "moonshotai/kimi-k3" | "z-ai/glm-5.2" | "openai/gpt-5.6-sol";
+            l2_model: "openai/gpt-5.6-terra" | "openai/gpt-6-sol" | "moonshotai/kimi-k3" | "z-ai/glm-5.2" | "openai/gpt-5.6-sol";
             /**
              * L3 Enabled
              * @default true
@@ -29386,9 +29446,9 @@ export interface components {
             /**
              * L3 Model
              * @default openai/gpt-5.6-sol
-             * @constant
+             * @enum {string}
              */
-            l3_model: "openai/gpt-5.6-sol";
+            l3_model: "openai/gpt-5.6-sol" | "openai/gpt-6-sol";
             /**
              * Max Completion Tokens
              * @default 2400
@@ -29449,9 +29509,9 @@ export interface components {
             /**
              * Source Review Model
              * @default openai/gpt-5.6-luna
-             * @constant
+             * @enum {string}
              */
-            source_review_model: "openai/gpt-5.6-luna";
+            source_review_model: "openai/gpt-5.6-luna" | "openai/gpt-6-luna";
             /**
              * Source Review Reasoning Effort
              * @default high

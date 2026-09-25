@@ -264,11 +264,12 @@ export const screeningDisputeKindSchema = z.enum(['screening', 'gate_notes'])
 export const screenerReviewModeSchema = z.enum(['off', 'shadow', 'enforce', 'inherit'])
 export const screenerReviewModelSchema = z.enum([
   'openai/gpt-5.6-terra',
+  'openai/gpt-6-sol',
   'moonshotai/kimi-k3',
   'z-ai/glm-5.2',
   'openai/gpt-5.6-sol',
 ])
-export const sourceReviewModelSchema = z.enum(['openai/gpt-5.6-luna'])
+export const sourceReviewModelSchema = z.enum(['openai/gpt-5.6-luna', 'openai/gpt-6-luna'])
 export const fanoutShadowStatusSchema = z.enum([
   'queued',
   'leased',
@@ -292,7 +293,7 @@ export const screenerReviewSettingsSchema = z
     l2_model: screenerReviewModelSchema,
     l2_fallback_models: z.array(screenerReviewModelSchema).max(2),
     l3_enabled: z.boolean().default(true),
-    l3_model: z.literal('openai/gpt-5.6-sol'),
+    l3_model: z.enum(['openai/gpt-5.6-sol', 'openai/gpt-6-sol']),
     timeout_seconds: z.number().int().min(30).max(1_800),
     max_steps: z.number().int().min(1).max(256),
     source_review_max_steps: z.number().int().min(1).max(240).default(200),
@@ -4437,6 +4438,23 @@ export const sourceReviewNoteSchema = z.strictObject({
   stage: z.enum(['l1', 'l2', 'l3']),
 } satisfies PlatformResponseShape<GeneratedSourceReviewNote>)
 
+// Platform and Backroom deploy in parallel from one release with no ordering
+// between them, so for one release the screening-origin code has to answer to
+// both names: a Backroom that ships first reads a Platform that still calls it
+// `reason_code`, and a Platform that ships first keeps emitting that name for a
+// Backroom that has not been redeployed. Accept either spelling, hand the rest
+// of the console a single value under the current name, and drop the deprecated
+// alias from the parsed object so nothing downstream has to know the transition
+// is happening. The alias is declared as a validator rather than left on the
+// wire because these are plain `z.object`s, which strip unknown keys. Remove
+// this, the `reason_code` validators, and the Platform alias together.
+function screeningOriginCode(
+  screeningReasonCode: string | null | undefined,
+  reasonCode: string | null | undefined,
+) {
+  return screeningReasonCode ?? reasonCode ?? null
+}
+
 export const screeningQuarantineSchema = z.object({
   quarantine_id: z.string().uuid(),
   agent_id: z.string().uuid(),
@@ -4453,7 +4471,14 @@ export const screeningQuarantineSchema = z.object({
   policy_version: z.number().int().nonnegative(),
   manifest_digest: z.string(),
   finding_digest: z.string().nullable(),
-  reason_code: z.string(),
+  // Why the screener held this submission: the code from the signed verdict
+  // that opened the quarantine. Renamed from `reason_code` so the console
+  // cannot read it as the operator's own ruling.
+  screening_reason_code: z.string().nullish().default(null),
+  // Deprecated Platform alias for the same value, non-null until the Platform
+  // drops it. Never a second fact — coalesced and stripped by the transform
+  // below, so the console only ever sees the current name.
+  reason_code: z.string().nullish().default(null),
   // Nullish with defaults so Backroom keeps working against a platform that
   // has not deployed the review payloads yet.
   evidence: z.array(screeningEvidenceItemSchema).nullish().default(null),
@@ -4467,35 +4492,55 @@ export const screeningQuarantineSchema = z.object({
   resolved_by: z.string().nullable(),
   resolution: quarantineResolutionSchema.nullable(),
   resolution_reason: z.string().nullable(),
-})
+  // The operator's ruling as its own code, derived by the platform from
+  // `resolution`. Null while the quarantine is active. Deliberately a plain
+  // string rather than an enum: a platform that learns a new resolution value
+  // must not blank the panel here.
+  resolution_reason_code: z.string().nullish().default(null),
+}).transform(({ reason_code, ...rest }) => ({
+  ...rest,
+  screening_reason_code: screeningOriginCode(rest.screening_reason_code, reason_code),
+}))
 
 export const screeningQuarantineListSchema = z.object({
   items: z.array(screeningQuarantineSchema),
   count: z.number().int().nonnegative(),
 })
 
+const screeningReviewEventSchema = z.object({
+  event_id: z.string().uuid(),
+  agent_id: z.string().uuid(),
+  attempt_id: z.string().uuid(),
+  quarantine_id: z.string().uuid().nullable(),
+  resolution_id: z.string().uuid().nullable(),
+  previous_event_id: z.string().uuid().nullable(),
+  event_kind: z.enum(['automated', 'manual']),
+  artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  policy_version: z.number().int().positive(),
+  actor: z.string(),
+  reviewer_model: z.string().nullable(),
+  outcome: z.string(),
+  effective_decision: z.string(),
+  // Screening-origin code, snapshotted when the event was written. On a
+  // manual event it is the code the reviewed quarantine was opened with —
+  // the lead the operator ruled on, not the ruling itself. See
+  // `resolution_reason_code`.
+  screening_reason_code: z.string().nullish().default(null),
+  // Deprecated Platform alias, coalesced and stripped by the transform below.
+  reason_code: z.string().nullish().default(null),
+  resolution_reason_code: z.string().nullish().default(null),
+  reason: z.string().nullable(),
+  prior_agent_status: z.string(),
+  next_agent_status: z.string(),
+  evidence: z.record(z.string(), z.unknown()),
+  created_at: z.string(),
+}).transform(({ reason_code, ...rest }) => ({
+  ...rest,
+  screening_reason_code: screeningOriginCode(rest.screening_reason_code, reason_code),
+}))
+
 export const screeningReviewEventListSchema = z.object({
-  items: z.array(z.object({
-    event_id: z.string().uuid(),
-    agent_id: z.string().uuid(),
-    attempt_id: z.string().uuid(),
-    quarantine_id: z.string().uuid().nullable(),
-    resolution_id: z.string().uuid().nullable(),
-    previous_event_id: z.string().uuid().nullable(),
-    event_kind: z.enum(['automated', 'manual']),
-    artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    policy_version: z.number().int().positive(),
-    actor: z.string(),
-    reviewer_model: z.string().nullable(),
-    outcome: z.string(),
-    effective_decision: z.string(),
-    reason_code: z.string().nullable(),
-    reason: z.string().nullable(),
-    prior_agent_status: z.string(),
-    next_agent_status: z.string(),
-    evidence: z.record(z.string(), z.unknown()),
-    created_at: z.string(),
-  })),
+  items: z.array(screeningReviewEventSchema),
   count: z.number().int().nonnegative(),
   limit: z.number().int().positive(),
   offset: z.number().int().nonnegative(),
@@ -4992,13 +5037,21 @@ export const minerQuarantineSummarySchema = z.object({
   quarantine_id: z.string().uuid(),
   agent_id: z.string().uuid(),
   agent_name: z.string(),
-  reason_code: z.string(),
+  // The screening-origin code that opened this quarantine, preserved across
+  // the resolution. Read it as "why it was held", never as "how it ended".
+  screening_reason_code: z.string().nullish().default(null),
+  // Deprecated Platform alias, coalesced and stripped by the transform below.
+  reason_code: z.string().nullish().default(null),
   status: z.enum(['active', 'resolved']),
   resolution: quarantineResolutionSchema.nullable(),
   resolution_reason: z.string().nullable(),
+  resolution_reason_code: z.string().nullish().default(null),
   created_at: z.string(),
   resolved_at: z.string().nullable(),
-})
+}).transform(({ reason_code, ...rest }) => ({
+  ...rest,
+  screening_reason_code: screeningOriginCode(rest.screening_reason_code, reason_code),
+}))
 
 export const minerContextSchema = z.object({
   miner_hotkey: z.string(),
@@ -7088,7 +7141,7 @@ export const screenReviewAuditSchema = z.object({
   max_read_bytes: z.number().int().positive().nullish().default(null),
   read_bytes_used: z.number().int().nonnegative().nullish().default(null),
   max_input_tokens: z.number().int().positive().nullish().default(null),
-  input_tokens_used: z.number().int().min(0).max(20_000_000).nullish().default(null),
+  input_tokens_used: z.number().int().min(0).max(100_000_000).nullish().default(null),
   max_output_tokens: z.number().int().min(1).max(1_000_000).nullish().default(null),
   output_tokens_used: z.number().int().min(0).max(1_000_000).nullish().default(null),
   max_cost_usd: z.number().positive().nullish().default(null),
@@ -7098,6 +7151,12 @@ export const screenReviewAuditSchema = z.object({
   model_steps_observed: z.number().int().min(0).max(10_000).nullish().default(null),
   tool_calls_observed: z.number().int().min(0).max(10_000).nullish().default(null),
   budget_stop_reason: z.enum(['none', 'step', 'tool', 'aggregate', 'token', 'cost', 'time']).nullish().default(null),
+  requested_model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9/._:-]{0,127}$/).nullish().default(null),
+  response_provider: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,63}$/).nullish().default(null),
+  final_stage: z.enum(['preflight', 'analyst', 'critic', 'adjudicator']).nullish().default(null),
+  cause_detail: z.enum(['lease_unavailable', 'review_disabled']).nullish().default(null),
+  max_elapsed_ms: z.number().int().min(1).max(3_600_000).nullish().default(null),
+  elapsed_ms: z.number().int().min(0).max(3_600_000).nullish().default(null),
 })
 
 export const deferredReviewEvidenceSchema = z.object({

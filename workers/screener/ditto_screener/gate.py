@@ -1126,6 +1126,9 @@ class BuildGate:
         progress: Callable[[ScreenerProgressStage], None] | None = None,
         deadline: Deadline = None,
         publish_image: Callable[[BuiltImageArtifact], Awaitable[None]] | None = None,
+        publish_held_image: (
+            Callable[[BuiltImageArtifact], Awaitable[None]] | None
+        ) = None,
         record_archive_verification: Callable[[], Awaitable[None]] | None = None,
         record_runtime_verification: (
             Callable[[str, str], Awaitable[None]] | None
@@ -1896,36 +1899,55 @@ class BuildGate:
                 decision, active_audit_runtime.seed_probe
             )
             self._journal.record(context=context, decision=decision)
+            held_source_review = (
+                policy_version == 13
+                and decision.outcome == ScreeningOutcome.QUARANTINE
+                and decision.finding is None
+                and any(
+                    item.code == "adjudicated-source-review-escalate"
+                    for item in decision.evidence
+                )
+            )
+            image_publisher = (
+                publish_held_image if held_source_review else publish_image
+            )
             if (
                 decision.outcome
-                in {
-                    ScreeningOutcome.PASS,
-                    ScreeningOutcome.PASS_INCONCLUSIVE,
-                }
-                and publish_image is not None
-            ):
+                in {ScreeningOutcome.PASS, ScreeningOutcome.PASS_INCONCLUSIVE}
+                or held_source_review
+            ) and image_publisher is not None:
                 report("submitting")
+                # A held image is supplemental evidence. Keep time to submit
+                # the authoritative quarantine even if export is slow.
+                image_deadline = (
+                    deadline - 30.0
+                    if held_source_review and deadline is not None
+                    else deadline
+                )
                 if (
                     exhausted := self._lease_exhausted(
-                        deadline, "image export", policy_version=policy_version
+                        image_deadline, "image export", policy_version=policy_version
                     )
                 ) is not None:
-                    return exhausted
+                    return decision if held_source_review else exhausted
                 try:
                     if targon_runtime_ok:
                         assert remote_archive is not None
                         image = await self._export_remote_archive(
                             remote_archive,
                             image_ref=image_ref,
-                            deadline=deadline,
+                            deadline=image_deadline,
                         )
                     else:
                         image = await self._export_image(
                             built_image_id,
                             image_ref=image_ref,
-                            deadline=deadline,
+                            deadline=image_deadline,
                         )
                 except _ScreenedImageTooLargeError as error:
+                    if held_source_review:
+                        logger.warning("held image export exceeded limit: %s", error)
+                        return decision
                     return core_decision(
                         ScreeningOutcome.DETERMINISTIC_REJECT,
                         code="screened-image-too-large",
@@ -1933,6 +1955,8 @@ class BuildGate:
                         detail=str(error),
                     )
                 except _LeaseDeadlineError:
+                    if held_source_review:
+                        return decision
                     return self._lease_exhausted(
                         deadline, "image export", policy_version=policy_version
                     ) or core_decision(
@@ -1944,6 +1968,9 @@ class BuildGate:
                         ),
                     )
                 except Exception as error:  # noqa: BLE001 - classify export infra
+                    if held_source_review:
+                        logger.warning("held image export failed: %s", error)
+                        return decision
                     return core_decision(
                         ScreeningOutcome.RETRYABLE_INFRA,
                         code="screened-image-export-failed",
@@ -1951,15 +1978,17 @@ class BuildGate:
                         detail=f"screener error: image export failed: {error}",
                     )
                 try:
-                    remaining = self._lease_remaining(deadline)
+                    remaining = self._lease_remaining(image_deadline)
                     if remaining is None:
-                        await publish_image(image)
+                        await image_publisher(image)
                     elif remaining <= 0:
                         raise _LeaseDeadlineError
                     else:
                         async with asyncio.timeout(remaining):
-                            await publish_image(image)
+                            await image_publisher(image)
                 except (TimeoutError, _LeaseDeadlineError):
+                    if held_source_review:
+                        return decision
                     return core_decision(
                         ScreeningOutcome.RETRYABLE_INFRA,
                         code="lease-budget-exhausted",
@@ -1969,6 +1998,9 @@ class BuildGate:
                         ),
                     )
                 except Exception as error:  # noqa: BLE001 - publish is parked infra
+                    if held_source_review:
+                        logger.warning("held image upload failed: %s", error)
+                        return decision
                     return core_decision(
                         ScreeningOutcome.RETRYABLE_INFRA,
                         code="image-upload-failed",
