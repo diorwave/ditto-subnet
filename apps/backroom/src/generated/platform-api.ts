@@ -1129,7 +1129,9 @@ export interface paths {
          *     Classifies every path as added / removed / modified / identical / renamed
          *     with change stats so an operator can see at a glance which files were copied
          *     verbatim, which were altered, and which were only moved. Unified-diff
-         *     bodies come from the per-file endpoint.
+         *     bodies come from the per-file endpoint. Readable files the bounded source
+         *     read skipped in either artifact are listed in ``omitted_paths``, never
+         *     classified as added or removed.
          */
         get: operations["get_copy_review_source_diff_api_v1_admin_copy_reviews__agent_id__source_diff_get"];
         put?: never;
@@ -2453,6 +2455,10 @@ export interface paths {
          *     actually wrote. This classifies each path against the pinned baseline and
          *     marks stock kit code — including files that match an older kit revision
          *     rather than the tip — so the operator can go straight to the custom surface.
+         *
+         *     Totals cover every compared file. Readable files the bounded source read
+         *     skipped are listed in ``omitted_paths`` rather than diffed; when any exist,
+         *     ``custom_added_lines_complete`` is false and the total is a lower bound.
          *
          *     Unified-diff bodies come from the per-file endpoint.
          */
@@ -8324,6 +8330,8 @@ export interface components {
             baseline: components["schemas"]["AdminStarterKitProvenance"];
             /** Custom Added Lines */
             custom_added_lines: number;
+            /** Custom Added Lines Complete */
+            custom_added_lines_complete: boolean;
             /** Custom File Count */
             custom_file_count: number;
             /** File Count */
@@ -8334,6 +8342,10 @@ export interface components {
             identical_count: number;
             /** Modified Count */
             modified_count: number;
+            /** Omitted File Count */
+            omitted_file_count: number;
+            /** Omitted Paths */
+            omitted_paths: string[];
             /** Path Aligned */
             path_aligned: boolean;
             /** Removed Count */
@@ -12090,6 +12102,13 @@ export interface components {
             identical_count: number;
             /** Modified Count */
             modified_count: number;
+            /**
+             * Omitted File Count
+             * @default 0
+             */
+            omitted_file_count: number;
+            /** Omitted Paths */
+            omitted_paths?: string[];
             /**
              * Reference Agent Id
              * Format: uuid

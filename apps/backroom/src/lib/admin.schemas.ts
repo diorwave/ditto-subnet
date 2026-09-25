@@ -506,6 +506,7 @@ export const l2ReportCanaryViewSchema = z.object({
   review_label: z.string(),
   status: z.string(),
   claimed_instance_id: z.string().nullable(),
+  lease_expires_at: z.string().nullable().optional(),
   report: z.record(z.string(), z.unknown()).nullable(),
   error_code: z.string().nullable(),
   created_at: z.string(),
@@ -7613,6 +7614,11 @@ export const sourceDiffManifestSchema = z.object({
   removed_count: z.number().int().nonnegative(),
   renamed_count: z.number().int().nonnegative().default(0),
   truncated: z.boolean(),
+  // Files the Platform's bounded source read skipped in either artifact: not
+  // compared, so absent from `files` and every count. Older Platforms omit
+  // these fields.
+  omitted_file_count: z.number().int().nonnegative().nullish().transform((value) => value ?? 0),
+  omitted_paths: z.array(z.string()).nullish().transform((value) => value ?? []),
 })
 
 export const sourceDiffFileInputSchema = z.object({
@@ -7677,6 +7683,13 @@ export const baselineDiffManifestSchema = z.object({
   custom_added_lines: z.number().int().nonnegative(),
   path_aligned: z.boolean(),
   truncated: z.boolean(),
+  // Files the Platform's bounded source read skipped: not compared, so absent
+  // from `files` and every count. When any exist custom_added_lines is a lower
+  // bound and custom_added_lines_complete is false. An older Platform omits all
+  // three, and its completeness is unknown (null), not assumed.
+  omitted_file_count: z.number().int().nonnegative().nullish().transform((value) => value ?? 0),
+  omitted_paths: z.array(z.string()).nullish().transform((value) => value ?? []),
+  custom_added_lines_complete: z.boolean().nullish().transform((value) => value ?? null),
 })
 
 export const baselineDiffFileInputSchema = z.object({

@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v0.313.3 (2026-09-25)
+
+### Bug Fixes
+
+- **backroom**: Expose L2 canary lease expiry
+  ([#2296](https://github.com/ditto-assistant/ditto-subnet/pull/2296),
+  [`fc9b687`](https://github.com/ditto-assistant/ditto-subnet/commit/fc9b687384bd98967d83170bbdd2ed2bf9063749))
+
+- **datagen**: Keep ordinary English out of v8 answer pools
+  ([#2222](https://github.com/ditto-assistant/ditto-subnet/pull/2222),
+  [`4629325`](https://github.com/ditto-assistant/ditto-subnet/commit/4629325612a250c2519dc16624ee980956f2f786))
+
+- **platform**: Count every compared file in the baseline diff and report what was omitted
+  ([#2253](https://github.com/ditto-assistant/ditto-subnet/pull/2253),
+  [`0eb6a74`](https://github.com/ditto-assistant/ditto-subnet/commit/0eb6a74d30dd09b71c36d2ee242115180586156c))
+
+- **screener**: Align bootstrap defaults with GPT-6 review
+  ([#2299](https://github.com/ditto-assistant/ditto-subnet/pull/2299),
+  [`e78b631`](https://github.com/ditto-assistant/ditto-subnet/commit/e78b631112aaba345271fb8547c8ecd8355fd66f))
+
+- **screener**: Ignore quoted source when classifying build infrastructure failures
+  ([#2298](https://github.com/ditto-assistant/ditto-subnet/pull/2298),
+  [`f462b85`](https://github.com/ditto-assistant/ditto-subnet/commit/f462b85aa99319f7fd41b1070398917e6389e9a2))
+
+
 ## v0.313.2 (2026-09-25)
 
 ### Bug Fixes
