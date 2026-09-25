@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -458,6 +459,9 @@ def test_golden_image_bake_pipeline_exists() -> None:
 
     assert "image_family      = var.image_family" in packer
     assert "ditto-screener-fleet" in packer
+    # The builder plugin runs with the bake credentials; pin it exactly.
+    plugin_versions = re.findall(r'^\s*version\s*=\s*"([^"]+)"', packer, re.M)
+    assert plugin_versions == ["= 1.2.7"]
     # Bakes via the same bootstrap script in bake mode; stores no secret.
     assert "SCREENER_BAKE_ONLY=1" in packer
     assert "environment: prod" in workflow
@@ -474,6 +478,11 @@ def test_systemd_unit_runs_the_extracted_screener_entrypoint() -> None:
     assert "ditto.screener" not in unit
     assert "KillMode=mixed" in unit
     assert "TimeoutStopSec=15min" in unit
+    # The worker only execs the docker client against the rootless daemon
+    # socket and openssl; the daemon's setuid newuidmap/newgidmap needs live
+    # in its own user unit, so the worker must not be able to gain privileges.
+    assert "NoNewPrivileges=true" in unit
+    assert "NoNewPrivileges=false" not in unit
 
 
 def test_updater_installs_and_rolls_back_the_repository_owned_unit() -> None:

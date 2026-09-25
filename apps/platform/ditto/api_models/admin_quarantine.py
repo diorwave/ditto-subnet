@@ -104,6 +104,39 @@ class AdminQuarantineList(BaseModel):
     count: int
 
 
+class AdminScreeningReviewEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    event_id: UUID
+    agent_id: UUID
+    attempt_id: UUID
+    quarantine_id: UUID | None
+    resolution_id: UUID | None
+    previous_event_id: UUID | None
+    event_kind: Literal["automated", "manual"]
+    artifact_sha256: str
+    policy_version: int
+    actor: str
+    reviewer_model: str | None
+    outcome: str
+    effective_decision: str
+    reason_code: str | None
+    reason: str | None
+    prior_agent_status: str
+    next_agent_status: str
+    evidence: dict[str, object]
+    created_at: datetime
+
+
+class AdminScreeningReviewEventList(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[AdminScreeningReviewEvent]
+    count: int
+    limit: int
+    offset: int
+
+
 class AdminQuarantineResolveRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -195,6 +228,8 @@ class AdminScreeningFailureDiagnostic(BaseModel):
     reason_code: str | None
     private_failure_detail: Annotated[str | None, Field(max_length=4_000)] = None
     private_failure_log_tail: Annotated[str | None, Field(max_length=16_000)] = None
+    l2_review_diagnostic: ScreenReviewAudit | None = None
+    """Digest-verified, fixed-label L2 accounting for this exact attempt."""
     court_diagnostic: AdjudicationRunDiagnostic | None = None
     """Sanitized automated-court trace for this attempt. Null when the attempt
     has no such trace, including rows screened before the field existed."""

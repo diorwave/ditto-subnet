@@ -187,6 +187,7 @@ from ditto.api_server.inference_concurrency_settings import resolved_proxy_confi
 from ditto.api_server.inference_routing import record_ticket_route_quality
 from ditto.api_server.koth import (
     KothEntry,
+    KothProjection,
     continual_composite,
     effective_composite,
     emission_set,
@@ -215,6 +216,7 @@ from ditto.api_server.scoring_gate import (
     evaluate_rejected_resubmission,
 )
 from ditto.api_server.storage import S3StorageClient
+from ditto.api_server.v13_scorer_cohort import pinned_validator_allowed
 from ditto.api_server.validator_slot_settings import (
     DEFAULT_SETTINGS as SLOT_SETTINGS_DEFAULT,
 )
@@ -3476,6 +3478,15 @@ async def request_job(
         target_version = (
             rollout.desired_version if rollout is not None else canonical_version
         )
+        if target_version == 13 and not await pinned_validator_allowed(
+            session, hotkey=payload.validator_hotkey, now=now
+        ):
+            _record_dispatch_decline(
+                "v13_scorer_cohort_pin",
+                validator_hotkey=payload.validator_hotkey,
+                slot_id=payload.slot_id or "slot-0",
+            )
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
         inference_required = (
             request.app.state.config.inference_proxy.required or target_version >= 7
         )
@@ -4557,6 +4568,42 @@ async def _current_emission_set(
     return emission_set(project_koth(snapshot.folded_entries))
 
 
+def _configured_retest_cohort(
+    entries: Sequence[KothEntry],
+    projection: KothProjection | None,
+    *,
+    settings: ContinualRetestSettings,
+) -> tuple[KothEntry, ...]:
+    """The operator-configured folded cohort, before any widening.
+
+    Split out so the read-only admission diagnostic resolves the cutoff with
+    the same call the lane admits on. An operator shown a separately derived
+    cutoff could be shown a cutoff that was never applied.
+    """
+    statistical = settings.retest_eligibility_mode == "statistical"
+    return retest_cohort(
+        entries,
+        projection,
+        size=settings.retest_cohort_size,
+        max_size=settings.retest_cohort_max_size if statistical else None,
+        tolerance_z=settings.retest_eligibility_z if statistical else 0.0,
+    )
+
+
+def _retest_cohort_cutoff(
+    configured_cohort: Sequence[KothEntry], *, settings: ContinualRetestSettings
+) -> KothEntry | None:
+    """The last member the FIXED rank admitted -- the tie band's anchor.
+
+    ``None`` when the cohort never reached the configured size, which is also
+    exactly when :func:`retest_cohort` never opened a band to measure against.
+    """
+    base_size = max(1, settings.retest_cohort_size)
+    if len(configured_cohort) < base_size:
+        return None
+    return configured_cohort[base_size - 1]
+
+
 async def _current_retest_cohort(
     session: AsyncSession,
     *,
@@ -4615,14 +4662,9 @@ async def _current_retest_cohort(
     # confirmation off the *folded* list cannot recover a newer UUID that
     # confirmation-enriched owner-dedupe already dropped (aceron_v23 vs v20).
     wave_members = snapshot.raw_emission
-    statistical = settings.retest_eligibility_mode == "statistical"
     emission_members = emission_set(projection)
-    configured_cohort = retest_cohort(
-        entries,
-        projection,
-        size=settings.retest_cohort_size,
-        max_size=settings.retest_cohort_max_size if statistical else None,
-        tolerance_z=settings.retest_eligibility_z if statistical else 0.0,
+    configured_cohort = _configured_retest_cohort(
+        entries, projection, settings=settings
     )
     seen = {member.agent_id for member in configured_cohort}
     emission_ids = {member.agent_id for member in emission_members}
@@ -6714,6 +6756,16 @@ async def submit_score(
             (agent_id, report_version, payload.validator_hotkey),
             with_for_update=True,
         )
+        # Exact retries below remain idempotent; no new V13 score or canary
+        # completion may enter from outside the immutable scorer cohort.
+        if (
+            report_version == 13
+            and (prior_ticket is None or prior_ticket.status != TicketStatus.SCORED)
+            and not await pinned_validator_allowed(
+                session, hotkey=payload.validator_hotkey, now=datetime.now(UTC)
+            )
+        ):
+            raise HTTPException(409, "V13 scorer cohort pin excludes this validator")
         canary = await canary_for_lease(
             session,
             agent_id=agent_id,

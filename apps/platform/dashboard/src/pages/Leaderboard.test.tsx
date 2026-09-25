@@ -1337,6 +1337,52 @@ describe("dethrone floor + rollout strip (row 36)", () => {
     );
   });
 
+  it("names the scoring version and the paying version apart mid-rollout", async () => {
+    const collecting = (body: unknown): LeaderboardPayload => ({
+      ...(body as LeaderboardPayload),
+      selection_mode: "authoritative",
+      active_bench_version: 7,
+      desired_bench_version: 8,
+      current_bench_version: 8,
+      scoring_bench_version: 8,
+      emission_bench_version: 7,
+    });
+    renderPage({
+      patch: (name, body) => (name === "leaderboard" ? collecting(body) : body),
+    });
+    await waitForBoard();
+    await waitFor(() =>
+      expect(el("leaderboard-version-context").textContent).toContain(
+        "Rows rank by their settled v7 score while v8 collects",
+      ),
+    );
+    // The half miners read as a stalled rollout: v8 is being scored, v7 pays.
+    expect(el("leaderboard-version-context").textContent).toContain(
+      "Validator weights stay on v7 until the v8 rollout fully activates",
+    );
+  });
+
+  it("stops splitting the versions once the rollout has activated", async () => {
+    const activated = (body: unknown): LeaderboardPayload => ({
+      ...(body as LeaderboardPayload),
+      selection_mode: "authoritative",
+      active_bench_version: 8,
+      desired_bench_version: 8,
+      current_bench_version: 8,
+      scoring_bench_version: 8,
+      emission_bench_version: 8,
+    });
+    renderPage({
+      patch: (name, body) => (name === "leaderboard" ? activated(body) : body),
+    });
+    await waitForBoard();
+    await waitFor(() =>
+      expect(el("leaderboard-version-context").textContent).toBe(
+        "This pool drives validator weights.",
+      ),
+    );
+  });
+
   it("keeps a superseded rollout from reading as in progress", async () => {
     const superseded = (body: unknown): RolloutState => ({
       ...(body as RolloutState),
@@ -1356,6 +1402,72 @@ describe("dethrone floor + rollout strip (row 36)", () => {
     expect(el("rollout-note").textContent).toBe(
       "Weights remain on v7 throughout. A superseded rollout never moves emissions.",
     );
+  });
+
+  // #2079 follow-up: #2098 names the board's scoring and emission versions.
+  // The strip answers the next question, what emissions are waiting on, from
+  // Platform's own barrier count and promotion sentence.
+  it("names scoring vs emissions and carries the served promotion gate mid-rollout", async () => {
+    const requirement =
+      "Bench v8 scoring is in progress; Bench v7 still controls emissions. Emission " +
+      "authority moves to v8 only once the first 5 inherited priority-cohort positions " +
+      "each hold a complete 3-score v8 quorum.";
+    const collecting = (body: unknown): RolloutState => ({
+      ...(body as RolloutState),
+      active_version: 7,
+      desired_version: 8,
+      status: "collecting",
+      priority_complete: false,
+      priority_cohort_size: 5,
+      // Four finished leaders plus a banned one the barrier skips: the served
+      // count says 5, the members alone could only ever show 4.
+      priority_cohort_ready_count: 5,
+      members: [
+        { position: 1, score_count: 3 },
+        { position: 2, score_count: 3 },
+        { position: 3, score_count: 0 },
+        { position: 4, score_count: 3 },
+        { position: 5, score_count: 3 },
+      ],
+      promotion_pending: true,
+      promotion_requirement: requirement,
+    });
+    renderPage({
+      patch: (name, body) => {
+        if (name === "bench-rollout") return collecting(body);
+        if (name === "leaderboard")
+          return {
+            ...(body as LeaderboardPayload),
+            current_bench_version: 8,
+            scoring_bench_version: 8,
+            active_bench_version: 7,
+            emission_bench_version: 7,
+            desired_bench_version: 8,
+          };
+        return body;
+      },
+    });
+    await waitForBoard();
+    await waitFor(() =>
+      expect(el("rollout-head").textContent).toContain(
+        "v8 scoring in progress · v7 controls emissions",
+      ),
+    );
+    expect(el("rollout-progress").textContent).toContain("5 of 5");
+    expect(el("rollout-progress").textContent).toContain(
+      "This priority-cohort quorum is the first gate emissions wait on.",
+    );
+    expect(el("rollout-promotion").textContent).toBe(requirement);
+  });
+
+  it("shows no pending promotion once the rollout has activated", async () => {
+    // The stock fixture is the completed transition: v7 activated and paying.
+    renderPage();
+    await waitForBoard();
+    await waitFor(() => expect(el("rollout-head").textContent).toContain("activated"));
+    expect(el("rollout-head").textContent).toContain("v7 controls emissions");
+    expect(el("rollout-head").textContent).not.toContain("scoring in progress");
+    expect(document.getElementById("rollout-promotion")).toBeNull();
   });
 });
 

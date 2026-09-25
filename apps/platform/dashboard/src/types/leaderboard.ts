@@ -537,7 +537,12 @@ export interface LeaderboardPayload {
   available_bench_versions?: number[];
   active_bench_version?: number | null;
   desired_bench_version?: number | null;
+  /** @deprecated Use scoring_bench_version; same value, clearer name. */
   current_bench_version?: number | null;
+  /** The version this board is ranked on (the one being collected). */
+  scoring_bench_version?: number | null;
+  /** The ledger pin: the version whose scores are paid right now. */
+  emission_bench_version?: number | null;
   /** "current" | "historical" */
   selection_mode?: string;
   generated_at?: string;
@@ -561,7 +566,13 @@ export interface RolloutState {
   ranked_quorum_agents?: number | null;
   min_ranked_quorum_agents?: number | null;
   priority_cohort_size?: number | null;
+  /** Priority members satisfying the barrier, counted as the gate counts them. */
+  priority_cohort_ready_count?: number | null;
   priority_complete?: boolean;
+  /** True while the desired version is collecting and does not pay yet. */
+  promotion_pending?: boolean;
+  /** Platform's sentence for the gates still holding emissions. */
+  promotion_requirement?: string | null;
   cohort_size?: number | null;
   cohort_ready_count?: number | null;
   members?: RolloutMember[];

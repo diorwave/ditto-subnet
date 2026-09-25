@@ -817,6 +817,7 @@ describe('screening submission admin service', () => {
       ),
     ).resolves.toEqual({
       ...diagnostic,
+      l2_review_diagnostic: null,
       court_diagnostic: null,
       court_completion_receipt: null,
     })
@@ -940,6 +941,7 @@ describe('screening submission admin service', () => {
       ),
     ).resolves.toEqual({
       ...diagnostic,
+      l2_review_diagnostic: null,
       court_diagnostic: court,
       court_completion_receipt: null,
     })
@@ -988,6 +990,7 @@ describe('screening submission admin service', () => {
       fetchScreeningFailureDiagnostic({ agentId, attemptId }, 'reviewer@example.com'),
     ).resolves.toEqual({
       ...response,
+      l2_review_diagnostic: null,
       court_completion_receipt: receipt,
     })
   })
@@ -3627,49 +3630,153 @@ describe('production score reads', () => {
   const provisionalAgentId = '22222222-2222-4222-8222-222222222222'
   const supersededAgentId = '33333333-3333-4333-8333-333333333333'
 
+  // The live #2105 shape: a newer generation whose canonical median beats its
+  // owner's 15-seed representative, with no shared-seed evidence of its own.
+  const retestDiagnosticPayload = {
+    generated_at: '2026-09-22T23:51:00Z',
+    agent_id: provisionalAgentId,
+    agent_status: 'scored',
+    active_bench_version: 13,
+    canonical_composite: 0.54072,
+    official_composite: 0.54072,
+    owner_representative_id: topAgentId,
+    family: [
+      {
+        agent_id: provisionalAgentId,
+        canonical_composite: 0.54072,
+        official_composite: 0.54072,
+        representative: false,
+        effective_composite: 0.54072,
+        canonical_sample_count: 3,
+        completed_wave_depth: 0,
+        first_seen: '2026-09-22T22:51:00Z',
+      },
+      {
+        agent_id: topAgentId,
+        canonical_composite: 0.479032,
+        official_composite: 0.5965,
+        representative: true,
+        effective_composite: 0.5965,
+        canonical_sample_count: 3,
+        completed_wave_depth: 15,
+        first_seen: '2026-09-12T23:51:00Z',
+      },
+    ],
+    raw_confirmation_seeds: ['9223372036854775001'],
+    folded_confirmation_seeds: [],
+    in_raw_wave: false,
+    in_emission_set: false,
+    in_retest_cohort: true,
+    is_same_owner_challenger: true,
+    cohort_position: 7,
+    cohort_size: 7,
+    configured_cohort_size: 5,
+    eligibility_mode: 'fixed',
+    eligibility_z: 1.64,
+    configured_max_size: 25,
+    ticket_status_counts: { issued: 1, scored: 2 },
+    active_ticket_count: 1,
+    seed_anchor_champion_id: topAgentId,
+    seed_anchor_block: 123456,
+    seed_anchor_pinned: true,
+    admission_reason: 'same_owner_challenger',
+    ledger_eligible: true,
+    canonical_sample_count: 3,
+    completed_wave_depth: 0,
+    official_sample_count: 3,
+    raw_confirmation_depth: 1,
+    composite_stderr: 0.01,
+    aggregate_mode: 'fleet_ready',
+    wave_membership: 'participants',
+    owner_key: 'owner:gryffindor',
+    representative_canonical_composite: 0.479032,
+    representative_official_composite: 0.5965,
+    representative_margin: 0.05578,
+    representative_selection: 'official_composite',
+    cohort_cutoff: {
+      agent_id: topAgentId,
+      composite: 0.30444,
+      gap: -0.23628,
+      tie_band: 0,
+      within_tie_band: true,
+    },
+    emission_cutoff: {
+      agent_id: topAgentId,
+      composite: 0.30444,
+      gap: -0.23628,
+      tie_band: 0,
+      within_tie_band: true,
+    },
+    claim: {
+      lane_enabled: true,
+      latest_block: 1000,
+      champion_agent_id: topAgentId,
+      champion_crown_block: 900,
+      scheduled_round: false,
+      spare_capacity_window: false,
+      idle_retests_enabled: false,
+      in_catchup_set: true,
+      route_priority: 'catchup',
+      route_position: 2,
+      pending_seed_count: 2,
+      claimable_seed_available: true,
+      live_lease_count: 0,
+      newer_canonical_work_pending: false,
+      least_covered_admitted: true,
+      decision: 'claimable',
+    },
+    latest_ticket_status: 'issued',
+    latest_ticket_validator_hotkey: '5Validator1',
+    latest_ticket_updated_at: '2026-09-22T23:40:00Z',
+    latest_ticket_failure_reason: null,
+    terminal_ticket_count: 2,
+    latest_confirmation_composite: 0.5412,
+    latest_confirmation_recorded_at: '2026-09-22T23:45:00Z',
+  }
+
   it('reads exact retest admission and preserves int63 seed strings', async () => {
-    const seed = '9223372036854775001'
-    const payload = {
-      generated_at: '2026-09-22T23:00:00Z',
-      agent_id: provisionalAgentId,
-      agent_status: 'scored',
-      active_bench_version: 13,
-      canonical_composite: 0.93,
-      official_composite: 0.93,
-      owner_representative_id: topAgentId,
-      family: [
-        { agent_id: provisionalAgentId, canonical_composite: 0.93, official_composite: 0.93, representative: false },
-        { agent_id: topAgentId, canonical_composite: 0.91, official_composite: 0.94, representative: true },
-      ],
-      raw_confirmation_seeds: [seed],
-      folded_confirmation_seeds: [],
-      in_raw_wave: true,
-      in_emission_set: false,
-      in_retest_cohort: true,
-      is_same_owner_challenger: true,
-      cohort_position: 2,
-      cohort_size: 6,
-      configured_cohort_size: 5,
-      eligibility_mode: 'fixed',
-      eligibility_z: 1.64,
-      configured_max_size: 25,
-      ticket_status_counts: { issued: 1, scored: 2 },
-      active_ticket_count: 1,
-      seed_anchor_champion_id: topAgentId,
-      seed_anchor_block: 123456,
-      seed_anchor_pinned: true,
-      admission_reason: 'same_owner_challenger',
-    }
-    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload))
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(retestDiagnosticPayload))
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await fetchContinualRetestDiagnostic({ agentId: provisionalAgentId })
-    expect(result).toEqual(payload)
-    expect(result.raw_confirmation_seeds).toEqual([seed])
+    expect(result).toEqual(retestDiagnosticPayload)
+    expect(result.raw_confirmation_seeds).toEqual(['9223372036854775001'])
+    // Suppressed by its owner's deeper evidence while outscoring the cutoff it
+    // sits behind: a structural exclusion, not a score it failed to reach.
+    expect(result.representative_margin).toBeGreaterThan(0)
+    expect(result.cohort_cutoff.gap).toBeLessThan(0)
+    expect(result.claim?.decision).toBe('claimable')
+    // Outstanding work is a count. No seed value may reach the claim payload.
+    expect(JSON.stringify(result.claim)).not.toContain('9223372036854775')
     expect(fetchMock).toHaveBeenCalledWith(
       `https://platform-api.heyditto.ai/api/v1/admin/agents/${provisionalAgentId}/continual-retest-diagnostic`,
       expect.anything(),
     )
+  })
+
+  it('still reads a retest diagnostic from a platform without the newer fields', async () => {
+    const { claim, cohort_cutoff, emission_cutoff, ...legacy } = retestDiagnosticPayload
+    void claim
+    void cohort_cutoff
+    void emission_cutoff
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+      ...legacy,
+      family: legacy.family.map(({ agent_id, canonical_composite, official_composite, representative }) => ({
+        agent_id, canonical_composite, official_composite, representative,
+      })),
+    })))
+
+    const result = await fetchContinualRetestDiagnostic({ agentId: provisionalAgentId })
+    expect(result.claim).toBeNull()
+    expect(result.cohort_cutoff).toEqual({
+      agent_id: null,
+      composite: null,
+      gap: null,
+      tie_band: null,
+      within_tie_band: null,
+    })
+    expect(result.family[0].completed_wave_depth).toBe(0)
+    expect(result.family[0].first_seen).toBeNull()
   })
 
   const breakdown = {
@@ -3915,6 +4022,95 @@ describe('production score reads', () => {
       raw_leader_decision: { required_lead: 0.011, dethrones: false },
       recipients: [{ shared_seed_confirmations: 7 }],
     })
+  })
+
+  // #2079 follow-up: #2098 named the board's scoring and emission versions.
+  // An operator asked why the newer one is not paying needs both, plus
+  // Platform's own sentence for the gates still holding emissions.
+  it('relays the scoring and emission versions with the rollout promotion gates', async () => {
+    delete process.env.DITTO_ADMIN_API_TOKEN
+    const requirement =
+      'Bench v13 scoring is in progress; Bench v12 still controls emissions. ' +
+      'Emission authority moves to v13 only once the first 5 inherited ' +
+      'priority-cohort positions each hold a complete 3-score v13 quorum.'
+    const rolling = {
+      ...leaderboard,
+      current_bench_version: 13,
+      scoring_bench_version: 13,
+      emission_bench_version: 12,
+      active_bench_version: 12,
+      desired_bench_version: 13,
+    }
+    const rollout = {
+      active_version: 12,
+      desired_version: 13,
+      status: 'collecting',
+      promotion_pending: true,
+      promotion_requirement: requirement,
+      priority_cohort_size: 5,
+      priority_cohort_ready_count: 3,
+      ranked_quorum_agents: 2,
+      min_ranked_quorum_agents: 5,
+      members: [],
+    }
+    const fetchMock = vi.fn(async (url: string) =>
+      Response.json(url.endsWith('/api/v1/public/bench/rollout') ? rollout : rolling),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await fetchScoreLeaderboard({ status: 'all', limit: 2, offset: 0 })
+
+    expect(page.scoring_bench_version).toBe(13)
+    expect(page.emission_bench_version).toBe(12)
+    expect(page.current_bench_version).toBe(13)
+    expect(page.active_bench_version).toBe(12)
+    expect(page.rollout_promotion).toEqual({
+      active_version: 12,
+      desired_version: 13,
+      status: 'collecting',
+      promotion_pending: true,
+      promotion_requirement: requirement,
+      priority_cohort_size: 5,
+      priority_cohort_ready_count: 3,
+      ranked_quorum_agents: 2,
+      min_ranked_quorum_agents: 5,
+    })
+  })
+
+  it('still reads a board from a Platform that predates these fields', async () => {
+    // One release unit, two non-atomic deploys: an older Platform omits the
+    // #2098 names and the promotion keys, and a rollout read that fails must
+    // not fail the board an operator asked for.
+    delete process.env.DITTO_ADMIN_API_TOKEN
+    const olderRollout = { active_version: 7, desired_version: 7, status: 'inactive' }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        Response.json(url.endsWith('/api/v1/public/bench/rollout') ? olderRollout : leaderboard),
+      ),
+    )
+    const page = await fetchScoreLeaderboard({ status: 'all', limit: 2, offset: 0 })
+    expect(page.scoring_bench_version).toBeNull()
+    expect(page.emission_bench_version).toBeNull()
+    expect(page.active_bench_version).toBe(7)
+    expect(page.rollout_promotion).toMatchObject({
+      status: 'inactive',
+      promotion_pending: null,
+      promotion_requirement: null,
+      priority_cohort_ready_count: null,
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) =>
+        url.endsWith('/api/v1/public/bench/rollout')
+          ? new Response('upstream unavailable', { status: 503 })
+          : Response.json(leaderboard),
+      ),
+    )
+    const degraded = await fetchScoreLeaderboard({ status: 'all', limit: 2, offset: 0 })
+    expect(degraded.rollout_promotion).toBeNull()
+    expect(degraded.entries).toHaveLength(2)
   })
 
   it('filters provisional entries and forwards a historical bench version', async () => {

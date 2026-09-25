@@ -38,6 +38,7 @@ import {
   validatorAssignmentListSchema,
   screenerReviewControlSchema,
   screenerReviewSettingsSchema,
+  screenReviewAuditSchema,
   applyScreenerReviewSettingsInputSchema,
   efficiencyBonusConfirmation,
   efficiencyBonusSettingsControlSchema,
@@ -89,6 +90,7 @@ import {
   listLeaseRevocationsInputSchema,
   leaseRevocationsListSchema,
   screenerCapacityViewSchema,
+  screeningInfraRetryViewSchema,
   screenerProviderSettingsConfirmation,
   screenerProviderSettingsSchema,
   authorizeConfirmationBundleRetestInputSchema,
@@ -2023,19 +2025,33 @@ describe('screener review settings schemas', () => {
   })
 
   it('accepts Platform L2 budgets and preserves the upper bounds', () => {
-    for (const [timeout_seconds, max_steps] of [[1200, 32], [1800, 48]]) {
+    for (const [timeout_seconds, max_steps] of [[1200, 32], [1800, 128], [1800, 256]]) {
       const parsed = screenerReviewSettingsSchema.parse({
-        ...settings, timeout_seconds, max_steps, critic_reasoning_effort: 'high',
+        ...settings, timeout_seconds, max_steps, max_input_tokens: 5_000_000,
+        max_output_tokens: 1_000_000,
+        max_cost_usd: 25, critic_reasoning_effort: 'high',
       })
       expect(parsed.timeout_seconds).toBe(timeout_seconds)
       expect(parsed.max_steps).toBe(max_steps)
       expect(parsed.critic_reasoning_effort).toBe('high')
+      expect(parsed.max_input_tokens).toBe(5_000_000)
+      expect(parsed.max_output_tokens).toBe(1_000_000)
+      expect(parsed.max_cost_usd).toBe(25)
     }
     expect(() => screenerReviewSettingsSchema.parse({
       ...settings, timeout_seconds: 1801,
     })).toThrow()
     expect(() => screenerReviewSettingsSchema.parse({
-      ...settings, max_steps: 49,
+      ...settings, max_steps: 257,
+    })).toThrow()
+    expect(() => screenerReviewSettingsSchema.parse({
+      ...settings, max_output_tokens: 1_000_001,
+    })).toThrow()
+    expect(() => screenerReviewSettingsSchema.parse({
+      ...settings, max_input_tokens: 5_000_001,
+    })).toThrow()
+    expect(() => screenerReviewSettingsSchema.parse({
+      ...settings, max_cost_usd: 25.01,
     })).toThrow()
   })
 
@@ -2068,6 +2084,20 @@ describe('screener review settings schemas', () => {
       settings: { ...settings, l2_fallback_models: ['openai/gpt-5.6-terra'] },
       reason: 'short', confirmation: 'APPLY SCREENER REVIEW * SHADOW',
     })).toThrow()
+  })
+})
+
+describe('screen review audit schema', () => {
+  it('accepts the configured L2 step and output ceilings', () => {
+    const audit = {
+      stage: 'l2', reason_code: 'l2-model-inconclusive', prompt_revision: 'l2-v13',
+      max_steps: 256, steps_used: 256,
+      max_output_tokens: 1_000_000, output_tokens_used: 1_000_000,
+      max_cost_usd: 25, cost_usd_used: 20,
+    }
+    expect(screenReviewAuditSchema.parse(audit)).toMatchObject(audit)
+    expect(() => screenReviewAuditSchema.parse({ ...audit, max_steps: 257 })).toThrow()
+    expect(() => screenReviewAuditSchema.parse({ ...audit, output_tokens_used: 1_000_001 })).toThrow()
   })
 })
 
@@ -4534,5 +4564,34 @@ describe('batched ATH rulings schemas', () => {
     expect(parsed.rulings?.every((item) => item.action === 'reject')).toBe(true)
     expect(parsed.rulings?.every((item) => item.evidence_references.length > 0)).toBe(true)
     expect(parsed.source).toBe('docs/sn118-top5-board-review-2026-09-13.json')
+  })
+
+  it('parses the infrastructure retry view and refuses an unknown decision state', () => {
+    const view = {
+      generated_at: '2026-09-21T12:00:00Z',
+      basis: 'Derived at read time.',
+      policy: {
+        auto_retry_reason_codes: ['docker-build-infrastructure'],
+        base_backoff_seconds: 600, max_backoff_seconds: 3600, jitter_fraction: 0.2,
+        auto_retry_max_age_seconds: 86400, auto_retry_max_streak: 8, plan_max_claimable: 500,
+        breaker_distinct_agents: 3, breaker_window_seconds: 300, breaker_open_seconds: 600,
+        breaker_probe_interval_seconds: 300, breaker_history_lookback_seconds: 172800,
+      },
+      summary: {
+        parked_agents: 0,
+        by_state: { backoff: 0, breaker_held: 0, probe_due: 0, due: 0, capped: 0 },
+        not_admitted: 0, aged_out_agents: 0, open_breakers: 0, half_open_breakers: 0,
+        breakers_total: 0,
+      },
+      agents: [], agents_limit: 200, agents_truncated: false,
+      breakers: [], breakers_limit: 50, breakers_truncated: false,
+    }
+    expect(screeningInfraRetryViewSchema.parse(view).summary.by_state.capped).toBe(0)
+    expect(() =>
+      screeningInfraRetryViewSchema.parse({
+        ...view,
+        summary: { ...view.summary, by_state: { ...view.summary.by_state, exploded: 1 } },
+      }),
+    ).toThrow()
   })
 })
