@@ -3067,7 +3067,14 @@ async def submit_weight_receipt(
                 session, submission=request_body, now=now
             )
     except WeightReceiptConflict as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
+        logger.warning(
+            "weight receipt conflict code=%s validator=%s request=%s attempt=%s",
+            error.code,
+            validator_hotkey,
+            receipt.request_id,
+            receipt.attempt.attempt_id,
+        )
+        raise HTTPException(status_code=409, detail=f"{error.code}: {error}") from error
     return SubmitWeightReceiptResponse(
         request_id=receipt.request_id,
         attempt_id=receipt.attempt.attempt_id,
