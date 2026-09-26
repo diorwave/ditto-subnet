@@ -2,6 +2,73 @@
 
 <!-- version list -->
 
+## v0.318.0 (2026-09-26)
+
+### Features
+
+- **screener**: Add isolated full-runtime report canaries
+  ([#2343](https://github.com/ditto-assistant/ditto-subnet/pull/2343),
+  [`60de114`](https://github.com/ditto-assistant/ditto-subnet/commit/60de114f4511ec8aa9e8571f038afc453a5c87ef))
+
+
+## v0.317.1 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Preserve external tools and complete L3 review
+  ([#2322](https://github.com/ditto-assistant/ditto-subnet/pull/2322),
+  [`ab8741f`](https://github.com/ditto-assistant/ditto-subnet/commit/ab8741ff38623621fb06bebaba3b669024a5a92e))
+
+
+## v0.317.0 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Expose bounded L3 inconclusive canary audit
+  ([#2332](https://github.com/ditto-assistant/ditto-subnet/pull/2332),
+  [`1074cd0`](https://github.com/ditto-assistant/ditto-subnet/commit/1074cd0e1ea08987420a1194299c16b4bf8df8c8))
+
+### Features
+
+- **platform**: Add public treasury receipt activity feed
+  ([#2328](https://github.com/ditto-assistant/ditto-subnet/pull/2328),
+  [`39713e2`](https://github.com/ditto-assistant/ditto-subnet/commit/39713e2e1cce266143f6e94d7ce339000d599312))
+
+
+## v0.316.0 (2026-09-25)
+
+### Features
+
+- Prepare isolated treasury planner and key verification
+  ([#2325](https://github.com/ditto-assistant/ditto-subnet/pull/2325),
+  [`a6b0b23`](https://github.com/ditto-assistant/ditto-subnet/commit/a6b0b23cd9d7bb49dd91a84209421876893fb9f2))
+
+- **treasury**: Add durable bounded payment execution
+  ([#2320](https://github.com/ditto-assistant/ditto-subnet/pull/2320),
+  [`770c38a`](https://github.com/ditto-assistant/ditto-subnet/commit/770c38a524edc2702092f1bfb9cfbd93e5d05a6e))
+
+- **treasury**: Add isolated signer and dry-run tooling
+  ([#2316](https://github.com/ditto-assistant/ditto-subnet/pull/2316),
+  [`3234e95`](https://github.com/ditto-assistant/ditto-subnet/commit/3234e95a5854b8adf817497f550e39c57b8ab8c4))
+
+- **treasury**: Add shadow allocation and quote controls
+  ([#2315](https://github.com/ditto-assistant/ditto-subnet/pull/2315),
+  [`c23d57a`](https://github.com/ditto-assistant/ditto-subnet/commit/c23d57a6210703068d6baaf259bb14a991fe480e))
+
+- **treasury**: Schedule bounded GM credit requests
+  ([#2321](https://github.com/ditto-assistant/ditto-subnet/pull/2321),
+  [`28de327`](https://github.com/ditto-assistant/ditto-subnet/commit/28de327bf72ef6bc148d4043d21e2a15a3daab68))
+
+
+## v0.315.1 (2026-09-25)
+
+### Bug Fixes
+
+- **screener**: Report L3 model tool contract subtype
+  ([#2323](https://github.com/ditto-assistant/ditto-subnet/pull/2323),
+  [`406bfa9`](https://github.com/ditto-assistant/ditto-subnet/commit/406bfa9e747f0dfb1f8b1096998f918e1a062fdb))
+
+
 ## v0.315.0 (2026-09-25)
 
 ### Features

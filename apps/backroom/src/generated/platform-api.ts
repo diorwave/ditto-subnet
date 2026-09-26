@@ -3054,6 +3054,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/treasury-quote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Treasury Quote */
+        get: operations["get_treasury_quote_api_v1_admin_treasury_quote_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/treasury-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Treasury Settings */
+        get: operations["get_treasury_settings_api_v1_admin_treasury_settings_get"];
+        put?: never;
+        /** Record Treasury Settings */
+        post: operations["record_treasury_settings_api_v1_admin_treasury_settings_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/trusted-image-builds": {
         parameters: {
             query?: never;
@@ -5026,6 +5061,23 @@ export interface paths {
          *     excluded: only settled public scores appear.
          */
         get: operations["submissions_api_v1_public_submissions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/treasury-activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Treasury Activity */
+        get: operations["list_treasury_activity_api_v1_public_treasury_activity_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -12553,6 +12605,24 @@ export interface components {
             expected_registration_sha256: string;
             /** Reason */
             reason: string;
+        };
+        /** AdminTreasurySettingsRequest */
+        AdminTreasurySettingsRequest: {
+            /**
+             * Actor
+             * @default admin_api
+             */
+            actor: string;
+            /**
+             * Confirmation
+             * @constant
+             */
+            confirmation: "RECORD TREASURY SHADOW POLICY";
+            /** Expected Revision */
+            expected_revision: number;
+            /** Reason */
+            reason: string;
+            settings: components["schemas"]["TreasurySettings"];
         };
         /**
          * AdminV13PrivatePackageReadiness
@@ -20784,6 +20854,12 @@ export interface components {
             miner_hotkey: string;
             /** Policy Version */
             policy_version: number;
+            /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             scored_runtime_evidence: components["schemas"]["ScoredRuntimeEvidenceLease"];
             /**
              * Source Attempt Id
@@ -20846,6 +20922,12 @@ export interface components {
              */
             review_label: "candidate_clear" | "known_reject";
             /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
+            /**
              * Source Attempt Id
              * Format: uuid
              */
@@ -20895,6 +20977,11 @@ export interface components {
             request_id: string;
             /** Review Label */
             review_label: string;
+            /**
+             * Run Mode
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             /**
              * Source Attempt Id
              * Format: uuid
@@ -26728,6 +26815,94 @@ export interface components {
             /** Usage Unavailable */
             usage_unavailable: number;
         };
+        /** PublicTreasuryEvent */
+        PublicTreasuryEvent: {
+            /** Accepted Work Ref */
+            accepted_work_ref: string | null;
+            /** Actor Provenance */
+            actor_provenance: string;
+            /** Actor Public Id */
+            actor_public_id: string;
+            /** Allocated Alpha Rao */
+            allocated_alpha_rao: string;
+            /** Allocation Bps */
+            allocation_bps: number;
+            /** Block Hash */
+            block_hash: string;
+            /** Bounty Award Id */
+            bounty_award_id: string | null;
+            /** Burn Revision */
+            burn_revision: number;
+            /** Burn Share Micros */
+            burn_share_micros: number;
+            /** Credited Usd Nano */
+            credited_usd_nano: string | null;
+            /**
+             * Denominator
+             * @enum {string}
+             */
+            denominator: "miner_emission" | "released_miner_emission";
+            /** Deposit Amount Atomic */
+            deposit_amount_atomic: string;
+            /**
+             * Deposit Asset
+             * @enum {string}
+             */
+            deposit_asset: "TAO" | "SN28_ALPHA" | "SN118_ALPHA";
+            /**
+             * Event At
+             * Format: date-time
+             */
+            event_at: string;
+            /** Event Index */
+            event_index: number;
+            /**
+             * Event Kind
+             * @enum {string}
+             */
+            event_kind: "gm_token_deposit" | "gm_credit_purchase" | "maintenance_bounty";
+            /** Extrinsic Index */
+            extrinsic_index: number;
+            /** Finalized Event Id */
+            finalized_event_id: number | null;
+            /** Gm Bps */
+            gm_bps: number;
+            /** Id */
+            id: number;
+            /** Maintenance Bps */
+            maintenance_bps: number;
+            /** Payment Id */
+            payment_id: string;
+            /** Policy Revision */
+            policy_revision: number;
+            /** Public Recipient */
+            public_recipient: string;
+            /** Public Sender */
+            public_sender: string;
+            /**
+             * Recorded At
+             * Format: date-time
+             */
+            recorded_at: string;
+            /** Route */
+            route: string;
+            /** Source Alpha Rao */
+            source_alpha_rao: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "chain_finalized" | "reconciled";
+            /** Verification Source */
+            verification_source: string;
+        };
+        /** PublicTreasuryEventPage */
+        PublicTreasuryEventPage: {
+            /** Items */
+            items: components["schemas"]["PublicTreasuryEvent"][];
+            /** Next Before */
+            next_before: number | null;
+        };
         /**
          * PublicV13ReviewClockRevision
          * @description One public notice, without private operator identity or reason text.
@@ -31719,6 +31894,81 @@ export interface components {
             status?: string | null;
             /** Validator Hotkey */
             validator_hotkey?: string | null;
+        };
+        /** TreasurySettings */
+        TreasurySettings: {
+            /** Gm Account Ref */
+            gm_account_ref?: string | null;
+            /**
+             * Gm Bps
+             * @default 0
+             */
+            gm_bps: number;
+            /**
+             * Maintenance Bps
+             * @default 0
+             */
+            maintenance_bps: number;
+            /**
+             * Max Daily Outflow Rao
+             * @default 0
+             */
+            max_daily_outflow_rao: number;
+            /**
+             * Max Single Topup Rao
+             * @default 0
+             */
+            max_single_topup_rao: number;
+            /**
+             * Max Slippage Bps
+             * @default 0
+             */
+            max_slippage_bps: number;
+            /**
+             * Mode
+             * @default shadow
+             * @constant
+             */
+            mode: "shadow";
+            /** Treasury Coldkey */
+            treasury_coldkey?: string | null;
+            /** Treasury Hotkey */
+            treasury_hotkey?: string | null;
+        };
+        /** TreasurySettingsControl */
+        TreasurySettingsControl: {
+            effective: components["schemas"]["TreasurySettings"];
+            /** History */
+            history: components["schemas"]["TreasurySettingsRevision"][];
+            /** Miner Bps */
+            miner_bps: number;
+            /** Revision */
+            revision: number;
+            /**
+             * Weight Effect
+             * @default none
+             * @constant
+             */
+            weight_effect: "none";
+        };
+        /** TreasurySettingsRevision */
+        TreasurySettingsRevision: {
+            /** Actor */
+            actor: string;
+            /** Checksum */
+            checksum: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Parent Revision */
+            parent_revision: number;
+            /** Reason */
+            reason: string;
+            /** Revision */
+            revision: number;
+            settings: components["schemas"]["TreasurySettings"];
         };
         /** TrustedImageBuildClaimRequest */
         TrustedImageBuildClaimRequest: {
@@ -40244,6 +40494,107 @@ export interface operations {
             };
         };
     };
+    get_treasury_quote_api_v1_admin_treasury_quote_get: {
+        parameters: {
+            query: {
+                source_alpha_rao: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_treasury_settings_api_v1_admin_treasury_settings_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TreasurySettingsControl"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_treasury_settings_api_v1_admin_treasury_settings_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminTreasurySettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TreasurySettingsRevision"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_trusted_image_build_api_v1_admin_trusted_image_builds_post: {
         parameters: {
             query?: never;
@@ -43418,6 +43769,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PublicSubmissionsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_treasury_activity_api_v1_public_treasury_activity_get: {
+        parameters: {
+            query?: {
+                before?: number | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicTreasuryEventPage"];
                 };
             };
             /** @description Validation Error */

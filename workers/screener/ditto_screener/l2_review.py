@@ -91,27 +91,35 @@ _SUPPORTED_POLICY_VERSIONS = tuple(
 def l2_prompt_revision(policy_version: int) -> str:
     """Analyst prompt revision for one implemented policy version."""
     if policy_version == 13:
-        return "l2-terra-source-review-v41-policy-v13"
+        return "l2-terra-source-review-v42-policy-v13"
     return f"l2-terra-source-review-v37-policy-v{policy_version}"
 
 
 def l2_critic_prompt_revision(policy_version: int) -> str:
     """Critic prompt revision for one implemented policy version."""
+    if policy_version == 13:
+        return "l3-sol-adversarial-critic-v22-policy-v13"
     return f"l3-sol-adversarial-critic-v21-policy-v{policy_version}"
 
 
 def l2_cause_prompt_revision(policy_version: int) -> str:
     """Violation-cause prompt revision for one implemented policy version."""
+    if policy_version == 13:
+        return "l3-sol-violation-cause-v28-policy-v13"
     return f"l3-sol-violation-cause-v27-policy-v{policy_version}"
 
 
 def l2_cause_tiebreaker_prompt_revision(policy_version: int) -> str:
     """Cause-tiebreaker prompt revision for one implemented policy version."""
+    if policy_version == 13:
+        return "l3-sol-cause-disagreement-v8-policy-v13"
     return f"l3-sol-cause-disagreement-v7-policy-v{policy_version}"
 
 
 def l2_safety_prompt_revision(policy_version: int) -> str:
     """Safety-adjudicator prompt revision for one implemented policy version."""
+    if policy_version == 13:
+        return "l3-sol-safety-adjudicator-v26-policy-v13"
     return f"l3-sol-safety-adjudicator-v24-policy-v{policy_version}"
 
 
@@ -618,6 +626,7 @@ class L2TrajectoryError(ValueError):
         steps_used: int,
         read_bytes_used: int,
         read_files_used: int,
+        failure_subcode: str | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -629,6 +638,7 @@ class L2TrajectoryError(ValueError):
         self.steps_used = steps_used
         self.read_bytes_used = read_bytes_used
         self.read_files_used = read_files_used
+        self.failure_subcode = failure_subcode
 
 
 def _bounded_tail_lines(path: Path, *, max_bytes: int) -> list[bytes]:
@@ -1255,6 +1265,18 @@ For I7, reject unjustified removal of an applicable,
 authorized and available capability, including errors caused by quoted titles,
 compound requests, negation scope, setting-and-remember requests, or duplicate
 handling that removes unrelated pending tools.
+Judge tool guards against the identity and argument schema of the offered tool,
+then trace the model-selected call to its actual local implementation or
+request-supplied endpoint. A local memory tool may check ownership of its own
+record IDs. An unrelated external tool may use an identically named argument
+for an external object: a host-wide check that treats that argument as a local
+record ID and blocks the call before endpoint dispatch removes an applicable
+capability (I7), even if the complete tool catalog reached the model. Do not
+accept a generic privacy or ownership explanation as a clearance without
+showing that the guarded ID belongs to the selected tool's own namespace.
+Keep I6 separate: an empty execution self-report does not prove a fabricated
+call, while a valid model-selected external call blocked before its endpoint
+is a capability-fidelity problem even when no false success is reported.
 
 For opaque components, combine submission evidence with platform-supplied
 exact path-and-digest provenance. An official starter-kit match satisfies only
@@ -1596,6 +1618,13 @@ Before returning safe, inspect every changed function that contains those
 locations and close the pre-assignment case where a score-derived decision
 discards a genuine candidate before response construction.
 """
+
+_V13_SAFETY_ADJUDICATOR_TASK = _SAFETY_ADJUDICATOR_TASK.replace(
+    "Use at most four targeted analyzer\ncalls; do not page through whole files.",
+    "Read every original challenge file and the adjacent served-path files "
+    "needed to verify its authority and sink. Use targeted analyzer calls "
+    "within the review budget, without paging through whole files.",
+)
 
 _ORDINARY_OPTIONAL_FIELD_SAFETY_TASK = """\
 For an ordinary scorer-only lead, an optional answer/abstain slot set to None
@@ -2123,6 +2152,7 @@ class L2RunResult:
     direct_clear_graph_complete: bool = True
     analyst_cache_hit: bool = False
     critic_cache_hit: bool = False
+    failure_subcode: str | None = None
 
 
 def _finalize_without_l3(
@@ -3665,6 +3695,7 @@ class TerraSolSourceReviewAgent:
                 dossier_complete=error.dossier_complete,
                 analyst_cache_hit=analyst_cache_hit,
                 critic_cache_hit=critic_cache_hit,
+                failure_subcode=error.failure_subcode,
             )
         except (L2InconclusiveError, OSError, ValueError, httpx.HTTPError) as error:
             inconclusive = isinstance(error, L2InconclusiveError)
@@ -4008,7 +4039,11 @@ class TerraSolSourceReviewAgent:
                 "benchmark_emulation",
                 "scorer_contract_manipulation",
             } <= set(raw_categories)
-            task = _SAFETY_ADJUDICATOR_TASK + (
+            task = (
+                _V13_SAFETY_ADJUDICATOR_TASK
+                if policy_version == 13
+                else _SAFETY_ADJUDICATOR_TASK
+            ) + (
                 _MIXED_SCORER_SAFETY_TASK
                 if mixed_scorer
                 else _ORDINARY_OPTIONAL_FIELD_SAFETY_TASK
@@ -4083,7 +4118,9 @@ class TerraSolSourceReviewAgent:
                 call_id = _call_id_value(call)
             except ValueError as error:
                 logger.warning("L2 model-tool-contract: invalid submit call id")
-                raise failure("model-tool-contract") from error
+                raise failure(
+                    "model-tool-contract", "invalid_submit_call_id"
+                ) from error
             proposed_disposition = "unknown"
             if isinstance(call, Mapping):
                 raw_arguments = call.get("arguments")
@@ -4157,7 +4194,7 @@ class TerraSolSourceReviewAgent:
                 }
             )
 
-        def failure(code: str) -> L2TrajectoryError:
+        def failure(code: str, subcode: str | None = None) -> L2TrajectoryError:
             return L2TrajectoryError(
                 code,
                 usage=usage,
@@ -4168,6 +4205,7 @@ class TerraSolSourceReviewAgent:
                 steps_used=steps_used,
                 read_bytes_used=read_bytes_used,
                 read_files_used=len(read_files),
+                failure_subcode=subcode,
             )
 
         for _step in range(max_steps or self._max_steps):
@@ -4351,7 +4389,7 @@ class TerraSolSourceReviewAgent:
                     )
                     continue
                 logger.warning("L2 model-tool-contract: no tool call after corrections")
-                raise failure("model-tool-contract")
+                raise failure("model-tool-contract", "no_tool_call_after_corrections")
             submitted = [
                 item for item in calls if item.get("name") == "submit_l2_review"
             ]
@@ -4477,10 +4515,14 @@ class TerraSolSourceReviewAgent:
                     logger.warning(
                         "L2 model-tool-contract: malformed tool arguments JSON"
                     )
-                    raise failure("model-tool-contract") from error
+                    raise failure(
+                        "model-tool-contract", "malformed_tool_arguments_json"
+                    ) from error
                 except ValueError as error:
                     logger.warning("L2 model-tool-contract: invalid tool call shape")
-                    raise failure("model-tool-contract") from error
+                    raise failure(
+                        "model-tool-contract", "invalid_tool_call_shape"
+                    ) from error
                 analyzer_calls += 1
                 if analyzer_calls > 2 * (max_steps or self._max_steps):
                     raise failure("model-tool-budget")
@@ -4967,6 +5009,7 @@ class TerraSolSourceReviewAgent:
                 "failure_disposition": result.observation.failure_disposition,
                 "clearance_certified": result.observation.clearance_certified,
                 "review_audit": result.observation.review_audit,
+                "inconclusive_model_audit": result.observation.inconclusive_model_audit,
             },
             "analyzed_files": list(result.analyzed_files),
             "causal_path": list(result.causal_path),
@@ -5767,6 +5810,90 @@ def _validate_violation_invariant_binding(
         raise ValueError("L2 invariant breach is not bound to authority evidence")
 
 
+def _inconclusive_model_audit(
+    *,
+    artifact_sha256: str,
+    prompt_revision: str,
+    policy_version: int,
+    risk: str,
+    categories: list[str],
+    summary: str,
+    evidence: list[Mapping[str, object]],
+    causal: list[Mapping[str, object]],
+    invariants: object,
+) -> Mapping[str, object]:
+    """Keep bounded, artifact-bound model choices without source or free text."""
+    allowed_invariants = {item.value for item in SourceReviewInvariant}
+    allowed_dispositions = {item.value for item in SourceReviewInvariantDisposition}
+    allowed_pass_clauses = {item.value for item in SourceReviewPassClause}
+    decisions: list[dict[str, object]] = []
+    if isinstance(invariants, list):
+        for item in invariants[:8]:
+            if not isinstance(item, dict):
+                continue
+            invariant = item.get("invariant")
+            disposition = item.get("disposition")
+            pass_clause = item.get("pass_clause")
+            indices = item.get("evidence_indices")
+            if (
+                not isinstance(invariant, str)
+                or invariant not in allowed_invariants
+                or not isinstance(disposition, str)
+                or disposition not in allowed_dispositions
+                or (
+                    pass_clause is not None
+                    and (
+                        not isinstance(pass_clause, str)
+                        or pass_clause not in allowed_pass_clauses
+                    )
+                )
+                or not isinstance(indices, list)
+            ):
+                continue
+            item_summary = item.get("summary")
+            decisions.append(
+                {
+                    "invariant": invariant,
+                    "disposition": disposition,
+                    "pass_clause": pass_clause,
+                    "evidence_indices": [
+                        index
+                        for index in indices[:16]
+                        if isinstance(index, int)
+                        and not isinstance(index, bool)
+                        and 0 <= index < len(evidence)
+                    ],
+                    "summary_sha256": hashlib.sha256(
+                        (item_summary if isinstance(item_summary, str) else "").encode()
+                    ).hexdigest(),
+                }
+            )
+    return {
+        "artifact_sha256": artifact_sha256,
+        "prompt_revision": prompt_revision,
+        "policy_version": policy_version,
+        "disposition": "inconclusive",
+        "risk_level": risk,
+        "categories": list(categories),
+        "summary_sha256": hashlib.sha256(summary.encode()).hexdigest(),
+        "evidence": [
+            {
+                "path": item["path"],
+                "line": item["line"],
+                "file_sha256": item["file_sha256"],
+                "category": item["category"],
+                "role": item["role"],
+            }
+            for item in evidence
+        ],
+        "causal_path": list(causal),
+        "invariants": decisions,
+        "submitted_invariant_count": (
+            len(invariants) if isinstance(invariants, list) else None
+        ),
+    }
+
+
 def _parse_l2_review(
     value: object,
     *,
@@ -6012,7 +6139,20 @@ def _parse_l2_review(
             raise ValueError("L2 causal evidence has no elevated causal category")
     else:
         return (
-            _failure("l2-model-inconclusive", "inconclusive"),
+            replace(
+                _failure("l2-model-inconclusive", "inconclusive"),
+                inconclusive_model_audit=_inconclusive_model_audit(
+                    artifact_sha256=artifact_sha256,
+                    prompt_revision=prompt_revision,
+                    policy_version=policy_version,
+                    risk=risk,
+                    categories=categories,
+                    summary=submitted_summary,
+                    evidence=normalized_evidence,
+                    causal=normalized_causal,
+                    invariants=invariants,
+                ),
+            ),
             normalized_analyzed,
             tuple(normalized_causal),
             "insufficient_static_evidence",

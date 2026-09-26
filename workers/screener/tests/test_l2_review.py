@@ -364,6 +364,42 @@ def test_request_local_identical_tool_memoization_is_not_fabrication() -> None:
     assert "fake_completed_call" in violation["source"]
 
 
+def test_v13_external_tool_ids_are_not_local_memory_ids() -> None:
+    fixtures = {
+        case["id"]: case
+        for case in json.loads(
+            (ROOT / "tests/fixtures/l2-review-regressions.json").read_text()
+        )
+    }
+    safe = fixtures["safe-local-memory-id-guard-preserves-external-catalog"]
+    violation = fixtures["violation-external-pair-id-blocked-by-local-memory-guard"]
+    assert safe["disposition"] == "safe"
+    assert violation["disposition"] == "violation"
+    assert violation["category"] == "mandatory_contract_failure"
+    assert "selected = model_select(offered)" in safe["source"]
+    assert "selected = model_select(offered)" in violation["source"]
+    assert "req.tool_endpoint.post(selected.name, selected.args)" in safe["source"]
+    assert violation["source"].index("blocked_before_endpoint") < violation[
+        "source"
+    ].index("req.tool_endpoint.post")
+
+    v12 = _l2_review_system_prompt(12)
+    v13 = _l2_review_system_prompt(13)
+    assert "identity and argument schema of the offered tool" not in v12
+    assert "identity and argument schema of the offered tool" in v13
+    assert "local memory tool may check ownership of its own" in v13
+    assert "host-wide check that treats that argument as a local" in v13
+    assert "blocks the call before endpoint dispatch" in v13
+    assert l2_prompt_revision(13) == "l2-terra-source-review-v42-policy-v13"
+    assert l2_critic_prompt_revision(13) == "l3-sol-adversarial-critic-v22-policy-v13"
+    assert l2_safety_prompt_revision(13) == "l3-sol-safety-adjudicator-v26-policy-v13"
+    assert "Use at most four targeted analyzer" in _SAFETY_ADJUDICATOR_TASK
+    assert "Use at most four targeted analyzer" not in (
+        l2_review._V13_SAFETY_ADJUDICATOR_TASK
+    )
+    assert "adjacent served-path files" in l2_review._V13_SAFETY_ADJUDICATOR_TASK
+
+
 def test_l2_policy_v10_prompt_keeps_the_original_i7_text() -> None:
     from ditto_screener.l2_review import _assert_l2_policy_tails_differ
 
@@ -437,7 +473,7 @@ def test_l2_policy_v13_prompt_adds_i8_and_authority_boundaries() -> None:
     assert "validator mints `inference_base_url`" in v13
     assert "A URL derived from user text" in v13
     assert "validator mints `inference_base_url`" not in _l2_review_system_prompt(12)
-    assert l2_prompt_revision(13) == "l2-terra-source-review-v41-policy-v13"
+    assert l2_prompt_revision(13) == "l2-terra-source-review-v42-policy-v13"
     assert "v13" not in _benchmark_contract_capsule(12)
     assert _benchmark_contract_capsule(12)["supported_versions"] == [3, 4, 5, 6]
     assert (
@@ -1403,6 +1439,7 @@ def test_generalized_evidence_fixtures_are_artifact_bound(
                 "scorer_contract_manipulation": "scorer_field_manipulation",
                 "hidden_value_leakage": "hidden_model_bypass",
                 "fabricated_tool_trajectory": "fabricated_tool_trajectory",
+                "mandatory_contract_failure": "mandatory_contract_failure",
                 "provider_bypass": "hidden_model_bypass",
                 "data_exfiltration": "credential_exfiltration",
             }.get(category, "benchmark_answer_replacement")
@@ -1425,6 +1462,16 @@ def test_generalized_evidence_fixtures_are_artifact_bound(
     if disposition == "inconclusive":
         assert not observation.ok
         assert observation.failure_disposition == "inconclusive"
+        audit = observation.inconclusive_model_audit
+        assert audit is not None
+        assert audit["artifact_sha256"] == artifact_sha
+        assert (
+            audit["summary_sha256"]
+            == hashlib.sha256(result["summary"].encode()).hexdigest()
+        )
+        assert "model text is discarded" not in str(audit)
+        assert audit["submitted_invariant_count"] == 8
+        assert all("summary" not in decision for decision in audit["invariants"])
     else:
         assert observation.ok
         assert observation.risk_level == risk
@@ -2666,6 +2713,45 @@ async def test_partial_dossier_safe_consensus_cannot_clear(tmp_path: Path) -> No
     assert result.observation.failure_disposition == "retryable_infra"
     assert result.observation.error_code == "l3-adjudicator-incomplete"
     assert not result.dossier_complete
+
+
+async def test_l3_no_tool_failure_reports_bounded_subcode(tmp_path: Path) -> None:
+    source = "fn main() { serve(); }\nfn serve() {}"
+    archive, artifact_sha = _tar(tmp_path, source)
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    safe = _clearance_certificate(
+        {
+            "disposition": "safe",
+            "risk_level": "low",
+            "confidence": 1.0,
+            "resolution_basis": "authoritative_model_tool_path",
+            "categories": ["none"],
+            "analyzed_files": [{"path": "src/main.rs", "sha256": digest}],
+            "evidence": [],
+            "summary": "sanitized",
+        }
+    )
+    requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests >= 3:
+            return _response([])
+        return _response([_tool_call(str(requests), "submit_l2_review", safe)])
+
+    result = await _sol_agent(tmp_path, _PartialHarness(), handler).review(
+        str(archive),
+        artifact_sha256=artifact_sha,
+        attempt_id=ATTEMPT,
+        l1_observation=_l1(),
+        deadline=None,
+    )
+
+    assert requests == 3
+    assert result.observation.error_code == "l3-adjudicator-model-tool-contract"
+    assert result.observation.failure_disposition == "retryable_infra"
+    assert result.failure_subcode == "no_tool_call_after_corrections"
 
 
 async def test_sol_request_is_provider_locked_cached_and_concurrency_safe(
@@ -4663,7 +4749,7 @@ def _assert_logan_certificate_contract(
         certificate,
         artifact_sha256=artifact_sha256,
         repository=repository,
-        prompt_revision="l2-terra-source-review-v41-policy-v13-sol-independent-compact-v1",
+        prompt_revision="l2-terra-source-review-v42-policy-v13-sol-independent-compact-v1",
         policy_version=13,
     )
     assert observation.ok and observation.risk_level == "high"
