@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
 from ditto.api_models.agent_status import AgentStatus
-from ditto.api_models.retry_state import RecommendedRetryAction, RetryState
+from ditto.api_models.retry_state import (
+    RecommendedRetryAction,
+    RetryDisposition,
+    RetryState,
+)
 from ditto.api_models.ticket_status import TicketPurpose, TicketStatus
 from ditto.db.models import (
     Agent,
@@ -190,6 +194,25 @@ def is_agent_attributable_exhaustion(
     )
 
 
+def agreed_failure_detail(
+    *, scores: list[Score], tickets: list[ValidatorTicket]
+) -> str | None:
+    """The single current ``failure_detail`` every remaining slot reports.
+
+    ``None`` when the causes are mixed, when any is missing or stale, or when
+    there is nothing left to agree. A cause no slot disputes is the only one a
+    public surface may name.
+    """
+    remaining = remaining_exhausted_tickets(scores=scores, tickets=tickets)
+    if not remaining:
+        return None
+    details = {current_failure_detail(ticket) for ticket in remaining}
+    if len(details) != 1:
+        return None
+    detail = next(iter(details))
+    return detail if isinstance(detail, str) else None
+
+
 def dominant_agent_failure_detail(
     *, scores: list[Score], tickets: list[ValidatorTicket]
 ) -> str | None:
@@ -262,6 +285,43 @@ def recommended_retry_action(
     if recovery_allowed and not provider_outage_blocked:
         return "retry"
     return None
+
+
+def retry_disposition(
+    *,
+    state: RetryState,
+    scores: list[Score],
+    tickets: list[ValidatorTicket],
+    recovery_allowed: bool,
+) -> RetryDisposition | None:
+    """The miner-facing reading of a parked row, or ``None`` while it advances.
+
+    Only an ``exhausted`` row has a disposition: every other state is still
+    moving on its own, and naming a failure there would be wrong even when a
+    single past lease failed. Exhausted rows split exactly where
+    :func:`recommended_retry_action` already splits them, so the public surface
+    can never disagree with the operator triage it was derived from.
+
+    Fail-closed, and deliberately weak: ``operator_hold`` means only that the
+    platform will not attribute this row to the submission. It is not a claim
+    that the fleet failed. A mixed, unnamed, stale or unactionable cause, and a
+    withdraw verdict with no single publishable code, all land here.
+    """
+    if state != "exhausted":
+        return None
+    action = recommended_retry_action(
+        scores=scores, tickets=tickets, recovery_allowed=recovery_allowed
+    )
+    if action != "withdraw":
+        return "operator_hold"
+    # A withdraw verdict can rest on two different named codes, and a terminal
+    # row has to be able to name the one it is telling the miner to fix. When
+    # the remaining slots disagree there is no code to publish, so the public
+    # reading falls back to the hold rather than asserting a failure it cannot
+    # attribute. The operator surface still reads ``withdraw``.
+    if dominant_agent_failure_detail(scores=scores, tickets=tickets) is None:
+        return "operator_hold"
+    return "terminal_artifact_failure"
 
 
 def recovery_gate(
@@ -561,6 +621,23 @@ class AgentRetryState:
     automatic_retry_available: bool
     recovery_allowed: bool
     blocking_reason: str | None
+    disposition: RetryDisposition | None
+    """Whether a parked row is waiting on Ditto or has terminally failed."""
+    terminal_failure_code: str | None
+    """The agreed agent-attributable code behind a terminal disposition.
+
+    Set only when :attr:`disposition` is ``terminal_artifact_failure``, and only
+    from :data:`AGENT_ATTRIBUTABLE_FAILURE_DETAILS`, so no free-form validator
+    diagnostic can reach a caller through this field.
+    """
+    hold_failure_code: str | None
+    """The agreed cause behind an ``operator_hold``, when every slot names one.
+
+    This is what separates a hold the platform can attribute to its own fleet
+    from one it simply cannot attribute at all. Null is the ordinary case and
+    means the cause is mixed, unnamed or stale; a caller must not describe a
+    null-code hold as anyone's fault.
+    """
     earliest_retry_after: datetime | None
     scores: list[Score]
     tickets: list[ValidatorTicket]
@@ -714,6 +791,12 @@ async def classify_agent_retry_states(
         if state is None:
             continue
         scored_hotkeys = {s.validator_hotkey for s in v_scores}
+        disposition = retry_disposition(
+            state=state,
+            scores=v_scores,
+            tickets=v_tickets,
+            recovery_allowed=allowed,
+        )
         result[agent_id] = AgentRetryState(
             state=state,
             bench_version=bench_version,
@@ -721,6 +804,17 @@ async def classify_agent_retry_states(
             automatic_retry_available=automatic,
             recovery_allowed=allowed,
             blocking_reason=reason,
+            disposition=disposition,
+            terminal_failure_code=(
+                dominant_agent_failure_detail(scores=v_scores, tickets=v_tickets)
+                if disposition == "terminal_artifact_failure"
+                else None
+            ),
+            hold_failure_code=(
+                agreed_failure_detail(scores=v_scores, tickets=v_tickets)
+                if disposition == "operator_hold"
+                else None
+            ),
             # Only a ticket that can still retry has a meaningful "retry at"
             # time; an exhausted ticket's stale cooldown must not read as
             # "coming back soon".
