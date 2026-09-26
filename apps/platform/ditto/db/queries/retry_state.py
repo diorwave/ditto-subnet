@@ -32,6 +32,7 @@ from ditto.db.models import (
     ValidatorTicket,
 )
 from ditto.db.queries.benchmark_rollout import active_bench_version, open_rollout
+from ditto.db.queries.provider_outages import provider_outage_active
 from ditto.db.queries.queue_removal import is_in_force, removal_in_force
 from ditto.db.queries.scores import SCORING_QUORUM
 from ditto.db.queries.tickets import ticket_retry_budget_spent
@@ -59,9 +60,9 @@ AGENT_ATTRIBUTABLE_WITHDRAW_REASON = (
 # live scoring lease. Infrastructure, never the agent's fault.
 PROVIDER_OUTAGE_PARKED_DETAIL = "provider_outage_parked"
 PROVIDER_OUTAGE_RETRY_BLOCKING_REASON = (
-    "inference provider outage circuit is still open; every scoring lease is "
-    "parked while it is, so a restored slot would be parked again. Wait for "
-    "the circuit to close, or retry with acknowledge_provider_outage=true"
+    "inference provider outage circuit is still open (every scoring lease is "
+    "parked) or a provider-parked slot is inside the recovery quiet window. "
+    "Wait for provider recovery, or retry with acknowledge_provider_outage=true"
 )
 
 
@@ -213,11 +214,15 @@ def provider_outage_parked_exhaustion(
     )
 
 
-def provider_outage_blocks_retry(*, circuit: ProviderOutageCircuit | None) -> bool:
+def provider_outage_blocks_retry(
+    *,
+    circuit: ProviderOutageCircuit | None,
+    scores: list[Score],
+    tickets: list[ValidatorTicket],
+    now: datetime,
+) -> bool:
     """Whether a retry grant would restore a slot the outage parks again.
 
-    Scoped to the circuit alone, deliberately matching what the lease path
-    actually does rather than what the slot last failed on.
     ``park_scoring_leases`` selects **every** ``ISSUED`` validator ticket while
     the circuit is open — no filter on purpose, benchmark version, or prior
     failure cause — and exempts only the one live half-open scoring probe. So a
@@ -232,12 +237,16 @@ def provider_outage_blocks_retry(*, circuit: ProviderOutageCircuit | None) -> bo
     grant that ``park_scoring_leases`` revokes, so a version or purpose that
     made no hosted-inference call would still lose the lease.
 
-    A ``closed`` circuit restores the ordinary retry path. That is a
-    current-state guard, not a healthy-route proof: the relay reopens the
-    circuit on the next qualifying failure, so a grant can still be spent in a
-    window that closes and reopens seconds later.
+    Once closed, only provider-parked exhausted slots wait for the 30-minute
+    quiet window. Unrelated exhausted slots can be granted immediately.
     """
-    return circuit is not None and circuit.state == "open"
+    if circuit is None:
+        return False
+    if circuit.state == "open":
+        return True
+    if not provider_outage_parked_exhaustion(scores=scores, tickets=tickets):
+        return False
+    return provider_outage_active(circuit, now=now)
 
 
 def recommended_retry_action(

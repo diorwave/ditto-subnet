@@ -38,6 +38,7 @@ import {
   compactScreeningQuarantines,
   compactScreeningSubmissions,
   compactStuckSubmissions,
+  SCREENING_SUBMISSION_DETAILS,
   compactValidatorAssignments,
   compactValidatorFleet,
 } from '../lib/mcp-payloads'
@@ -148,6 +149,8 @@ import {
   setConfirmationBundleSettingsInputSchema,
   authorizeConfirmationBundleRetestInputSchema,
   retryTrustedImageBuildInputSchema,
+  hasScreeningSubmissionFilters,
+  screeningSubmissionFiltersSchema,
 } from '../lib/admin.schemas'
 import {
   fetchCopyReviewSourceDiff,
@@ -768,6 +771,10 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Page ended leases with operator_evicted and exact verdicts. Evidence is WHOLE AND UNTYPED validator_lease_audit context. AN EMPTY RESULT IS A FINDING, NOT AN UNWIRED FEATURE.',
   list_stuck_submissions:
     'Page stuck-submission urgency order with ticket counts and silent_expiry_count. generation=all spans benchmarks; get_validation_retry includes infra_retry_grants.',
+  list_screening_submissions:
+    'Page submissions newest first; summary shows the latest attempt. To find a named agent, hotkey, coldkey, SHA-256, status, or reason code use search_submissions, never page and grep.',
+  search_submissions:
+    'Find submissions by exact/prefix name, hotkey, coldkey, SHA-256, status, reason code, or submitted window. Filtered count; identity rows by default; all generations.',
   summarize_screening_failures:
     'Group active-benchmark screening / screening_failed agents by reason_code. Pass generation=all only for a cross-benchmark audit. Use get_screening_submission for one row.',
   get_screening_failure_diagnostic:
@@ -1527,7 +1534,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'List screening submissions',
       description:
-        'Page current-benchmark SN118 submissions newest first by submitted_at then agent_id. generation=active (default) uses the Platform benchmark-admission boundary, including current-era arrivals and explicitly adopted carryovers while excluding historical submissions; generation=all is the explicit cross-benchmark audit view. detail=summary (default) returns attempt_count and the latest attempt; detail=full returns complete attempt history. get_screening_submission is the exact one-row detail path.',
+        'Page current-benchmark SN118 submissions newest first by submitted_at then agent_id. generation=active (default) uses the Platform benchmark-admission boundary, including current-era arrivals and explicitly adopted carryovers while excluding historical submissions; generation=all is the explicit cross-benchmark audit view. detail=summary (default) returns attempt_count and the latest attempt; detail=full returns complete attempt history. get_screening_submission is the exact one-row detail path. To locate a submission by name, name prefix, miner hotkey or payment coldkey, artifact SHA-256, status, reason code, or submitted window, call search_submissions: Platform filters server-side and returns the filtered count, so never page this list and grep client-side.',
       inputSchema: {
         generation: z.enum(['active', 'all']).default('active'),
         detail: z.enum(['summary', 'full']).default('summary'),
@@ -1546,6 +1553,40 @@ export function createBackroomMcpServer(props: McpGrantProps) {
           detail,
         ),
       ),
+  )
+
+  registerTool(
+    'search_submissions',
+    {
+      title: 'Search screening submissions',
+      description:
+        'Resolve what an operator knows (a name, a miner, an artifact, a status, a failure class) to exact SN118 submissions in one call. Filters are optional and AND-combined server-side on Platform: agentName exact; agentNamePrefix a literal prefix (% and _ match themselves), e.g. moonlight for every version and family; minerHotkey exact; minerColdkey the payment-time owner; artifactSha256 exact (any case); agentStatus and screeningReasonCode any-of lists; submittedAfter inclusive and submittedBefore exclusive, ISO-8601 with an offset. At least one filter is required; unfiltered paging is list_screening_submissions. Rows are newest first by submitted_at then agent_id and count is the filtered total, so offset pages the match set. generation defaults to all because the submission you are looking for may predate the active benchmark; pass active to scope to the current admission boundary. detail=identity (default) returns agent_id, agent_name, agent_version, agent_status, submitted_at, artifact_sha256; summary adds miner keys, reasons, and the latest attempt; full adds attempt history. Hand an agent_id to get_screening_submission for one row. Requires backroom:read; exposes no source or artifact URL.',
+      inputSchema: {
+        ...screeningSubmissionFiltersSchema.shape,
+        generation: z.enum(['active', 'all']).default('all'),
+        detail: z.enum(SCREENING_SUBMISSION_DETAILS).default('identity'),
+        limit: z.number().int().min(1).max(200).default(20),
+        offset: z.number().int().min(0).default(0),
+      },
+      annotations: toolAnnotations('read'),
+    },
+    async ({ generation, detail, limit, offset, ...filters }) => {
+      if (!hasScreeningSubmissionFilters(filters)) {
+        return errorResult(
+          'search_submissions needs at least one filter. Use list_screening_submissions to page every submission.',
+        )
+      }
+      return result(
+        compactScreeningSubmissions(
+          withPagination(
+            await fetchScreeningSubmissions(limit, offset, generation, filters),
+            limit,
+            offset,
+          ),
+          detail,
+        ),
+      )
+    },
   )
 
   registerTool(
@@ -1596,7 +1637,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         'Also reports what each operator remedy would do right now: withdrawal_allowed/withdrawal_blocking_reason for remove_failed_submission_from_queue, and eviction_allowed/eviction_blocking_reason plus live_ticket_count — the leases evict_live_validator_leases would revoke, i.e. the validator slots it would return to the pool immediately. A past removal reports evicted_validator_hotkeys under withdrawal, which is null for an ordinary withdrawal, [] for an eviction that found nothing live left to take, and the revoked validators for one that did. ' +
         'All four eviction fields read null against a platform deployment that predates ditto-platform #515, which means "this deployment cannot tell you", not "eviction is blocked". ' +
         'Queue removal is reversible: reinstatement_allowed/reinstatement_blocking_reason say whether reinstate_evicted_submission_to_queue would work right now for either an ordinary withdrawal or a live-lease eviction. A reversed removal reports reinstated_at under withdrawal plus the reversal itself under reinstatement. Read reinstated_at before concluding a submission is out of the queue — a non-null withdrawal means a removal was recorded, not that it is still in force. Both reinstatement fields read null on a platform that predates the reinstate route, with the same meaning as above. ' +
-        'Each ticket also carries why it ended: silently_expired (the lease ran out with nothing reported about that attempt), failure_reason and failed_at (history, not current state — a manual reissue preserves the last report), slot_id, purpose (canonical_quorum or continual_retest), first_reported_at (null means the validator never advertised the slot as active), and infra_retry_grants. infra_retry_grants is historical evidence from deployments that minted automatic infrastructure grants; it no longer authorizes a lease. provider_outage is the provider-wide relay circuit (state, last_failure_at, last_error_code, closed_at = last recovery, a current-state observation only); provider_outage_blocks_retry means it is open, so EVERY restored lease is parked again whatever the slot failed on, recommended_action is not retry, and a grant needs acknowledgeProviderOutage. Every current failure parks after one attempt until retry_validator_evaluation or retry_validator_evaluations is issued manually. silently_expired reads null against a platform that predates #515. If a lease was ended by the platform rather than by a validator report, list_lease_revocations carries the verdict and its evidence. Requires backroom:read and exposes no miner source.',
+        'Each ticket also carries why it ended: silently_expired (the lease ran out with nothing reported about that attempt), failure_reason and failed_at (history, not current state — a manual reissue preserves the last report), slot_id, purpose (canonical_quorum or continual_retest), first_reported_at (null means the validator never advertised the slot as active), and infra_retry_grants. infra_retry_grants is historical evidence from deployments that minted automatic infrastructure grants; it no longer authorizes a lease. provider_outage is the provider-wide relay circuit (state, last_failure_at, last_error_code, closed_at = last recovery, a current-state observation only); provider_outage_blocks_retry means the circuit is open, or a provider-parked slot remains inside the 30-minute quiet window; recommended_action is not retry and a grant needs acknowledgeProviderOutage. Every current failure parks after one attempt until retry_validator_evaluation or retry_validator_evaluations is issued manually. silently_expired reads null against a platform that predates #515. If a lease was ended by the platform rather than by a validator report, list_lease_revocations carries the verdict and its evidence. Requires backroom:read and exposes no miner source.',
       inputSchema: validationRetryLookupInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1629,7 +1670,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Retry validation after validator infrastructure failure',
       description:
-        'Restore only the exhausted validation slots needed for quorum after an operator verifies validator-owned infrastructure failure. Preserves scores, screening verdicts, artifacts, payments, ownership, and all ticket history. This is not rescreening and acts on one agent only. Refused (409) while provider_outage_blocks_retry is true unless acknowledgeProviderOutage=true: the provider-wide circuit is open and parks every restored lease. Requires backroom:write.',
+        'Restore only the exhausted validation slots needed for quorum after an operator verifies validator-owned infrastructure failure. Preserves scores, screening verdicts, artifacts, payments, ownership, and all ticket history. This is not rescreening and acts on one agent only. Refused (409) while provider_outage_blocks_retry is true unless acknowledgeProviderOutage=true: the provider-wide circuit is open or a provider-parked slot remains inside the recovery quiet window. Requires backroom:write.',
       inputSchema: retryValidationInputSchema,
       annotations: toolAnnotations('write', true),
     },
