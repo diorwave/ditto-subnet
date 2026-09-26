@@ -46,11 +46,23 @@ persisted `claim_provenance` record (verdicts and counts), the catalog record
 with per-completion relay metadata (digests, no text), the relation, twin group
 and cost factor, the scorer's own notes (a note that quotes a case value, such
 as a forbidden argument or bait tool, is withheld), and gate notes whose
-`note_id` is what an owner dispute cites. `not_persisted` names the fields the scorer computes
-but does not store: the credited response field, the per-token claim
-comparison, completion ids and the normalization trace. Their absence is not
+`note_id` is what an owner dispute cites. `not_persisted` names the fields the
+scorer computes but does not store: the credited response field, the per-token
+claim comparison, completion ids and the normalization trace. Their absence is not
 evidence either way. The tool never returns the answer key, prompts, user
 records, tool results or completion text.
+
+`get_outlier_escalation_dry_run` replays the same escalation decision through
+`GET /api/v1/admin/outlier-escalation/dry-run` over the current scored ledger
+for one benchmark version, active by default. It uses the ledger that scoring
+reads at finalization, one scored row per owner, and judges each row against
+all the others. The mode is ignored. Settings are the effective ones, and
+`minCohortSize`, `modifiedZThreshold` and `minCompositeFloor` can override them
+for the replay only. It returns the cohort size, ledger median and MAD, the
+exact would-trigger count, and up to 20 rows (100 at most) with each agent's
+composite, modified z-score and evidence. Held agents are not replayed. Each
+row is judged against today's ledger, not the ledger at its own finalization.
+The tool opens no hold and changes no setting.
 
 `https://backroom.dittobench.ai/mcp` is an OAuth-protected Streamable HTTP MCP
 server exposing the same operations as the console: screening quarantines and
