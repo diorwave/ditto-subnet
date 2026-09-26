@@ -399,9 +399,10 @@ describe('Backroom MCP tools', () => {
     // 164,066 bytes. Four treasury policy, quote and preview tools bring the
     // measured catalog to 167,798 bytes. The exact-source canary preflight
     // adds one bounded read; retain about 0.5 KB headroom at 169,300 bytes.
-    // The bounded outlier-escalation dry-run read measures 169,677 bytes;
+    // The taxonomy's report-only rate_limit_bursts note adds about 80 bytes.
+    // The bounded outlier-escalation dry-run read measures 169,755 bytes;
     // retain about 0.5 KB headroom.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(170_200)
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(170_300)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -428,9 +429,10 @@ describe('Backroom MCP tools', () => {
       // provenance reads plus scorer pin rotation and history; measured at 29,121.
       // The one-line outlier-escalation read (79 chars; detail in tool help)
       // plus later main summaries measured 29,329. Two short treasury
-      // shadow-policy descriptions bring the measured total to 29,850. The
-      // one-line outlier-escalation dry-run read measures 30,521.
-      31_000,
+      // shadow-policy descriptions bring the measured total to 29,850.
+      // The taxonomy's rate_limit_bursts catalog note measured 30,520; the
+      // one-line outlier-escalation dry-run read brings it to 30,794.
+      31_200,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
@@ -3787,6 +3789,29 @@ describe('Backroom MCP tools', () => {
             share_of_settled_calls: 0.0321,
           },
         ],
+        rate_limit_bursts: [
+          {
+            request_kind: 'chat',
+            window_seconds: 300,
+            rate_limited_failures: 209,
+            threshold: 100,
+            peak_global_concurrency: 31,
+            global_concurrency_limit: 96,
+            active: true,
+            tickets_total: 1,
+            tickets_truncated: false,
+            tickets: [
+              {
+                agent_id: '22222222-2222-4222-8222-222222222222',
+                bench_version: 13,
+                validator_hotkey: '5validator',
+                slot_id: 'slot-0',
+                ticket_deadline: '2026-09-22T19:00:00Z',
+                rate_limited_failures: 209,
+              },
+            ],
+          },
+        ],
       }),
     )
     vi.stubGlobal('fetch', fetchMock)
@@ -3804,6 +3829,7 @@ describe('Backroom MCP tools', () => {
     const taxonomy = readJsonResult(response) as {
       lanes: { rate_limited_failures: number }[]
       groups: { upstream_route: string | null; route_basis: string }[]
+      rate_limit_bursts: { active: boolean; tickets: { slot_id: string }[] }[]
     }
     expect(taxonomy.lanes[0]).toMatchObject({
       failed: 209,
@@ -3820,6 +3846,10 @@ describe('Backroom MCP tools', () => {
     expect(
       taxonomy.groups.some((group) => group.route_basis === 'confirmed_selected'),
     ).toBe(false)
+    expect(taxonomy.rate_limit_bursts[0]).toMatchObject({
+      active: true,
+      tickets: [{ slot_id: 'slot-0' }],
+    })
 
     await client.close()
     await server.close()
