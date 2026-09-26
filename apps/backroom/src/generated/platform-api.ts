@@ -1310,6 +1310,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/inference-admission-rejections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Admission Rejections
+         * @description Counts and recent rows. Bodies, prompts, and credentials are not stored.
+         */
+        get: operations["list_admission_rejections_api_v1_admin_inference_admission_rejections_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/inference-concurrency-settings": {
         parameters: {
             query?: never;
@@ -1352,7 +1372,9 @@ export interface paths {
          *
          *     ``/admin/inference-runtime-metrics`` already reports failures per lane per
          *     window; this splits the same bounded windows by the dimensions an upstream
-         *     rate-limit burst actually moves. Counts and identifiers only.
+         *     rate-limit burst actually moves, and flags a report-only five-minute
+         *     ``upstream_http_429`` burst per lane with the tickets it touched. Counts
+         *     and identifiers only.
          */
         get: operations["get_inference_failure_taxonomy_api_v1_admin_inference_failure_taxonomy_get"];
         put?: never;
@@ -1549,6 +1571,40 @@ export interface paths {
          * @description Effective escalation settings with sources, plus recent activity.
          */
         get: operations["get_outlier_escalation_api_v1_admin_outlier_escalation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/outlier-escalation/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Outlier Escalation Dry Run
+         * @description Which current ledger rows the escalation would hold, whatever the mode.
+         *
+         *     Replays :func:`evaluate_score_outlier` -- the exact decision scoring calls
+         *     -- over the ledger scoring reads at finalization
+         *     (``list_eligible_ledger(bench_version=...)``, one ``scored`` row per owner,
+         *     median-row composite). Each row is judged against the other rows, as the
+         *     finalizing candidate is judged against a ledger it is not yet in. Agents
+         *     already held are outside that ledger and are not replayed.
+         *
+         *     Where it differs from each row's own finalization: the cohort is today's
+         *     ledger, not the ledger at that time; only an owner's representative row is
+         *     replayed, and its cohort omits that owner, whose earlier best was a peer at
+         *     finalization; and the candidate composite is the median score row, equal
+         *     to the finalization ``statistics.median`` for an odd score count such as
+         *     the three-validator quorum.
+         */
+        get: operations["get_outlier_escalation_dry_run_api_v1_admin_outlier_escalation_dry_run_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1860,6 +1916,26 @@ export interface paths {
          * @description Queue one exact source once; this never reopens a screening attempt.
          */
         post: operations["schedule_l2_report_canary_api_v1_admin_screener_l2_report_canaries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/screener-l2-report-canaries/preflight/{agent_id}/{source_attempt_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get L2 Report Canary Preflight
+         * @description Expose exact guard inputs; scheduling still rechecks them under a lock.
+         */
+        get: operations["get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2363,6 +2439,13 @@ export interface paths {
         /**
          * List Screening Submissions
          * @description Return current-benchmark screening rows unless history is requested.
+         *
+         *     Every filter is optional and AND-combined with the generation boundary, and
+         *     ``count`` is the filtered total so offsets page the match set. ``agent_name``
+         *     is exact, ``agent_name_prefix`` is a literal prefix, ``miner_coldkey`` is the
+         *     immutable payment-time owner, ``agent_status`` and ``screening_reason_code``
+         *     are repeatable any-of lists, and ``submitted_after`` (inclusive) /
+         *     ``submitted_before`` (exclusive) bound ``created_at``, the sort key.
          */
         get: operations["list_screening_submissions_api_v1_admin_screening_submissions_get"];
         put?: never;
@@ -3075,6 +3158,27 @@ export interface paths {
          *     with ``record_omitted="too_large"``.
          */
         post: operations["peek_trace_object_api_v1_admin_traces_peek_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/transcript-mirror-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Settings */
+        get: operations["get_settings_api_v1_admin_transcript_mirror_settings_get"];
+        put?: never;
+        /**
+         * Create Settings Revision
+         * @description Append one audited revision. The mirror stays off until this says otherwise.
+         */
+        post: operations["create_settings_revision_api_v1_admin_transcript_mirror_settings_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4292,6 +4396,9 @@ export interface paths {
         /**
          * Accept Link Decide
          * @description Consume the single-use accept token: accept → authenticated, else failed.
+         *
+         *     The token is read only from the form body, so the answering request's
+         *     URL (and the history entry it leaves) carries just ``attempt``.
          */
         post: operations["accept_link_decide_api_v1_miner_auth_ditto_accept_post"];
         delete?: never;
@@ -5088,6 +5195,23 @@ export interface paths {
          *     excluded: only settled public scores appear.
          */
         get: operations["submissions_api_v1_public_submissions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/public/treasury-activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Treasury Activity */
+        get: operations["list_treasury_activity_api_v1_public_treasury_activity_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -6865,12 +6989,14 @@ export interface paths {
          *     graded per-case inputs whose digest the validator declared under
          *     ``details["transcript_sha256"]`` and bound into its score signature. The
          *     platform accepts the bytes only when their SHA-256 equals that declared
-         *     digest, then stores them content-addressed in authoritative storage and
-         *     mirrors them publicly when configured. Because the binding is *content*
-         *     equality against an already-signed digest, a
+         *     digest, then stores them content-addressed in authoritative storage.
+         *     The anonymous public mirror is a separate audited setting and, when
+         *     enabled, runs at quorum or on a later upload after quorum. Because the
+         *     binding is *content* equality against an already-signed digest, a
          *     caller spoofing another validator's hotkey can only ever upload the exact
          *     bytes that validator attested — so the header + permit check is sufficient
-         *     auth here. Idempotent: re-uploading an existing digest is a no-op.
+         *     auth here. A retry does not rewrite the primary object and can complete a
+         *     missing public mirror once quorum and the operator setting allow it.
          */
         put: operations["submit_transcript_api_v1_validator_agent__agent_id__transcript__run_id__put"];
         post?: never;
@@ -10394,6 +10520,67 @@ export interface components {
             reason: "oversized" | "non_utf8";
         };
         /**
+         * AdminOutlierEscalationDryRunResponse
+         * @description Would-trigger replay of the escalation over the current scored ledger.
+         *
+         *     Mode-independent and read-only: it opens no hold, writes no audit entry,
+         *     and changes no setting.
+         */
+        AdminOutlierEscalationDryRunResponse: {
+            /** Bench Version */
+            bench_version: number;
+            /**
+             * Bench Version In Scope
+             * @description bench_version >= settings.min_bench_version. When false the live gate never runs at this version; counts are still replayed.
+             */
+            bench_version_in_scope: boolean;
+            /**
+             * Cohort Size
+             * @description Peers per candidate: the ledger without the candidate.
+             */
+            cohort_size: number;
+            /**
+             * Cohort Too Small
+             * @description cohort_size < min_cohort_size, so nothing can trigger.
+             */
+            cohort_too_small: boolean;
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Ledger Mad */
+            ledger_mad?: number | null;
+            /**
+             * Ledger Median
+             * @description Median of all ledger composites (null when empty). Each entry's evidence carries its own leave-one-out median/MAD.
+             */
+            ledger_median?: number | null;
+            /**
+             * Ledger Size
+             * @description Candidates replayed: one per ledger owner.
+             */
+            ledger_size: number;
+            /** Limit */
+            limit: number;
+            /** Overridden Fields */
+            overridden_fields: ("mode" | "min_bench_version" | "min_cohort_size" | "modified_z_threshold" | "min_composite_floor")[];
+            /** @description The policy replayed: the effective settings with any override applied. mode is reported, not applied. */
+            settings: components["schemas"]["OutlierEscalationSettingsView"];
+            /**
+             * Truncated
+             * @description would_trigger_count exceeds the returned rows.
+             */
+            truncated: boolean;
+            /**
+             * Would Trigger
+             * @description Highest composite first, at most limit rows.
+             */
+            would_trigger: components["schemas"]["OutlierEscalationDryRunEntryView"][];
+            /** Would Trigger Count */
+            would_trigger_count: number;
+        };
+        /**
          * AdminOutlierEscalationResponse
          * @description Effective posture, per-field sources, and audit-chain activity.
          */
@@ -10743,6 +10930,10 @@ export interface components {
             disposition: "ready" | "already_applied" | "conflict" | "not_found";
             /** Message */
             message: string;
+            /** Public Reason Code */
+            public_reason_code?: string | null;
+            /** Public Record Hash */
+            public_record_hash?: string | null;
             /**
              * Quarantine Id
              * Format: uuid
@@ -12616,6 +12807,28 @@ export interface components {
             /** Replacement Signature */
             replacement_signature: string;
         };
+        /** AdminTranscriptMirrorSettingsRequest */
+        AdminTranscriptMirrorSettingsRequest: {
+            /**
+             * Actor
+             * @default admin_api
+             */
+            actor: string;
+            /** Confirmation */
+            confirmation: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Expected Revision */
+            expected_revision: number;
+            /** Reason */
+            reason: string;
+        };
+        /** AdminTranscriptMirrorSettingsResponse */
+        AdminTranscriptMirrorSettingsResponse: {
+            current: components["schemas"]["TranscriptMirrorSettingsRevision"];
+            /** History */
+            history: components["schemas"]["TranscriptMirrorSettingsRevision"][];
+        };
         /** AdminTransitionCodingPrivateV2ReleaseRequest */
         AdminTransitionCodingPrivateV2ReleaseRequest: {
             /**
@@ -13265,6 +13478,8 @@ export interface components {
             replacement_allowed: boolean;
             /** Replacement Pending */
             replacement_pending: boolean;
+            /** Replacement Queued */
+            replacement_queued: boolean;
             /** Replacement Reason */
             replacement_reason: string | null;
             /** Replacement Request Id */
@@ -14190,6 +14405,13 @@ export interface components {
              * @enum {string}
              */
             relay_delay_fingerprint_mode: "off" | "shadow";
+        };
+        /** Body_accept_link_decide_api_v1_miner_auth_ditto_accept_post */
+        Body_accept_link_decide_api_v1_miner_auth_ditto_accept_post: {
+            /** Decision */
+            decision: string;
+            /** T */
+            t: string;
         };
         /** Body_set_miner_avatar_api_v1_miner_avatars_post */
         Body_set_miner_avatar_api_v1_miner_avatars_post: {
@@ -19958,6 +20180,54 @@ export interface components {
              */
             weight_eligible: false;
         };
+        /** InferenceAdmissionRejectionRow */
+        InferenceAdmissionRejectionRow: {
+            /** Admission Code */
+            admission_code: string;
+            /** Byte Limit */
+            byte_limit: number | null;
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Grant Id */
+            grant_id: string | null;
+            /** Http Status */
+            http_status: number;
+            /** Lane */
+            lane: string;
+            /** Platform Revision */
+            platform_revision: string;
+            /**
+             * Rejection Id
+             * Format: uuid
+             */
+            rejection_id: string;
+            /** Request Bytes */
+            request_bytes: number;
+            /** Validator Hotkey */
+            validator_hotkey: string | null;
+        };
+        /** InferenceAdmissionRejectionSummary */
+        InferenceAdmissionRejectionSummary: {
+            /** Counts */
+            counts: {
+                [key: string]: number;
+            };
+            /**
+             * Grant Id
+             * Format: uuid
+             */
+            grant_id: string;
+            /** Rows */
+            rows: components["schemas"]["InferenceAdmissionRejectionRow"][];
+        };
         /** InferenceCalibrationRoute */
         InferenceCalibrationRoute: {
             /** Model */
@@ -20334,6 +20604,8 @@ export interface components {
              * Format: date-time
              */
             observed_at: string;
+            /** Rate Limit Bursts */
+            rate_limit_bursts: components["schemas"]["InferenceRateLimitBurst"][];
             /** Window Seconds */
             window_seconds: number[];
         };
@@ -20429,6 +20701,64 @@ export interface components {
             tokens_per_second: number;
             /** Window Seconds */
             window_seconds: number;
+        };
+        /**
+         * InferenceRateLimitBurst
+         * @description Report-only five-minute upstream rate-limit signal for one lane.
+         *
+         *     ``active`` means the lane's ``upstream_http_429`` count reached the
+         *     provisional ``threshold`` while the local global in-flight peak stayed below
+         *     the configured limit -- the upstream pool, not Ditto's own admission, was
+         *     the bottleneck. Nothing is enforced, rerouted, or retried on it.
+         */
+        InferenceRateLimitBurst: {
+            /** Active */
+            active: boolean;
+            /** Global Concurrency Limit */
+            global_concurrency_limit: number;
+            /** Peak Global Concurrency */
+            peak_global_concurrency: number;
+            /** Rate Limited Failures */
+            rate_limited_failures: number;
+            /**
+             * Request Kind
+             * @enum {string}
+             */
+            request_kind: "chat" | "embedding";
+            /** Threshold */
+            threshold: number;
+            /** Tickets */
+            tickets: components["schemas"]["InferenceRateLimitedTicket"][];
+            /** Tickets Total */
+            tickets_total: number;
+            /** Tickets Truncated */
+            tickets_truncated: boolean;
+            /** Window Seconds */
+            window_seconds: number;
+        };
+        /**
+         * InferenceRateLimitedTicket
+         * @description One validator ticket whose calls hit ``upstream_http_429`` in the window.
+         */
+        InferenceRateLimitedTicket: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Bench Version */
+            bench_version: number;
+            /** Rate Limited Failures */
+            rate_limited_failures: number;
+            /** Slot Id */
+            slot_id: string;
+            /**
+             * Ticket Deadline
+             * Format: date-time
+             */
+            ticket_deadline: string;
+            /** Validator Hotkey */
+            validator_hotkey: string;
         };
         /** InferenceRouteView */
         InferenceRouteView: {
@@ -20855,6 +21185,12 @@ export interface components {
             miner_hotkey: string;
             /** Policy Version */
             policy_version: number;
+            /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             scored_runtime_evidence: components["schemas"]["ScoredRuntimeEvidenceLease"];
             /**
              * Source Attempt Id
@@ -20882,6 +21218,34 @@ export interface components {
         L2CanaryCompleteResponse: {
             /** Accepted */
             accepted: boolean;
+        };
+        /**
+         * L2CanaryPreflightView
+         * @description Current values of the scheduler's exact-source guards, before its recheck.
+         */
+        L2CanaryPreflightView: {
+            /** Agent Artifact Sha256 */
+            agent_artifact_sha256: string;
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Agent Status */
+            agent_status: string;
+            /** Arrival Bench Version */
+            arrival_bench_version: number;
+            /** Attempt Policy Version */
+            attempt_policy_version: number;
+            /** Score Row Count */
+            score_row_count: number;
+            /** Source Attempt Artifact Sha256 */
+            source_attempt_artifact_sha256: string | null;
+            /**
+             * Source Attempt Id
+             * Format: uuid
+             */
+            source_attempt_id: string;
         };
         /** L2CanaryScheduleRequest */
         L2CanaryScheduleRequest: {
@@ -20916,6 +21280,12 @@ export interface components {
              * @enum {string}
              */
             review_label: "candidate_clear" | "known_reject";
+            /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             /**
              * Source Attempt Id
              * Format: uuid
@@ -20966,6 +21336,11 @@ export interface components {
             request_id: string;
             /** Review Label */
             review_label: string;
+            /**
+             * Run Mode
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             /**
              * Source Attempt Id
              * Format: uuid
@@ -22241,6 +22616,17 @@ export interface components {
              */
             window_started_at: string;
         };
+        /** OutlierEscalationDryRunEntryView */
+        OutlierEscalationDryRunEntryView: {
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            evidence: components["schemas"]["OutlierEscalationEvidence"];
+            /** Miner Hotkey */
+            miner_hotkey: string;
+        };
         /** OutlierEscalationEntryView */
         OutlierEscalationEntryView: {
             /**
@@ -22740,6 +23126,11 @@ export interface components {
              */
             duplicate_version?: number | null;
             /**
+             * Hold Failure Code
+             * @description The agreed machine cause behind an 'operator_hold', when every remaining slot reports the same one, drawn from the same allowlist as a validation attempt's failure_code. Null is the ordinary case and means the cause is mixed, unnamed or stale: the row is unattributed rather than proven to be a fleet failure, and must not be described as one.
+             */
+            hold_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
+            /**
              * Last Scored At
              * @description When the platform most recently recorded a score (UTC).
              */
@@ -22792,6 +23183,11 @@ export interface components {
              * @description Earliest time an expired ticket becomes eligible to retry (UTC); set while cooling_down.
              */
             retry_after?: string | null;
+            /**
+             * Retry Disposition
+             * @description How to read a parked submission. 'operator_hold' means the platform will not attribute this row to the submission and an operator has to act before it can advance; it is not by itself a claim that the fleet failed. 'terminal_artifact_failure' means every remaining slot died on one named agent-attributable code, so no further lease of this artifact can finish scoring. Null while the submission is still advancing. Fail-closed: a mixed, unnamed, stale or unnameable cause reads as 'operator_hold'. Read 'hold_failure_code' before describing a hold as anyone's fault.
+             */
+            retry_disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
             /**
              * Retry State
              * @description Why a below-quorum submission is or isn't advancing: running, retry_available, cooling_down, exhausted (needs operator recovery), or queued. Null once finalized or not yet evaluating.
@@ -22873,6 +23269,11 @@ export interface components {
              * @description When the platform accepted the upload (UTC).
              */
             submitted_at: string;
+            /**
+             * Terminal Failure Code
+             * @description The agreed machine cause behind a 'terminal_artifact_failure', drawn from the same allowlist as a validation attempt's failure_code. Null for every other disposition. Raw validator diagnostics are never published here.
+             */
+            terminal_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /**
              * Validator Queue Gate
              * @description Why this submission cannot be leased on the next poll despite its rank, or null when nothing holds it. 'previous_generation' is retired-era work the fleet serves only once the current era drains; 'owner_serialized' means another submission from the same paid owner is using the owner's validator slot, so this one waits while any other owner has eligible work -- rotating hotkeys does not buy a second slot, though a validator that finds nothing else eligible anywhere may still lease it rather than idle, up to the operator's per-owner limit; 'similarity_serialized' means a near-identical submission is already using this one's share of fleet capacity, whichever key paid for it -- a queue-fairness wait and nothing more, carrying no claim that either submission is illegitimate, and it clears on its own when the other lease ends; 'not_leasable' means the allocator's candidate filter excludes it (no versioned dataset, no eligible screened image, withdrawn, not admitted to this era, or every quorum slot already occupied).
@@ -22996,10 +23397,17 @@ export interface components {
          *     infrastructure failure is retried automatically with backoff, no earlier than
          *     that time. After too many consecutive failures, or a long park, it reports
          *     ``stuck`` and needs a guarded retry like any other.
+         *
+         *     ``lane`` names the admission lane (image build, runtime smoke, or source
+         *     review) the latest attempt is in or stopped in, and is null whenever
+         *     Platform holds no evidence for it (no attempt yet, a worker-local lane, or
+         *     a failure that names no lane).
          */
         PublicAdmissionRetry: {
             /** Attempt Count */
             attempt_count: number;
+            /** Lane */
+            lane?: ("build" | "runtime_smoke" | "source_review") | null;
             /**
              * Last Failure Infrastructure
              * @default false
@@ -23283,6 +23691,11 @@ export interface components {
              * @description entry_hash of the last entry in this page.
              */
             head_hash?: string | null;
+            /**
+             * Moderation Signer Public Keys
+             * @description Ed25519 role public keys (hex) trusted to sign moderation events on this chain. The current key is first.
+             */
+            moderation_signer_public_keys?: string[];
         };
         /**
          * PublicBenchConfigResponse
@@ -24128,7 +24541,7 @@ export interface components {
             quality_factors?: components["schemas"]["PublicBenchmarkQualityFactor"][];
             /**
              * Token Efficiency Multiplier
-             * @description Benchmark-v5 token multiplier; null when token efficiency does not apply or was unavailable.
+             * @description Signed token multiplier (a neutral 1.0 under the bench v7+ quality-only contract); null when it was unavailable.
              */
             token_efficiency_multiplier?: number | null;
             /**
@@ -26062,6 +26475,8 @@ export interface components {
             agent_id: string;
             /** Bench Version */
             bench_version: number;
+            /** Hold Failure Code */
+            hold_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /**
              * Miner Hotkey
              * @description Submitting miner's SS58 hotkey.
@@ -26081,6 +26496,8 @@ export interface components {
             quorum: number;
             /** Retry After */
             retry_after?: string | null;
+            /** Retry Disposition */
+            retry_disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
             /** Retry State */
             retry_state?: ("running" | "retry_available" | "cooling_down" | "exhausted" | "queued") | null;
             /** Score Count */
@@ -26095,6 +26512,8 @@ export interface components {
              * Format: date-time
              */
             submitted_at: string;
+            /** Terminal Failure Code */
+            terminal_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /** Version */
             version?: number | null;
         };
@@ -26616,6 +27035,8 @@ export interface components {
             submission_family?: components["schemas"]["PublicSubmissionFamily"] | null;
             /** Validation Attempts */
             validation_attempts?: components["schemas"]["PublicValidationAttempt"][];
+            /** @description Live validator-retry state while the submission is below quorum; null once it finalizes, and before any validator work exists. */
+            validator_retry?: components["schemas"]["PublicValidatorRetry"] | null;
         };
         /**
          * PublicSubmissionScores
@@ -26806,7 +27227,8 @@ export interface components {
         };
         /**
          * PublicTokenEfficiency
-         * @description Auditable v5 relay-token waste penalty.
+         * @description Auditable relay-token decision: the v5 waste penalty, or the neutral
+         *     bench v7+ quality-only record that meters usage without scoring it.
          */
         PublicTokenEfficiency: {
             /** Adjusted Composite */
@@ -26881,6 +27303,94 @@ export interface components {
             usage_available: number;
             /** Usage Unavailable */
             usage_unavailable: number;
+        };
+        /** PublicTreasuryEvent */
+        PublicTreasuryEvent: {
+            /** Accepted Work Ref */
+            accepted_work_ref: string | null;
+            /** Actor Provenance */
+            actor_provenance: string;
+            /** Actor Public Id */
+            actor_public_id: string;
+            /** Allocated Alpha Rao */
+            allocated_alpha_rao: string;
+            /** Allocation Bps */
+            allocation_bps: number;
+            /** Block Hash */
+            block_hash: string;
+            /** Bounty Award Id */
+            bounty_award_id: string | null;
+            /** Burn Revision */
+            burn_revision: number;
+            /** Burn Share Micros */
+            burn_share_micros: number;
+            /** Credited Usd Nano */
+            credited_usd_nano: string | null;
+            /**
+             * Denominator
+             * @enum {string}
+             */
+            denominator: "miner_emission" | "released_miner_emission";
+            /** Deposit Amount Atomic */
+            deposit_amount_atomic: string;
+            /**
+             * Deposit Asset
+             * @enum {string}
+             */
+            deposit_asset: "TAO" | "SN28_ALPHA" | "SN118_ALPHA";
+            /**
+             * Event At
+             * Format: date-time
+             */
+            event_at: string;
+            /** Event Index */
+            event_index: number;
+            /**
+             * Event Kind
+             * @enum {string}
+             */
+            event_kind: "gm_token_deposit" | "gm_credit_purchase" | "maintenance_bounty";
+            /** Extrinsic Index */
+            extrinsic_index: number;
+            /** Finalized Event Id */
+            finalized_event_id: number | null;
+            /** Gm Bps */
+            gm_bps: number;
+            /** Id */
+            id: number;
+            /** Maintenance Bps */
+            maintenance_bps: number;
+            /** Payment Id */
+            payment_id: string;
+            /** Policy Revision */
+            policy_revision: number;
+            /** Public Recipient */
+            public_recipient: string;
+            /** Public Sender */
+            public_sender: string;
+            /**
+             * Recorded At
+             * Format: date-time
+             */
+            recorded_at: string;
+            /** Route */
+            route: string;
+            /** Source Alpha Rao */
+            source_alpha_rao: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "chain_finalized" | "reconciled";
+            /** Verification Source */
+            verification_source: string;
+        };
+        /** PublicTreasuryEventPage */
+        PublicTreasuryEventPage: {
+            /** Items */
+            items: components["schemas"]["PublicTreasuryEvent"][];
+            /** Next Before */
+            next_before: number | null;
         };
         /**
          * PublicV13ReviewClockRevision
@@ -27064,7 +27574,7 @@ export interface components {
             /** Failed At */
             failed_at?: string | null;
             /** Failure Code */
-            failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent") | null;
+            failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
             /** Failure Reason */
             failure_reason?: ("infrastructure" | "scoring_error" | "sandbox_oom") | null;
             /**
@@ -27271,6 +27781,44 @@ export interface components {
             status: "disabled" | "fresh" | "stale" | "unavailable";
             /** Validators */
             validators?: components["schemas"]["PublicValidatorName"][];
+        };
+        /**
+         * PublicValidatorRetry
+         * @description Why a below-quorum submission is or is not advancing through scoring.
+         *
+         *     The validator-side counterpart to :class:`PublicAdmissionRetry`. Admission
+         *     already tells a miner when a screening failure was Ditto's; without this a
+         *     submission loses that distinction the moment it reaches the validator queue,
+         *     where the platform's confidence in the classification is higher rather than
+         *     lower.
+         */
+        PublicValidatorRetry: {
+            /**
+             * Disposition
+             * @description 'operator_hold' when the platform will not attribute this row to the submission and an operator has to act, 'terminal_artifact_failure' when no further lease of this artifact can finish scoring. Null while it is advancing. Fail-closed: a mixed, unnamed, stale or unnameable cause reads as 'operator_hold', which on its own asserts no fault.
+             */
+            disposition?: ("operator_hold" | "terminal_artifact_failure") | null;
+            /**
+             * Hold Failure Code
+             * @description Allowlisted machine cause behind an operator hold, when every remaining slot agrees on one. Null means the hold is unattributed, not that the fleet is at fault.
+             */
+            hold_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
+            /**
+             * Retry After
+             * @description Earliest UTC time an expired ticket may be re-leased.
+             */
+            retry_after?: string | null;
+            /**
+             * State
+             * @description running, retry_available, cooling_down, exhausted, or queued. Read ``disposition`` before showing an exhausted row to a miner: the state alone does not say whose failure it was.
+             * @enum {string}
+             */
+            state: "running" | "retry_available" | "cooling_down" | "exhausted" | "queued";
+            /**
+             * Terminal Failure Code
+             * @description Allowlisted machine cause behind a terminal disposition, from the same set as a validation attempt's ``failure_code``.
+             */
+            terminal_failure_code?: ("inference_allowance_exhausted" | "inference_request_rejected" | "model_inference_required" | "inference_lane_saturated" | "provider_recovery_exhausted" | "grant_decline_evidence_mismatch" | "budget_evidence_absent" | "provider_outage_parked") | null;
         };
         /**
          * PublicValidatorScore
@@ -28718,6 +29266,8 @@ export interface components {
             model_disposition?: "inconclusive" | null;
             /** Model Steps Observed */
             model_steps_observed?: number | null;
+            /** Model Tool Failure Subcode */
+            model_tool_failure_subcode?: ("invalid_submit_call_id" | "no_tool_call_after_corrections" | "malformed_tool_arguments_json" | "invalid_tool_call_shape") | null;
             /** Output Tokens Used */
             output_tokens_used?: number | null;
             /** Prompt Revision */
@@ -31873,6 +32423,21 @@ export interface components {
             status?: string | null;
             /** Validator Hotkey */
             validator_hotkey?: string | null;
+        };
+        /** TranscriptMirrorSettingsRevision */
+        TranscriptMirrorSettingsRevision: {
+            /** Actor */
+            actor: string;
+            /** Created At */
+            created_at: string | null;
+            /** Enabled */
+            enabled: boolean;
+            /** Parent Revision */
+            parent_revision: number;
+            /** Reason */
+            reason: string;
+            /** Revision */
+            revision: number;
         };
         /** TreasurySettings */
         TreasurySettings: {
@@ -37189,6 +37754,39 @@ export interface operations {
             };
         };
     };
+    list_admission_rejections_api_v1_admin_inference_admission_rejections_get: {
+        parameters: {
+            query: {
+                grant_id: string;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InferenceAdmissionRejectionSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_settings_api_v1_admin_inference_concurrency_settings_get: {
         parameters: {
             query?: never;
@@ -37588,6 +38186,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminOutlierEscalationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_outlier_escalation_dry_run_api_v1_admin_outlier_escalation_dry_run_get: {
+        parameters: {
+            query?: {
+                bench_version?: number | null;
+                min_cohort_size?: number | null;
+                modified_z_threshold?: number | null;
+                min_composite_floor?: number | null;
+                limit?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOutlierEscalationDryRunResponse"];
                 };
             };
             /** @description Validation Error */
@@ -38105,6 +38740,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["L2CanaryView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+                source_attempt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["L2CanaryPreflightView"];
                 };
             };
             /** @description Validation Error */
@@ -39122,6 +39791,15 @@ export interface operations {
                 generation?: "active" | "all";
                 limit?: number;
                 offset?: number;
+                agent_name?: string | null;
+                agent_name_prefix?: string | null;
+                miner_hotkey?: string | null;
+                miner_coldkey?: string | null;
+                artifact_sha256?: string | null;
+                agent_status?: components["schemas"]["AgentStatus"][] | null;
+                screening_reason_code?: string[] | null;
+                submitted_after?: string | null;
+                submitted_before?: string | null;
             };
             header?: {
                 authorization?: string | null;
@@ -40516,6 +41194,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TracePeekResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_settings_api_v1_admin_transcript_mirror_settings_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminTranscriptMirrorSettingsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_settings_revision_api_v1_admin_transcript_mirror_settings_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminTranscriptMirrorSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranscriptMirrorSettingsRevision"];
                 };
             };
             /** @description Validation Error */
@@ -42755,14 +43499,16 @@ export interface operations {
         parameters: {
             query: {
                 attempt: string;
-                t: string;
-                decision: string;
             };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["Body_accept_link_decide_api_v1_miner_auth_ditto_accept_post"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -43804,6 +44550,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PublicSubmissionsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_treasury_activity_api_v1_public_treasury_activity_get: {
+        parameters: {
+            query?: {
+                before?: number | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicTreasuryEventPage"];
                 };
             };
             /** @description Validation Error */
