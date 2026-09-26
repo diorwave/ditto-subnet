@@ -116,6 +116,7 @@ import {
   applyScreenerReviewSettingsInputSchema,
   screenerFanoutShadowInputSchema,
   l2ReportCanaryLookupInputSchema,
+  l2ReportCanaryPreflightInputSchema,
   scheduleL2ReportCanaryInputSchema,
   applyCopyCourtSettingsInputSchema,
   copyCourtRecommendationsInputSchema,
@@ -275,6 +276,7 @@ import {
   fetchScreenerReviewControl,
   fetchScreenerFanoutShadow,
   fetchL2ReportCanary,
+  fetchL2ReportCanaryPreflight,
   scheduleL2ReportCanary,
   fetchCopyCourtControl,
   fetchCopyCourtRecommendations,
@@ -699,6 +701,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read bounded baseline/fan-out shadow comparisons, coverage, disagreements, latency, and spend.',
   get_l2_report_canary:
     'Read one exact-attempt non-authoritative L2 canary report and lease outcome.',
+  get_l2_report_canary_preflight:
+    'Read current exact-source canary guards; scheduling rechecks them.',
   get_v13_scorer_cohort:
     'Read the immutable three-validator V13 scorer pin, including exact signed runtime packet.',
   get_v13_scorer_cohort_preflight:
@@ -712,7 +716,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   rotate_v13_scorer_cohort:
     'Rotate the exact pinned V13 cohort to a unanimously signed packet after all V13 tickets drain; preserves pin history.',
   schedule_l2_report_canary:
-    'Queue one isolated L2 report on an enrolled Hetzner node; never changes screening, scoring, or quarantine.',
+    'Queue one isolated exact-artifact report on an enrolled Hetzner node. source_only is the default; full_runtime additionally runs private challenges in a separate Docker namespace. Neither mode changes screening, scoring, or quarantine.',
   get_copy_court_settings:
     'Read the copy-hold triage court posture and revision history.',
   get_confirmation_seed_anchors:
@@ -2382,6 +2386,17 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('read'),
     },
     async (input) => result(await fetchL2ReportCanary(input)),
+  )
+
+  registerTool(
+    'get_l2_report_canary_preflight',
+    {
+      title: 'Get L2 canary preflight',
+      description: 'Read agent/attempt SHA, status, policy/bench version and raw Score count. Advisory snapshot; scheduling rechecks. Requires backroom:read.',
+      inputSchema: l2ReportCanaryPreflightInputSchema,
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchL2ReportCanaryPreflight(input)),
   )
 
   registerTool(

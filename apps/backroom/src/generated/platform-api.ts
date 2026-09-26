@@ -1856,6 +1856,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/screener-l2-report-canaries/preflight/{agent_id}/{source_attempt_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get L2 Report Canary Preflight
+         * @description Expose exact guard inputs; scheduling still rechecks them under a lock.
+         */
+        get: operations["get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/screener-l2-report-canaries/{canary_id}": {
         parameters: {
             query?: never;
@@ -4282,6 +4302,9 @@ export interface paths {
         /**
          * Accept Link Decide
          * @description Consume the single-use accept token: accept → authenticated, else failed.
+         *
+         *     The token is read only from the form body, so the answering request's
+         *     URL (and the history entry it leaves) carries just ``attempt``.
          */
         post: operations["accept_link_decide_api_v1_miner_auth_ditto_accept_post"];
         delete?: never;
@@ -13248,6 +13271,8 @@ export interface components {
             replacement_allowed: boolean;
             /** Replacement Pending */
             replacement_pending: boolean;
+            /** Replacement Queued */
+            replacement_queued: boolean;
             /** Replacement Reason */
             replacement_reason: string | null;
             /** Replacement Request Id */
@@ -14110,6 +14135,13 @@ export interface components {
              * @enum {string}
              */
             relay_delay_fingerprint_mode: "off" | "shadow";
+        };
+        /** Body_accept_link_decide_api_v1_miner_auth_ditto_accept_post */
+        Body_accept_link_decide_api_v1_miner_auth_ditto_accept_post: {
+            /** Decision */
+            decision: string;
+            /** T */
+            t: string;
         };
         /** Body_set_miner_avatar_api_v1_miner_avatars_post */
         Body_set_miner_avatar_api_v1_miner_avatars_post: {
@@ -20662,6 +20694,12 @@ export interface components {
             miner_hotkey: string;
             /** Policy Version */
             policy_version: number;
+            /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             scored_runtime_evidence: components["schemas"]["ScoredRuntimeEvidenceLease"];
             /**
              * Source Attempt Id
@@ -20689,6 +20727,34 @@ export interface components {
         L2CanaryCompleteResponse: {
             /** Accepted */
             accepted: boolean;
+        };
+        /**
+         * L2CanaryPreflightView
+         * @description Current values of the scheduler's exact-source guards, before its recheck.
+         */
+        L2CanaryPreflightView: {
+            /** Agent Artifact Sha256 */
+            agent_artifact_sha256: string;
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Agent Status */
+            agent_status: string;
+            /** Arrival Bench Version */
+            arrival_bench_version: number;
+            /** Attempt Policy Version */
+            attempt_policy_version: number;
+            /** Score Row Count */
+            score_row_count: number;
+            /** Source Attempt Artifact Sha256 */
+            source_attempt_artifact_sha256: string | null;
+            /**
+             * Source Attempt Id
+             * Format: uuid
+             */
+            source_attempt_id: string;
         };
         /** L2CanaryScheduleRequest */
         L2CanaryScheduleRequest: {
@@ -20723,6 +20789,12 @@ export interface components {
              * @enum {string}
              */
             review_label: "candidate_clear" | "known_reject";
+            /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             /**
              * Source Attempt Id
              * Format: uuid
@@ -20773,6 +20845,11 @@ export interface components {
             request_id: string;
             /** Review Label */
             review_label: string;
+            /**
+             * Run Mode
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             /**
              * Source Attempt Id
              * Format: uuid
@@ -22809,10 +22886,17 @@ export interface components {
          *     infrastructure failure is retried automatically with backoff, no earlier than
          *     that time. After too many consecutive failures, or a long park, it reports
          *     ``stuck`` and needs a guarded retry like any other.
+         *
+         *     ``lane`` names the admission lane (image build, runtime smoke, or source
+         *     review) the latest attempt is in or stopped in, and is null whenever
+         *     Platform holds no evidence for it (no attempt yet, a worker-local lane, or
+         *     a failure that names no lane).
          */
         PublicAdmissionRetry: {
             /** Attempt Count */
             attempt_count: number;
+            /** Lane */
+            lane?: ("build" | "runtime_smoke" | "source_review") | null;
             /**
              * Last Failure Infrastructure
              * @default false
@@ -23941,7 +24025,7 @@ export interface components {
             quality_factors?: components["schemas"]["PublicBenchmarkQualityFactor"][];
             /**
              * Token Efficiency Multiplier
-             * @description Benchmark-v5 token multiplier; null when token efficiency does not apply or was unavailable.
+             * @description Signed token multiplier (a neutral 1.0 under the bench v7+ quality-only contract); null when it was unavailable.
              */
             token_efficiency_multiplier?: number | null;
             /**
@@ -26541,7 +26625,8 @@ export interface components {
         };
         /**
          * PublicTokenEfficiency
-         * @description Auditable v5 relay-token waste penalty.
+         * @description Auditable relay-token decision: the v5 waste penalty, or the neutral
+         *     bench v7+ quality-only record that meters usage without scoring it.
          */
         PublicTokenEfficiency: {
             /** Adjusted Composite */
@@ -28541,6 +28626,8 @@ export interface components {
             model_disposition?: "inconclusive" | null;
             /** Model Steps Observed */
             model_steps_observed?: number | null;
+            /** Model Tool Failure Subcode */
+            model_tool_failure_subcode?: ("invalid_submit_call_id" | "no_tool_call_after_corrections" | "malformed_tool_arguments_json" | "invalid_tool_call_shape") | null;
             /** Output Tokens Used */
             output_tokens_used?: number | null;
             /** Prompt Revision */
@@ -37877,6 +37964,40 @@ export interface operations {
             };
         };
     };
+    get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+                source_attempt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["L2CanaryPreflightView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_l2_report_canary_api_v1_admin_screener_l2_report_canaries__canary_id__get: {
         parameters: {
             query?: never;
@@ -42514,14 +42635,16 @@ export interface operations {
         parameters: {
             query: {
                 attempt: string;
-                t: string;
-                decision: string;
             };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["Body_accept_link_decide_api_v1_miner_auth_ditto_accept_post"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
