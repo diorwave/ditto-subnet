@@ -190,6 +190,7 @@ describe('Backroom MCP tools', () => {
         'get_screener_review_settings',
         'get_screener_fanout_shadow',
         'get_l2_report_canary',
+        'get_l2_report_canary_preflight',
         'get_conversation_assessments',
         'apply_screener_review_settings',
         'get_screener_policy_manifest',
@@ -395,9 +396,10 @@ describe('Backroom MCP tools', () => {
     // The no-input outlier-escalation read adds about 360 bytes; its bounds
     // live on the Platform endpoint. With later main tools the catalog measured
     // 164,066 bytes. Four treasury policy, quote and preview tools bring the
-    // measured catalog to 167,798 bytes; retain about 0.5 KB headroom.
-    // The taxonomy's report-only rate_limit_bursts note measured 167,876 bytes.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(168_300)
+    // measured catalog to 167,798 bytes. The exact-source canary preflight
+    // adds one bounded read; retain about 0.5 KB headroom at 169,300 bytes.
+    // The taxonomy's report-only rate_limit_bursts note adds about 80 bytes.
+    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(169_300)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener

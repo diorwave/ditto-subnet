@@ -1824,6 +1824,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/screener-l2-report-canaries/preflight/{agent_id}/{source_attempt_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get L2 Report Canary Preflight
+         * @description Expose exact guard inputs; scheduling still rechecks them under a lock.
+         */
+        get: operations["get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/screener-l2-report-canaries/{canary_id}": {
         parameters: {
             query?: never;
@@ -20629,6 +20649,12 @@ export interface components {
             miner_hotkey: string;
             /** Policy Version */
             policy_version: number;
+            /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             scored_runtime_evidence: components["schemas"]["ScoredRuntimeEvidenceLease"];
             /**
              * Source Attempt Id
@@ -20656,6 +20682,34 @@ export interface components {
         L2CanaryCompleteResponse: {
             /** Accepted */
             accepted: boolean;
+        };
+        /**
+         * L2CanaryPreflightView
+         * @description Current values of the scheduler's exact-source guards, before its recheck.
+         */
+        L2CanaryPreflightView: {
+            /** Agent Artifact Sha256 */
+            agent_artifact_sha256: string;
+            /**
+             * Agent Id
+             * Format: uuid
+             */
+            agent_id: string;
+            /** Agent Status */
+            agent_status: string;
+            /** Arrival Bench Version */
+            arrival_bench_version: number;
+            /** Attempt Policy Version */
+            attempt_policy_version: number;
+            /** Score Row Count */
+            score_row_count: number;
+            /** Source Attempt Artifact Sha256 */
+            source_attempt_artifact_sha256: string | null;
+            /**
+             * Source Attempt Id
+             * Format: uuid
+             */
+            source_attempt_id: string;
         };
         /** L2CanaryScheduleRequest */
         L2CanaryScheduleRequest: {
@@ -20690,6 +20744,12 @@ export interface components {
              * @enum {string}
              */
             review_label: "candidate_clear" | "known_reject";
+            /**
+             * Run Mode
+             * @default source_only
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             /**
              * Source Attempt Id
              * Format: uuid
@@ -20740,6 +20800,11 @@ export interface components {
             request_id: string;
             /** Review Label */
             review_label: string;
+            /**
+             * Run Mode
+             * @enum {string}
+             */
+            run_mode: "source_only" | "full_runtime";
             /**
              * Source Attempt Id
              * Format: uuid
@@ -28497,6 +28562,8 @@ export interface components {
             model_disposition?: "inconclusive" | null;
             /** Model Steps Observed */
             model_steps_observed?: number | null;
+            /** Model Tool Failure Subcode */
+            model_tool_failure_subcode?: ("invalid_submit_call_id" | "no_tool_call_after_corrections" | "malformed_tool_arguments_json" | "invalid_tool_call_shape") | null;
             /** Output Tokens Used */
             output_tokens_used?: number | null;
             /** Prompt Revision */
@@ -37783,6 +37850,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["L2CanaryView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                agent_id: string;
+                source_attempt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["L2CanaryPreflightView"];
                 };
             };
             /** @description Validation Error */
