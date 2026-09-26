@@ -24,6 +24,7 @@ from ditto.api_models.claim_provenance_cases import (
     CATALOG_COMPLETION_LIMIT,
     SCORER_NOTE_LIMIT,
     SCORER_NOTE_MAX_CHARS,
+    WITHHELD_SCORER_NOTE,
     CaseCatalog,
     CaseCatalogCompletion,
     CaseClaimProvenance,
@@ -551,9 +552,21 @@ def operator_case_provenance(
         twin_group=case.twin_group or None,
         cost_factor=_cost_factor(case),
         scorer_notes=[
-            note[:SCORER_NOTE_MAX_CHARS] for note in case.notes[:SCORER_NOTE_LIMIT]
+            _operator_scorer_note(note) for note in case.notes[:SCORER_NOTE_LIMIT]
         ],
     )
+
+
+def _operator_scorer_note(note: str) -> str:
+    """Forward a stored scorer note unless it quotes a case value.
+
+    The scorers interpolate hidden case values with Go's ``%q`` (the v13
+    forbidden argument value, the bait tool name, the memory distractor), so a
+    double quote marks a note that may carry answer-key material.
+    """
+    if '"' in note:
+        return WITHHELD_SCORER_NOTE
+    return note[:SCORER_NOTE_MAX_CHARS]
 
 
 __all__ = [

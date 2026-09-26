@@ -17,7 +17,10 @@ from fastapi import FastAPI
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ditto.api_models.claim_provenance_cases import NOT_PERSISTED_FIELDS
+from ditto.api_models.claim_provenance_cases import (
+    NOT_PERSISTED_FIELDS,
+    WITHHELD_SCORER_NOTE,
+)
 from ditto.api_models.gate_evidence import StoredGateEvidence
 from ditto.api_server.gate_evidence import gate_note_ids_for
 from ditto.db.models import Agent, Score
@@ -307,6 +310,35 @@ class TestClaimProvenanceCases:
         assert body["per_case_available"] is False
         assert body["cases"] == []
         assert body["total_cases"] == 0
+
+    async def test_a_scorer_note_quoting_a_case_value_is_withheld(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # The v13 tool scorer writes the forbidden argument value with %q.
+        leaked = 'v13: argument city carries the forbidden "Lisbon" — case scored 0'
+        agent_id, sha = await _seeded(session_maker)
+        _install(app, session_maker)
+        async with session_maker() as s, s.begin():
+            score = (
+                await s.scalars(select(Score).where(Score.agent_id == agent_id))
+            ).one()
+            details = dict(score.details or {})
+            per_case = [dict(case) for case in details["per_case"]]
+            per_case[1]["notes"] = [*per_case[1].get("notes", []), leaked]
+            details["per_case"] = per_case
+            await s.execute(
+                update(Score).where(Score.agent_id == agent_id).values(details=details)
+            )
+
+        body = (await _get(client, agent_id, sha, case_id="memory-9f3a-0002")).json()
+
+        (case,) = body["cases"]
+        assert case["scorer_notes"][-1] == WITHHELD_SCORER_NOTE
+        assert any("claim provenance flagged" in n for n in case["scorer_notes"])
+        assert "Lisbon" not in json.dumps(body)
 
     @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}])
     async def test_requires_the_admin_token(

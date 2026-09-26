@@ -36,6 +36,15 @@ CATALOG_COMPLETION_LIMIT = 32
 SCORER_NOTE_LIMIT = 8
 SCORER_NOTE_MAX_CHARS = 400
 
+WITHHELD_SCORER_NOTE = "withheld: this scorer note quotes a case value"
+"""Replaces any stored scorer note that quotes a value.
+
+The Go scorers interpolate case values into notes with ``%q`` -- the v13 tool
+scorer's forbidden argument value, the injection bait tool name, the case
+language, and the memory grader's distractor value -- so a note carrying a
+double quote is withheld rather than forwarded, even to operators.
+"""
+
 NotPersistedField = Literal[
     "credited_response_field",
     "claim_token_comparison",
@@ -164,8 +173,9 @@ class ClaimProvenanceCase(BaseModel):
         list[str],
         Field(
             description=(
-                "The scorer's own per-case notes, bounded. v13 grader notes never "
-                "quote a hidden value (expected, distractor, forbidden)."
+                "The scorer's own per-case notes, bounded. A note that quotes a "
+                "case value (forbidden argument, bait tool, distractor) is "
+                "replaced by a fixed withheld marker."
             ),
             max_length=SCORER_NOTE_LIMIT,
         ),

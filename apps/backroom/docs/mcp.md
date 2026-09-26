@@ -44,8 +44,9 @@ one closed-vocabulary gate. The default set is the stored flagged set, so
 `matched_cases` equals the public `flagged_case_count`. Each case returns the
 persisted `claim_provenance` record (verdicts and counts), the catalog record
 with per-completion relay metadata (digests, no text), the relation, twin group
-and cost factor, the scorer's own notes, and gate notes whose `note_id` is what
-an owner dispute cites. `not_persisted` names the fields the scorer computes
+and cost factor, the scorer's own notes (a note that quotes a case value, such
+as a forbidden argument or bait tool, is withheld), and gate notes whose
+`note_id` is what an owner dispute cites. `not_persisted` names the fields the scorer computes
 but does not store: the credited response field, the per-token claim
 comparison, completion ids and the normalization trace. Their absence is not
 evidence either way. The tool never returns the answer key, prompts, user

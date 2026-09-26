@@ -14788,7 +14788,7 @@ export interface components {
             score: number;
             /**
              * Scorer Notes
-             * @description The scorer's own per-case notes, bounded. v13 grader notes never quote a hidden value (expected, distractor, forbidden).
+             * @description The scorer's own per-case notes, bounded. A note that quotes a case value (forbidden argument, bait tool, distractor) is replaced by a fixed withheld marker.
              */
             scorer_notes?: string[];
             /** Twin Group */
