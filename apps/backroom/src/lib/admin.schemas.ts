@@ -1617,6 +1617,12 @@ const effectiveEmissionEligibilitySchema = z.object({
   // How many artifacts the rehearsal has recorded in the current window: exactly
   // how many rows leave the fold if the posture is moved to `enforce`.
   shadow_excluded_count: z.number().int().nonnegative().nullable().default(null),
+  // What the validator ledger is actually doing. `enforce` rehearses as
+  // `shadow` until every live weight setter reports `required_protocol`, the
+  // fold that keeps a held incumbent's crown and burns its share.
+  effective_enforcement: z.enum(EMISSION_ELIGIBILITY_ENFORCEMENTS),
+  fleet_protocol_ready: z.boolean(),
+  required_protocol: z.number().int().positive(),
 })
 
 export const emissionEligibilityControlSchema = z.object({

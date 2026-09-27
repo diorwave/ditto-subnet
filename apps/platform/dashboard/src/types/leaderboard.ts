@@ -23,6 +23,10 @@ export interface EmissionRecipient {
   /** "champion" | "joint_champion" | "tail" */
   role?: string;
   share_of_miner_pool?: number;
+  /** Present, and false, only on a provisional incumbent (protocol 28): it
+   * holds this slot while its review is open and validators burn the share
+   * instead of reassigning it. Absent means paid. */
+  paid?: boolean;
   shared_seed_confirmations?: number | null;
 }
 
@@ -158,6 +162,8 @@ export interface LedgerEpochActor {
 export interface LedgerEpochRecipient extends LedgerEpochActor {
   role: "champion" | "joint_champion" | "tail";
   share_of_miner_pool: number;
+  /** False only on the pin's provisional incumbent, whose share burned. */
+  paid?: boolean;
 }
 
 export interface LedgerEpoch {

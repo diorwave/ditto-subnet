@@ -412,6 +412,7 @@ describe('Backroom MCP tools', () => {
     // 172,734 bytes together. Keep the same ~0.5 KB headroom.
     // The two terminal-review eligibility reads (#2041) add a settings-history
     // input and one uuid input; measured 174,477 bytes together.
+    // Naming the fleet-effective posture in its catalog line measures 174,513.
     expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(174_950)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
@@ -444,7 +445,8 @@ describe('Backroom MCP tools', () => {
       // one-line outlier-escalation dry-run read brings it to 30,794, and the
       // claim-provenance read summary to 30,878. The two one-line
       // terminal-review eligibility reads (#2041) measure 31,038.
-      31_300,
+      // Naming the fleet-effective posture (protocol 28) measures 31,074.
+      31_500,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(

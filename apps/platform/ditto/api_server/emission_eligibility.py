@@ -47,7 +47,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -157,6 +157,25 @@ class ResolvedEligibilityPolicy:
 
 
 DEFAULT_POLICY = ResolvedEligibilityPolicy()
+
+
+def effective_policy(
+    policy: ResolvedEligibilityPolicy, *, fleet_ready: bool
+) -> ResolvedEligibilityPolicy:
+    """The posture the fleet can actually fold.
+
+    ``enforce`` withholds only once every recently-live weight setter reports
+    ``PROVISIONAL_INCUMBENT_PROTOCOL``: filtering a held incumbent out of the
+    pool is only correct for a fold that also reads ``provisional_incumbent``,
+    and an older validator would crown and pay the runner-up. Until then it
+    rehearses exactly like ``shadow`` -- same evaluation, same rehearsal rows,
+    no filtering, no marker -- bound to the stored revision and checksum.
+    """
+    if not policy.enforcing or fleet_ready:
+        return policy
+    return replace(
+        policy, settings=policy.settings.model_copy(update={"enforcement": "shadow"})
+    )
 
 
 def _state_for(
@@ -299,12 +318,21 @@ class LedgerEligibility:
         """
         if not self.policy.enforcing:
             return list(rows)
-        return [
-            row
-            for row in rows
-            if self.records.get(row.agent_id) is None
-            or self.records[row.agent_id].posture_satisfied
-        ]
+        return [row for row in rows if not self.withholds(row.agent_id)]
+
+    def withholds(self, agent_id: UUID) -> bool:
+        """Whether ``enforce`` keeps this artifact out of the payable pool.
+
+        Always false under ``off``/``shadow``. A withheld row can still reach
+        the fold as a crown-only provisional incumbent (protocol 28), which is
+        never paid.
+        """
+        record = self.records.get(agent_id)
+        return (
+            self.policy.enforcing
+            and record is not None
+            and not record.posture_satisfied
+        )
 
 
 def evaluate_ledger(

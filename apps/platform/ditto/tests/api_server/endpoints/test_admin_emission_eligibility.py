@@ -35,6 +35,7 @@ from ditto.db.queries.emission_eligibility import (
     record_shadow_exclusions,
 )
 from ditto.db.queries.scores import list_scores_for_agent
+from ditto.tests.api_server.endpoints.test_emission_eligibility_ledger import _fleet
 
 pytestmark = pytest.mark.asyncio
 
@@ -160,6 +161,7 @@ class TestPosture:
         # Merging this must not be able to move emissions. That is the whole
         # claim, and it is this assertion.
         assert effective["settings"]["enforcement"] == "off"
+        assert effective["effective_enforcement"] == "off"
         assert effective["source"] == "default"
         assert effective["revision"] == 0
         assert effective["shadow_excluded_count"] == 0
@@ -384,6 +386,7 @@ class TestPerAgentRead:
         _install(app, session_maker)
         agent_id = await _seed_scored_agent(session)
         await _open_hold(session, agent_id)
+        await _fleet(session, seen_at=datetime.now(UTC))
         applied = await client.post(
             _URL, headers=_HEADERS, json=_payload(enforcement="enforce")
         )
@@ -401,7 +404,47 @@ class TestPerAgentRead:
         assert body["eligibility"]["artifact_sha256"] == _SHA
         assert body["eligibility"]["enforcement"] == "enforce"
         assert body["effective"]["settings"]["enforcement"] == "enforce"
+        assert body["effective"]["effective_enforcement"] == "enforce"
+        assert body["effective"]["fleet_protocol_ready"] is True
+        assert body["effective"]["required_protocol"] == 28
         assert "in_ledger" in body
+
+    async def test_enforce_ahead_of_the_fleet_reads_as_the_shadow_it_is(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session: AsyncSession,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A protocol-27 validator would crown and pay a held incumbent's
+        runner-up, so ``enforce`` withholds nothing until the whole fleet folds
+        protocol 28 -- and Backroom says so instead of claiming a stop."""
+        _install(app, session_maker)
+        agent_id = await _seed_scored_agent(session)
+        await _open_hold(session, agent_id)
+        await _fleet(session, protocol=27, seen_at=datetime.now(UTC))
+        applied = await client.post(
+            _URL, headers=_HEADERS, json=_payload(enforcement="enforce")
+        )
+        assert applied.status_code == 200, applied.text
+        app.state.emission_eligibility.invalidate()
+
+        policy = (await client.get(_URL, headers=_HEADERS)).json()["effective"]
+        assert policy["settings"]["enforcement"] == "enforce"
+        assert policy["effective_enforcement"] == "shadow"
+        assert policy["fleet_protocol_ready"] is False
+        assert policy["required_protocol"] == 28
+
+        body = (
+            await client.get(
+                f"/api/v1/admin/agents/{agent_id}/emission-eligibility",
+                headers=_HEADERS,
+            )
+        ).json()
+        assert body["eligibility"]["state"] == "unresolved_review"
+        assert body["eligibility"]["posture_satisfied"] is False
+        assert body["eligibility"]["reward_eligible"] is True
+        assert body["eligibility"]["enforcement"] == "shadow"
 
     async def test_unknown_agent_is_a_404_not_an_empty_verdict(
         self,

@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ditto.api_models.continual_retest_settings import PROVISIONAL_INCUMBENT_PROTOCOL
 from ditto.api_models.emission_eligibility import (
     DEFAULT_SETTINGS,
     AdminAgentEmissionEligibilityResponse,
@@ -46,7 +47,9 @@ from ditto.api_models.emission_eligibility import (
 from ditto.api_server.dependencies import get_session
 from ditto.api_server.emission_eligibility import (
     EmissionEligibilityResolver,
+    ResolvedEligibilityPolicy,
     classify,
+    effective_policy,
     policy_from_row,
 )
 from ditto.api_server.endpoints.admin_quarantine import require_admin
@@ -57,6 +60,7 @@ from ditto.db.models import (
 from ditto.db.models import (
     EmissionEligibilityShadowRecord as ShadowRow,
 )
+from ditto.db.queries.benchmark_rollout import active_bench_version
 from ditto.db.queries.emission_eligibility import (
     GLOBAL_SCOPE,
     AgentReviewPosture,
@@ -67,7 +71,10 @@ from ditto.db.queries.emission_eligibility import (
     list_shadow_records,
     load_review_postures,
 )
-from ditto.db.queries.heartbeats import count_live_validators
+from ditto.db.queries.heartbeats import (
+    count_live_validators,
+    live_validator_fleet_supports_protocol,
+)
 from ditto.db.queries.scores import list_eligible_ledger
 
 logger = logging.getLogger(__name__)
@@ -129,14 +136,32 @@ async def _advisory_count(coroutine_factory: Callable) -> int | None:
         return None
 
 
+async def _fleet_protocol_ready(session: AsyncSession, *, now: datetime) -> bool:
+    """The ledger's own gate on ``enforce``, read the same way. Advisory here:
+    unreadable reads as not ready, which is also what the ledger would fold."""
+    try:
+        return await live_validator_fleet_supports_protocol(
+            session,
+            minimum_protocol=PROVISIONAL_INCUMBENT_PROTOCOL,
+            bench_version=await active_bench_version(session),
+            now=now,
+        )
+    except SQLAlchemyError:
+        logger.warning(
+            "emission eligibility fleet readiness read failed", exc_info=True
+        )
+        return False
+
+
 async def _effective(
     session: AsyncSession,
+    policy: ResolvedEligibilityPolicy,
     latest: RevisionRow | None,
     *,
+    fleet_ready: bool,
     ttl_seconds: float,
     now: datetime,
 ) -> EffectiveEmissionEligibilitySettings:
-    policy = policy_from_row(latest)
     settings = policy.settings
     window = window_start(now, window_seconds=settings.activation_window_seconds)
     live = await _advisory_count(lambda: count_live_validators(session, now=now))
@@ -157,6 +182,11 @@ async def _effective(
         ),
         live_validator_count=live,
         shadow_excluded_count=shadow,
+        effective_enforcement=effective_policy(
+            policy, fleet_ready=fleet_ready
+        ).settings.enforcement,
+        fleet_protocol_ready=fleet_ready,
+        required_protocol=PROVISIONAL_INCUMBENT_PROTOCOL,
     )
 
 
@@ -175,7 +205,12 @@ async def get_settings(
         history=[_revision(row) for row in history],
         default=DEFAULT_SETTINGS,
         effective=await _effective(
-            session, latest, ttl_seconds=_resolver(request).ttl_seconds, now=now
+            session,
+            policy_from_row(latest),
+            latest,
+            fleet_ready=await _fleet_protocol_ready(session, now=now),
+            ttl_seconds=_resolver(request).ttl_seconds,
+            now=now,
         ),
         confirmation_phrase=CONFIRMATION,
         recent_shadow_records=[_shadow_record(row) for row in shadow],
@@ -264,6 +299,7 @@ async def get_agent_eligibility(
         raise HTTPException(status_code=404, detail="agent not found")
     latest = await latest_eligibility_settings_revision(session)
     policy = policy_from_row(latest)
+    fleet_ready = await _fleet_protocol_ready(session, now=now)
     postures = await load_review_postures(session, [agent_id])
     ledger_rows = await list_eligible_ledger(
         session, include_fingerprints=False, include_details=False
@@ -274,7 +310,7 @@ async def get_agent_eligibility(
         artifact_sha256=(ledger_row.sha256 if ledger_row is not None else agent.sha256),
         bench_version=(ledger_row.bench_version if ledger_row is not None else None),
         posture=postures.get(agent_id) or AgentReviewPosture(agent_id=agent_id),
-        policy=policy,
+        policy=effective_policy(policy, fleet_ready=fleet_ready),
         now=now,
     )
     shadow = await list_shadow_records(session, agent_id=agent_id, limit=shadow_limit)
@@ -282,7 +318,12 @@ async def get_agent_eligibility(
         eligibility=eligibility,
         in_ledger=ledger_row is not None,
         effective=await _effective(
-            session, latest, ttl_seconds=_resolver(request).ttl_seconds, now=now
+            session,
+            policy,
+            latest,
+            fleet_ready=fleet_ready,
+            ttl_seconds=_resolver(request).ttl_seconds,
+            now=now,
         ),
         shadow_records=[_shadow_record(row) for row in shadow],
     )

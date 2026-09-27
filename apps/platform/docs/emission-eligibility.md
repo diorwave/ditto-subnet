@@ -65,7 +65,10 @@ Scores stay published throughout. Three separate facts:
   still leads.
 * **provisional champion** — `PublicKothEmissions.provisional_champion` /
   `champion_reward_eligible`. A champion whose artifact is withheld keeps the
-  crown and the 65% slot goes *unpaid*, not reassigned.
+  crown and the 65% slot goes *unpaid*, not reassigned (see
+  [Holding the crown unpaid](#holding-the-crown-unpaid)). The recipient row
+  carries `paid: false` and keeps its `share_of_miner_pool`, so the unpaid
+  share stays visible as a fraction of the whole miner pool.
 * **reward eligibility** — `PublicLeaderboardEntry.reward_eligibility` and
   `PublicSubmissionPipeline.reward_eligibility`: the state, a fixed
   miner-facing sentence, `reward_eligible`, `posture_satisfied`, the posture
@@ -74,6 +77,44 @@ Scores stay published throughout. Three separate facts:
 The sentences come from one table (`STATE_REASONS`), so the board, the
 submission page and Backroom cannot disagree. They carry no source, no reviewer
 output, no thresholds and no cohort statistics.
+
+## Holding the crown unpaid
+
+Withholding a row must not hand its crown to someone else. Under crown
+incumbency (`crown_mode: incumbent`, epoch pins only) the pin resolves the
+previous champion through its owner family among the payable entries, as it
+always has. When that finds nothing, the gate is enforcing, and the owner has a
+withheld generation, the owner's best withheld generation becomes the pin's
+**provisional incumbent**:
+
+* It is served as `LedgerResponse.provisional_incumbent`, *not* in `entries`,
+  with `crown_incumbent_agent_id` set to its id. It is built exactly like a
+  payable entry (the one it would carry with the gate off) and it is part of
+  the pin's digest.
+* The fold -- the validator's, and the Platform's projections of it -- adds it
+  to the pool as the crown incumbent and derives the champion, tail, tie
+  pooling and score-ceiling cohort exactly as for any entry. **Every share it
+  is allocated is then unpaid**: validators burn it rather than renormalize it
+  onto other miners, so everybody else keeps exactly the share they would hold
+  had it been paid.
+* If it keeps the crown, the champion slot is unpaid. If a challenger clears
+  the band over it, the challenger is crowned and paid as usual and a tail slot
+  it lands in is unpaid. The pin records whoever holds the crown, so a
+  provisional champion carries its crown into the next pin.
+* Only the incumbent can be provisional. Every other withheld row stays out of
+  the pool, and an owner whose newest generation is withheld is still
+  represented by its best payable generation.
+
+Only a protocol-28 validator reads the field; a protocol-27 validator would
+ignore it and crown and pay the runner-up. So `enforce` withholds only while
+every recently-live weight-setting validator reports protocol 28
+(`PROVISIONAL_INCUMBENT_PROTOCOL`). Until then it behaves exactly like
+`shadow`: every read evaluates the gate and records rehearsal rows (with
+`enforcement: shadow`), nothing leaves the pool, no marker is served, and each
+materialization logs a warning. The readiness is recorded on every pin
+(`context.fleet.reward_eligibility`) and shown on the policy read as
+`effective.effective_enforcement`, `fleet_protocol_ready` and
+`required_protocol`.
 
 ## Rehearsing, then enabling
 
@@ -93,7 +134,8 @@ off  ->  shadow  ->  enforce
 2. **Reconcile.** Every row in that rehearsal is a miner who stops earning at
    the flip. Clear or reject the holds first; a stranded hold needs unsticking
    before it can be resolved at all (see `ath-review-queue.md`).
-3. **Enable.** Write an `enforce` revision. Withheld rows leave the pool at the
+3. **Enable.** Write an `enforce` revision. Once the fleet reports protocol 28
+   (`effective_enforcement: enforce`), withheld rows leave the pool at the
    platform's next materialization, and at the next pin for the pinned fleet.
 
 Writes are `POST /api/v1/admin/emission-eligibility` with `expected_revision`,
@@ -105,6 +147,7 @@ an `actor`, a `reason` of at least eight characters, and the confirmation
 | Situation | Behaviour |
 |---|---|
 | No revision stored | `off`. Pre-gate ledger. |
+| `enforce` stored, fleet below protocol 28 | Rehearses as `shadow`, logged. **Keeps paying.** |
 | Revision will not parse | `off`, logged, `source: "default"` with the unusable `revision` still reported so it is findable. **Keeps paying.** |
 | Review tables unreadable on the board / submission page | No annotation; the page renders. The validator ledger resolves independently. |
 | Rehearsal insert fails | Logged and swallowed. Losing a rehearsal row is an observability loss; failing the ledger read would zero every miner. |
@@ -119,6 +162,11 @@ Every direction is the same one: an error never withholds.
   every pin taken off or in shadow keeps its pre-#2041 digest. The pool is
   filtered platform-side either way, so a validator that ignores the field folds
   correctly.
+* `LedgerResponse.provisional_incumbent` — protocol 28, a `LedgerEntry` or
+  absent. Keyed into the pin's `served` context **only** when present, so every
+  pin without one keeps its digest; never served on a live read.
+* `PublicEmissionRecipient.paid` / `PublicLedgerEpochRecipient.paid` — present,
+  and `false`, only on a provisional incumbent's slot.
 * `emission_eligibility_settings_revisions` — append-only posture, shaped like
   `burn_settings_revisions`.
 * `emission_eligibility_shadow_records` — append-only rehearsal, unique on

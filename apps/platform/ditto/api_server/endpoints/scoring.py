@@ -24,6 +24,7 @@ import asyncio
 import logging
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -38,6 +39,7 @@ from ditto.api_models import ConfirmationScoreRecord, LedgerEntry, LedgerRespons
 from ditto.api_models.burn_settings import BurnSettings
 from ditto.api_models.continual_retest_settings import (
     CROWN_INCUMBENT_PROTOCOL,
+    PROVISIONAL_INCUMBENT_PROTOCOL,
     ContinualRetestSettings,
 )
 from ditto.api_models.router_ledger import RouterLedgerResponse
@@ -59,6 +61,7 @@ from ditto.api_server.efficiency import ensure_current_efficiency_state
 from ditto.api_server.emission_eligibility import (
     DEFAULT_POLICY,
     ResolvedEligibilityPolicy,
+    effective_policy,
     evaluate_ledger,
     shadow_rows,
 )
@@ -92,6 +95,7 @@ from ditto.db.queries.score_ranking import (
     resolve_efficiency_adjustments,
 )
 from ditto.db.queries.scores import (
+    LedgerRow,
     LedgerScoreProofRow,
     list_eligible_ledger,
     quorum_composites,
@@ -139,6 +143,11 @@ _DETHRONE_BAND_CLAMP_PROTOCOL = 24
 # the earliest lineage on every read. Withheld until the whole live
 # weight-setting fleet reports it, or a mixed fleet folds two champions.
 _CROWN_INCUMBENT_PROTOCOL = CROWN_INCUMBENT_PROTOCOL
+# The first validator protocol whose fold reads ``provisional_incumbent``. An
+# enforcing eligibility gate filters the pool only once the whole live
+# weight-setting fleet reports it; until then ``enforce`` rehearses as shadow,
+# or an older validator would crown and pay the held incumbent's runner-up.
+_PROVISIONAL_INCUMBENT_PROTOCOL = PROVISIONAL_INCUMBENT_PROTOCOL
 
 
 def _fleet_safe_efficiency_adjustments(
@@ -190,6 +199,10 @@ class _LedgerSnapshot:
     owner_roots: dict[UUID, str | None] | None = None
     """Internal owner family per entry, for carrying the crown across pins.
     Never serialized onto any wire."""
+    withheld_entries: list[LedgerEntry] | None = None
+    """Each withheld owner's best generation under an enforcing eligibility
+    gate, built exactly like ``entries``. Internal: the pin serves one only as
+    ``provisional_incumbent``, when it is the crown incumbent."""
     fleet_readiness: dict[str, bool] | None = None
     confirmation_seed_anchors: tuple[ConfirmationSeedAnchorPin, ...] = ()
     """Pinned finalized-block anchors of the active version's seed families.
@@ -223,6 +236,7 @@ class _LedgerContext:
     unbounded_factor_fleet_ready: bool = False
     dethrone_band_clamp_fleet_ready: bool = False
     crown_incumbent_fleet_ready: bool = False
+    reward_eligibility_fleet_ready: bool = False
 
 
 def _composite_stderr(details: dict | None) -> float | None:
@@ -420,6 +434,12 @@ async def resolve_ledger_context(
         bench_version=bench_version,
         now=now,
     )
+    reward_eligibility_fleet_ready = await live_validator_fleet_supports_protocol(
+        session,
+        minimum_protocol=_PROVISIONAL_INCUMBENT_PROTOCOL,
+        bench_version=bench_version,
+        now=now,
+    )
     return _LedgerContext(
         policy=policy,
         active_bench_version=bench_version,
@@ -429,6 +449,7 @@ async def resolve_ledger_context(
         unbounded_factor_fleet_ready=unbounded_factor_fleet_ready,
         dethrone_band_clamp_fleet_ready=dethrone_band_clamp_fleet_ready,
         crown_incumbent_fleet_ready=crown_incumbent_fleet_ready,
+        reward_eligibility_fleet_ready=reward_eligibility_fleet_ready,
     )
 
 
@@ -626,85 +647,27 @@ async def _record_eligibility_rehearsal(app_state: Any, evaluation: Any) -> None
         )
 
 
-async def materialize_ledger_snapshot(
-    app_state: Any,
+async def _ledger_entries(
     session: AsyncSession,
+    rows: list[LedgerRow],
     *,
-    context: _LedgerContext,
+    canonical_version: int,
+    continual_mean_active: bool,
+    efficiency_config: EfficiencyBonusConfig,
     now: datetime,
     requesting_validator_hotkey: str | None,
-) -> _LedgerSnapshot:
-    """Build the ledger the validator fold consumes, at this instant.
+    emit: Callable[[LedgerRow], bool] | None = None,
+) -> tuple[list[LedgerRow], list[LedgerEntry]]:
+    """Build the fold's ``LedgerEntry`` list from materialized rows.
 
-    Shared by the live route and the epoch pin builder so a pin is exactly what
-    a live read at that moment would have served. ``requesting_validator_hotkey``
-    is ``None`` for a pin: factors then ride purely on fleet readiness and are
-    identical for every validator that reads the pin. Raises
-    :class:`EfficiencyFactorRequesterNotReady` and ``SQLAlchemyError`` to the
-    caller, which owns the HTTP or retry semantics.
+    Every per-agent input -- quorum spread, continual history, the active
+    confirmation seed window, efficiency adjustments, official composites -- is
+    derived over ``rows``, then one representative per owner is selected from
+    the rows ``emit`` keeps (all of them by default). The payable pool calls this
+    with exactly the rows it pays. Withheld rows are built through this same
+    path over the whole unfiltered ledger, so a provisional incumbent's entry is
+    the one it would carry if the gate were off.
     """
-    ledger_context = context
-    if session.in_transaction():
-        await session.rollback()
-    # The validator ledger is an authority path, not a dependent of the
-    # public leaderboard. Materialize this epoch before reading either the
-    # ledger or its adjustment rows so a quiet dashboard cannot leave every
-    # validator folding an old/missing efficiency epoch. The resolver uses
-    # its independent session and the nonce transaction above is complete,
-    # leaving this session clean for ensure_efficiency_state's transaction.
-    efficiency_config = ledger_context.policy.efficiency
-    if efficiency_config.enabled:
-        await ensure_current_efficiency_state(
-            app_state, session, efficiency_config, now=now
-        )
-    rows = await list_eligible_ledger(
-        session,
-        include_fingerprints=False,
-        details_keys=(
-            "composite_stderr",
-            "confirmation_composites",
-            "confirmation_seeds",
-        ),
-        dedupe_owners=False,
-    )
-    v9_confirmation_mode: Literal["enforce"] | None = (
-        "enforce" if await v9_confirmation_enforcement_active(session) else None
-    )
-    # ── Terminal-review emission eligibility (ditto-subnet #2041) ───────────
-    # The gate runs here, on the rows the ledger just materialized, rather than
-    # inside ``list_eligible_ledger``: the public board reads that same query
-    # and must keep publishing a withheld artifact's score and rank. Filtering
-    # in the query would delete the score from the board, which is the one thing
-    # the issue says not to do.
-    eligibility_policy = ledger_context.policy.reward_eligibility
-    eligibility = evaluate_ledger(
-        rows,
-        await load_review_postures(session, [r.agent_id for r in rows])
-        if eligibility_policy.evaluating
-        else {},
-        policy=eligibility_policy,
-        now=now,
-    )
-    reward_eligibility_mode: Literal["enforce"] | None = (
-        "enforce" if eligibility_policy.enforcing else None
-    )
-    if eligibility_policy.evaluating:
-        withheld = eligibility.withheld
-        if withheld:
-            logger.warning(
-                "emission eligibility (%s, revision %d) %s %d artifact(s) for "
-                "window %s: %s",
-                eligibility_policy.settings.enforcement,
-                eligibility_policy.revision,
-                "withheld" if eligibility_policy.enforcing else "would withhold",
-                len(withheld),
-                eligibility.window_start.isoformat(),
-                ", ".join(
-                    f"{record.agent_id}:{record.state}" for record in withheld[:10]
-                ),
-            )
-        await _record_eligibility_rehearsal(app_state, eligibility)
-        rows = eligibility.filter_rows(rows)
     # The k=3 quorum spread per agent -> composite_stderr when the run itself
     # did not stash one, so the KOTH z-band is noise-aware with no re-score.
     quorum = await quorum_composites(
@@ -712,7 +675,6 @@ async def materialize_ledger_snapshot(
         [r.agent_id for r in rows],
         bench_versions={r.agent_id: r.bench_version for r in rows},
     )
-    canonical_version = ledger_context.active_bench_version
     history = await confirmation_history_by_agent(
         session,
         agent_ids=[r.agent_id for r in rows],
@@ -722,20 +684,6 @@ async def materialize_ledger_snapshot(
         session,
         agent_ids=[r.agent_id for r in rows],
         bench_version=canonical_version,
-    )
-    # Bench v13+: the pinned finalized-block anchors every validator needs
-    # to re-derive the champion-anchored confirmation family fleet-wide.
-    confirmation_seed_anchors = tuple(
-        ConfirmationSeedAnchorPin(
-            champion_agent_id=anchor.champion_agent_id,
-            bench_version=anchor.bench_version,
-            anchor_block=anchor.anchor_block,
-            anchor_block_hash=anchor.block_hash or "",
-        )
-        for anchor in await list_reign_seed_anchors(
-            session, bench_version=canonical_version
-        )
-        if anchor.block_hash is not None
     )
     _, active_confirmation_by_seed, _ = completed_wave_data(
         rows,
@@ -747,21 +695,6 @@ async def materialize_ledger_snapshot(
         [r.agent_id for r in rows],
         bench_versions={r.agent_id: r.bench_version for r in rows},
     )
-    fleet_protocol_ready = ledger_context.continual_fleet_ready
-    continual_settings = ledger_context.policy.continual_retest
-    burn_settings = ledger_context.policy.burn
-    continual_mean_active = aggregate_is_active(
-        continual_settings, fleet_protocol_ready=fleet_protocol_ready
-    )
-    tie_weighting_fleet_ready = ledger_context.tie_weighting_fleet_ready
-    tie_weighting_active = tie_weighting_is_active(
-        continual_settings, fleet_protocol_ready=tie_weighting_fleet_ready
-    )
-    # The ceiling-aware dethrone band needs no operator switch: it only ever
-    # narrows a band that the benchmark has already made unwinnable, and
-    # leaving it off is the state miners are complaining about. Fleet
-    # readiness is the whole gate, exactly as it is for curve-v3 factors.
-    dethrone_band_clamp_active = ledger_context.dethrone_band_clamp_fleet_ready
     # Frozen relative token-efficiency bonuses (bench_version >= 7) are
     # surfaced to validators only behind the fold flag; with it off the
     # ledger is byte-identical to the pre-bonus wire shape, and the
@@ -798,11 +731,10 @@ async def materialize_ledger_snapshot(
         efficiency_curve_versions=efficiency_curve_versions,
     )
     rows = dedupe_owner_rows(
-        rows,
+        rows if emit is None else [r for r in rows if emit(r)],
         scores=ranking_scores,
         secondary_scores=efficiency_tiebreaks,
     )
-    generated_at = datetime.now(UTC)
     entries = [
         LedgerEntry(
             miner_hotkey=r.miner_hotkey,
@@ -877,6 +809,172 @@ async def materialize_ledger_snapshot(
         )
         for r in rows
     ]
+    return rows, entries
+
+
+async def materialize_ledger_snapshot(
+    app_state: Any,
+    session: AsyncSession,
+    *,
+    context: _LedgerContext,
+    now: datetime,
+    requesting_validator_hotkey: str | None,
+) -> _LedgerSnapshot:
+    """Build the ledger the validator fold consumes, at this instant.
+
+    Shared by the live route and the epoch pin builder so a pin is exactly what
+    a live read at that moment would have served. ``requesting_validator_hotkey``
+    is ``None`` for a pin: factors then ride purely on fleet readiness and are
+    identical for every validator that reads the pin. Raises
+    :class:`EfficiencyFactorRequesterNotReady` and ``SQLAlchemyError`` to the
+    caller, which owns the HTTP or retry semantics.
+    """
+    ledger_context = context
+    if session.in_transaction():
+        await session.rollback()
+    # The validator ledger is an authority path, not a dependent of the
+    # public leaderboard. Materialize this epoch before reading either the
+    # ledger or its adjustment rows so a quiet dashboard cannot leave every
+    # validator folding an old/missing efficiency epoch. The resolver uses
+    # its independent session and the nonce transaction above is complete,
+    # leaving this session clean for ensure_efficiency_state's transaction.
+    efficiency_config = ledger_context.policy.efficiency
+    if efficiency_config.enabled:
+        await ensure_current_efficiency_state(
+            app_state, session, efficiency_config, now=now
+        )
+    rows = await list_eligible_ledger(
+        session,
+        include_fingerprints=False,
+        details_keys=(
+            "composite_stderr",
+            "confirmation_composites",
+            "confirmation_seeds",
+        ),
+        dedupe_owners=False,
+    )
+    v9_confirmation_mode: Literal["enforce"] | None = (
+        "enforce" if await v9_confirmation_enforcement_active(session) else None
+    )
+    # ── Terminal-review emission eligibility (ditto-subnet #2041) ───────────
+    # The gate runs here, on the rows the ledger just materialized, rather than
+    # inside ``list_eligible_ledger``: the public board reads that same query
+    # and must keep publishing a withheld artifact's score and rank. Filtering
+    # in the query would delete the score from the board, which is the one thing
+    # the issue says not to do.
+    configured_policy = ledger_context.policy.reward_eligibility
+    eligibility_policy = effective_policy(
+        configured_policy,
+        fleet_ready=ledger_context.reward_eligibility_fleet_ready,
+    )
+    if eligibility_policy is not configured_policy:
+        logger.warning(
+            "emission eligibility revision %d is set to enforce, but the live "
+            "weight-setting fleet does not report protocol %d yet; rehearsing it "
+            "as shadow and paying the unfiltered pool",
+            configured_policy.revision,
+            _PROVISIONAL_INCUMBENT_PROTOCOL,
+        )
+    eligibility = evaluate_ledger(
+        rows,
+        await load_review_postures(session, [r.agent_id for r in rows])
+        if eligibility_policy.evaluating
+        else {},
+        policy=eligibility_policy,
+        now=now,
+    )
+    reward_eligibility_mode: Literal["enforce"] | None = (
+        "enforce" if eligibility_policy.enforcing else None
+    )
+    ledger_rows = rows
+    if eligibility_policy.evaluating:
+        withheld = eligibility.withheld
+        if withheld:
+            logger.warning(
+                "emission eligibility (%s, revision %d) %s %d artifact(s) for "
+                "window %s: %s",
+                eligibility_policy.settings.enforcement,
+                eligibility_policy.revision,
+                "withheld" if eligibility_policy.enforcing else "would withhold",
+                len(withheld),
+                eligibility.window_start.isoformat(),
+                ", ".join(
+                    f"{record.agent_id}:{record.state}" for record in withheld[:10]
+                ),
+            )
+        await _record_eligibility_rehearsal(app_state, eligibility)
+        rows = eligibility.filter_rows(rows)
+    fleet_protocol_ready = ledger_context.continual_fleet_ready
+    continual_settings = ledger_context.policy.continual_retest
+    burn_settings = ledger_context.policy.burn
+    continual_mean_active = aggregate_is_active(
+        continual_settings, fleet_protocol_ready=fleet_protocol_ready
+    )
+    tie_weighting_fleet_ready = ledger_context.tie_weighting_fleet_ready
+    tie_weighting_active = tie_weighting_is_active(
+        continual_settings, fleet_protocol_ready=tie_weighting_fleet_ready
+    )
+    # The ceiling-aware dethrone band needs no operator switch: it only ever
+    # narrows a band that the benchmark has already made unwinnable, and
+    # leaving it off is the state miners are complaining about. Fleet
+    # readiness is the whole gate, exactly as it is for curve-v3 factors.
+    dethrone_band_clamp_active = ledger_context.dethrone_band_clamp_fleet_ready
+    canonical_version = ledger_context.active_bench_version
+    # Bench v13+: the pinned finalized-block anchors every validator needs
+    # to re-derive the champion-anchored confirmation family fleet-wide.
+    confirmation_seed_anchors = tuple(
+        ConfirmationSeedAnchorPin(
+            champion_agent_id=anchor.champion_agent_id,
+            bench_version=anchor.bench_version,
+            anchor_block=anchor.anchor_block,
+            anchor_block_hash=anchor.block_hash or "",
+        )
+        for anchor in await list_reign_seed_anchors(
+            session, bench_version=canonical_version
+        )
+        if anchor.block_hash is not None
+    )
+    rows, entries = await _ledger_entries(
+        session,
+        rows,
+        canonical_version=canonical_version,
+        continual_mean_active=continual_mean_active,
+        efficiency_config=efficiency_config,
+        now=now,
+        requesting_validator_hotkey=requesting_validator_hotkey,
+    )
+    generated_at = datetime.now(UTC)
+    crown_mode: Literal["incumbent"] | None = (
+        "incumbent"
+        if crown_incumbent_is_active(
+            continual_settings,
+            fleet_protocol_ready=ledger_context.crown_incumbent_fleet_ready,
+        )
+        else None
+    )
+    # A held incumbent keeps the crown unpaid (protocol 28), so the pin needs
+    # each withheld owner's best generation to find it. Kept internal: only
+    # the pin's ``provisional_incumbent`` ever serves one, and only when it is
+    # the incumbent. Built only for a pin (no requesting validator) with
+    # something to find, so a live read and an unfiltered pool materialize
+    # exactly as before.
+    withheld_rows: list[LedgerRow] = []
+    withheld_entries: list[LedgerEntry] = []
+    if (
+        requesting_validator_hotkey is None
+        and crown_mode == "incumbent"
+        and any(eligibility.withholds(r.agent_id) for r in ledger_rows)
+    ):
+        withheld_rows, withheld_entries = await _ledger_entries(
+            session,
+            ledger_rows,
+            canonical_version=canonical_version,
+            continual_mean_active=continual_mean_active,
+            efficiency_config=efficiency_config,
+            now=now,
+            requesting_validator_hotkey=requesting_validator_hotkey,
+            emit=lambda row: eligibility.withholds(row.agent_id),
+        )
     return _LedgerSnapshot(
         entries=entries,
         generated_at=generated_at,
@@ -890,15 +988,11 @@ async def materialize_ledger_snapshot(
         requesting_validator_hotkey=requesting_validator_hotkey,
         context=ledger_context,
         confirmation_seed_anchors=confirmation_seed_anchors,
-        crown_mode=(
-            "incumbent"
-            if crown_incumbent_is_active(
-                continual_settings,
-                fleet_protocol_ready=ledger_context.crown_incumbent_fleet_ready,
-            )
-            else None
-        ),
-        owner_roots={r.agent_id: r.emission_owner_root for r in rows},
+        crown_mode=crown_mode,
+        owner_roots={
+            r.agent_id: r.emission_owner_root for r in (*rows, *withheld_rows)
+        },
+        withheld_entries=withheld_entries,
         fleet_readiness={
             "continual_mean": ledger_context.continual_fleet_ready,
             "tie_weighting": ledger_context.tie_weighting_fleet_ready,
@@ -906,6 +1000,7 @@ async def materialize_ledger_snapshot(
             "unbounded_factor": ledger_context.unbounded_factor_fleet_ready,
             "dethrone_band_clamp": ledger_context.dethrone_band_clamp_fleet_ready,
             "crown_incumbent": ledger_context.crown_incumbent_fleet_ready,
+            "reward_eligibility": ledger_context.reward_eligibility_fleet_ready,
         },
     )
 

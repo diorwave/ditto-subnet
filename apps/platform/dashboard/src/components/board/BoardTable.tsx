@@ -864,7 +864,8 @@ function BoardRow(props: {
                     ? "Joint crown"
                     : "Tail") +
                   " · " +
-                  pct(recipient().share_of_miner_pool as number)}
+                  pct(recipient().share_of_miner_pool as number) +
+                  (recipient().paid === false ? " · unpaid" : "")}
               </span>
             )}
           </Show>

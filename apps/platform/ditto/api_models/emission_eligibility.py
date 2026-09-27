@@ -50,6 +50,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ditto.api_models.continual_retest_settings import PROVISIONAL_INCUMBENT_PROTOCOL
+
 EligibilityEnforcement = Literal["off", "shadow", "enforce"]
 """``off`` evaluates nothing, ``shadow`` records exclusions without applying
 them, ``enforce`` withholds emissions. Same ladder as ``CourtMode``."""
@@ -335,6 +337,18 @@ class EffectiveEmissionEligibilitySettings(BaseModel):
     """Distinct artifacts the shadow rehearsal has recorded as *would have been
     excluded* in the current window. The number an operator checks before
     flipping to ``enforce``; ``None`` when unreadable."""
+
+    effective_enforcement: EligibilityEnforcement = DEFAULT_ENFORCEMENT
+    """What the validator ledger is actually doing: ``settings.enforcement``,
+    except that ``enforce`` rehearses exactly like ``shadow`` until
+    ``fleet_protocol_ready``."""
+
+    fleet_protocol_ready: bool = False
+    """Whether every recently-live weight setter reports ``required_protocol``,
+    the fold that keeps a withheld incumbent's crown and burns its share.
+    ``False`` when unreadable."""
+
+    required_protocol: int = PROVISIONAL_INCUMBENT_PROTOCOL
 
 
 class AdminEmissionEligibilitySettingsRequest(BaseModel):

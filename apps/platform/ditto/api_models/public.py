@@ -1542,6 +1542,21 @@ class PublicEmissionRecipient(BaseModel):
             ),
         ),
     ]
+    paid: Annotated[
+        bool,
+        Field(
+            default=True,
+            exclude_if=lambda value: value,
+            description=(
+                "Present, and false, only for a provisional incumbent (protocol "
+                "28): its artifact is withheld by the terminal-review emission "
+                "gate, so it holds this slot -- the crown, a tail slot, or a "
+                "pooled share -- without being paid, and validators burn "
+                "``share_of_miner_pool`` rather than reassigning it. Absent "
+                "means paid."
+            ),
+        ),
+    ] = True
     shared_seed_confirmations: Annotated[
         int,
         Field(
@@ -1929,6 +1944,17 @@ class PublicLedgerActor(BaseModel):
 class PublicLedgerEpochRecipient(PublicLedgerActor):
     role: Literal["champion", "joint_champion", "tail"]
     share_of_miner_pool: Annotated[float, Field(gt=0.0, le=1.0)]
+    paid: Annotated[
+        bool,
+        Field(
+            default=True,
+            exclude_if=lambda value: value,
+            description=(
+                "Present, and false, only for the pin's provisional incumbent: "
+                "its share burned instead of being paid (protocol 28)."
+            ),
+        ),
+    ] = True
 
 
 class PublicLedgerEpoch(BaseModel):
