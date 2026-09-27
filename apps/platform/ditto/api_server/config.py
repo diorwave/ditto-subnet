@@ -534,6 +534,12 @@ class ApiServerConfig:
     source_emission_confirmation_enabled: bool = True
     """Allow verified payout attribution to arm the embargo; collection stays on."""
 
+    public_rate_limit_per_minute: int = 0
+    """Per-client-IP requests per minute on the unauthenticated upload,
+    retrieval, and public read routes (``DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE``).
+    ``0``, the default, installs no limiter. See
+    :mod:`ditto.api_server.middleware.public_rate_limit`."""
+
 
 def _parse_targon_rental_config_from_env(commit_hash: str) -> TargonRentalConfig | None:
     api_key = os.environ.get("DITTO_TARGON_API_KEY", "").strip()
@@ -970,6 +976,19 @@ def parse_api_server_config_from_env(commit_hash: str) -> ApiServerConfig:
     if top5_backoff_cap < max(1, top5_backoff_base):
         raise ApiServerConfigError("TOP5_RESCORE_BACKOFF_CAP must be >= max(1, base)")
 
+    try:
+        public_rate_limit_per_minute = int(
+            os.environ.get("DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE", "0")
+        )
+    except ValueError as error:
+        raise ApiServerConfigError(
+            "DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE must be an integer"
+        ) from error
+    if public_rate_limit_per_minute < 0:
+        raise ApiServerConfigError(
+            "DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE must be non-negative (0 disables)"
+        )
+
     targon = _parse_targon_rental_config_from_env(commit_hash)
     cloudrun = _parse_cloudrun_screening_config_from_env()
 
@@ -1038,6 +1057,7 @@ def parse_api_server_config_from_env(commit_hash: str) -> ApiServerConfig:
         top5_backoff_cap=top5_backoff_cap,
         efficiency_bonus=efficiency_bonus,
         source_review_queue_slo=parse_source_review_queue_slo_config_from_env(),
+        public_rate_limit_per_minute=public_rate_limit_per_minute,
     )
 
 
