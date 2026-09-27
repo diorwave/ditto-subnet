@@ -29591,6 +29591,8 @@ export interface components {
             event_retention_days?: number | null;
             /** Events */
             events: components["schemas"]["ScreenerCapacityEventView"][];
+            /** Legacy Bearer Accepted */
+            legacy_bearer_accepted: boolean;
             /** Node Controls */
             node_controls?: components["schemas"]["ScreenerNodeChannelSettingsControl"][];
             /** Nodes */
