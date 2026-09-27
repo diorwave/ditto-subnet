@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
@@ -23,9 +24,12 @@ from ditto_screening_protocol import ScoredRuntimeEvidenceLease
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("run_mode", ["source_only", "full_runtime"])
+@pytest.mark.parametrize(
+    ("run_mode", "lease_minutes"),
+    [("source_only", 100), ("full_runtime", 150)],
+)
 async def test_report_only_l2_previews_full_runtime_enforcement_without_verdict(
-    make_config, monkeypatch: pytest.MonkeyPatch, run_mode: str
+    make_config, monkeypatch: pytest.MonkeyPatch, run_mode: str, lease_minutes: int
 ) -> None:
     config = make_config()
     settings = bootstrap_review_settings(config)
@@ -58,7 +62,9 @@ async def test_report_only_l2_previews_full_runtime_enforcement_without_verdict(
         "run_mode": run_mode,
         "miner_hotkey": "miner",
         "lease_token": "token",
-        "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=45)).isoformat(),
+        "lease_expires_at": (
+            datetime.now(UTC) + timedelta(minutes=lease_minutes)
+        ).isoformat(),
         "download_url": "https://example.test/source",
         "scored_runtime_evidence": packet.model_dump(mode="json"),
     }
@@ -83,10 +89,13 @@ async def test_report_only_l2_previews_full_runtime_enforcement_without_verdict(
             assert canary_config.l2_review_mode == (
                 "enforce" if run_mode == "full_runtime" else "shadow"
             )
-            assert kwargs["capture_enforce_result"] is (run_mode == "full_runtime")
+            assert kwargs["capture_enforce_result"] is True
             assert canary_config.l2_always_escalate
             assert canary_config.require_signed_runtime_lease
-            assert canary_config.signed_runtime_lease_max_age_seconds == 45 * 60
+            assert canary_config.signed_runtime_lease_max_age_seconds == math.ceil(
+                datetime.fromisoformat(claim["lease_expires_at"]).timestamp()
+                - packet.observed_at
+            )
             assert str(canary_id) in canary_config.l2_cache_dir
             assert canary_config.l2_cache_dir != config.l2_cache_dir
             assert canary_config.l2_audit_journal_file != config.l2_audit_journal_file
@@ -142,7 +151,6 @@ async def test_report_only_l2_previews_full_runtime_enforcement_without_verdict(
             )
 
         def pop_preview_l1_review(self, _attempt_id):
-            assert run_mode == "full_runtime"
             return SourceReviewObservation(
                 ok=True,
                 risk_level="low",
@@ -186,11 +194,8 @@ async def test_report_only_l2_previews_full_runtime_enforcement_without_verdict(
     assert report["source_attempt_id"] == str(attempt_id)
     assert report["l2"]["risk_level"] == "low"
     assert report["l2"]["failure_subcode"] == "no_tool_call_after_corrections"
-    if run_mode == "full_runtime":
-        assert report["l1"]["clearance_certified"] is True
-        assert report["l1"]["finding"]["summary"] == "clean L1"
-    else:
-        assert "l1" not in report
+    assert report["l1"]["clearance_certified"] is True
+    assert report["l1"]["finding"]["summary"] == "clean L1"
 
 
 def test_inconclusive_model_audit_is_report_only() -> None:

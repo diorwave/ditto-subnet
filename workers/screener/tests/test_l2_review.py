@@ -51,6 +51,7 @@ from ditto_screener.l2_review import (
     _finalize_without_l3,
     _graph_covers_l1_slice,
     _has_mixed_causal_families,
+    _l1_lead_packet,
     _l2_review_system_prompt,
     _make_writable,
     _needs_violation_adjudication,
@@ -62,6 +63,7 @@ from ditto_screener.l2_review import (
     _review_adaptation_hold,
     _safety_clearance_gaps,
     _served_generator_hold,
+    _validate_lead_dispositions,
     _write_all,
     l2_cause_prompt_revision,
     l2_cause_tiebreaker_prompt_revision,
@@ -70,7 +72,10 @@ from ditto_screener.l2_review import (
     l2_safety_prompt_revision,
 )
 from ditto_screener.policy import SourceReviewObservation
-from ditto_screener.source_review import TarSourceRepository
+from ditto_screener.source_review import (
+    OpenRouterSourceReviewAgent,
+    TarSourceRepository,
+)
 from ditto_screening_protocol import (
     SCREENING_POLICY_VERSION,
     ScoredRuntimeEvidenceLease,
@@ -78,6 +83,8 @@ from ditto_screening_protocol import (
     SourceReviewAdjudication,
     SourceReviewCitation,
     SourceReviewFinding,
+    SourceReviewInvariant,
+    SourceReviewInvariantDisposition,
 )
 from scripts.generate_starter_provenance import _tracked_files
 
@@ -212,7 +219,7 @@ def test_starter_provenance_generator_ignores_untracked_build_outputs(
 def test_causal_basis_prefers_reconstructed_generator_over_downstream_effects() -> None:
     assert l2_prompt_revision(11) == "l2-terra-source-review-v37-policy-v11"
     assert l2_prompt_revision(10) == "l2-terra-source-review-v37-policy-v10"
-    assert L2_DOSSIER_REVISION == "l1-compressed-dossier-v12"
+    assert L2_DOSSIER_REVISION == "l1-lead-packet-v13"
     assert l2_cause_prompt_revision(11) == "l3-sol-violation-cause-v27-policy-v11"
     assert l2_cause_tiebreaker_prompt_revision(11) == (
         "l3-sol-cause-disagreement-v7-policy-v11"
@@ -1106,6 +1113,184 @@ def test_l3_disabled_makes_l2_result_authoritative() -> None:
     assert result.clearance_path == "l2_only_l3_disabled"
 
 
+def test_v13_static_hold_retains_analyst_explanation() -> None:
+    analyst = replace(
+        _clearance_candidate(), analyst_summary="Independent source analysis"
+    )
+    attention = replace(analyst, observation=_l1("medium"))
+    held = _finalize_without_l3(
+        analyst,
+        dossier_tools=(),
+        analyst_cache_hit=False,
+        policy_version=13,
+        static_attention=attention,
+    )
+    assert held.observation is attention.observation
+    assert held.analyst_finding == analyst.observation.finding
+    assert held.analyst_summary == "Independent source analysis"
+
+
+def test_l1_lead_packet_deduplicates_without_losing_note_provenance() -> None:
+    l1 = replace(
+        _l1("medium"),
+        notes=(
+            {
+                "kind": "concern",
+                "path": "src/main.rs",
+                "line": 1,
+                "area": "answer_construction",
+                "category": "benchmark_emulation",
+                "confidence": 0.8,
+                "summary": "First concern at the deciding prompt",
+            },
+            {
+                "kind": "concern",
+                "path": "src/main.rs",
+                "line": 1,
+                "area": "answer_construction",
+                "category": "benchmark_emulation",
+                "confidence": 0.99,
+                "summary": "Different concern at the same source line",
+            },
+        ),
+    )
+    leads = _l1_lead_packet(l1)
+    assert len(leads) == 1
+    assert leads[0]["note_indices"] == [0, 1]
+    assert leads[0]["occurrences"] == 2
+    assert leads[0]["max_confidence"] == 0.99
+    assert [item["summary"] for item in leads[0]["diagnostics_untrusted"]] == [
+        "First concern at the deciding prompt",
+        "Different concern at the same source line",
+    ]
+
+
+def test_l1_unlocated_concern_remains_in_packet_and_blocks_medium_clear() -> None:
+    l1 = replace(
+        _l1("medium"),
+        notes=(
+            {
+                "kind": "concern",
+                "path": "src/main.rs",
+                "line": 1,
+                "area": "answer_construction",
+                "category": "benchmark_emulation",
+                "summary": "Located lead",
+            },
+            {
+                "kind": "concern",
+                "category": "benchmark_emulation",
+                "summary": "Unlocated distinct concern",
+            },
+        ),
+    )
+    leads = _l1_lead_packet(l1)
+    assert len(leads) == 2
+    assert leads[0]["location_complete"] is True
+    assert leads[1]["location_complete"] is False
+    assert leads[1]["note_indices"] == [1]
+    candidate = replace(
+        _clearance_candidate(response_models=("openai/gpt-6-sol",)),
+        l1_lead_dispositions=tuple(
+            {
+                "lead_id": lead["lead_id"],
+                "disposition": "resolved",
+                "citation": {"path": "src/main.rs", "line": 1, "file_sha256": "e" * 64},
+            }
+            for lead in leads
+        ),
+    )
+    held = _finalize_without_l3(
+        candidate,
+        dossier_tools=(),
+        analyst_cache_hit=False,
+        policy_version=13,
+        l1_observation=l1,
+        dossier={"deterministic": {"main_call_graph": {}}},
+        expected_model="openai/gpt-6-sol",
+    )
+    assert not held.observation.clearance_certified
+    assert "l1-lead-location-incomplete" in (held.failure_subcode or "")
+
+
+def test_l1_note_changes_invalidate_both_l2_cache_keys(tmp_path: Path) -> None:
+    agent = _sol_agent(tmp_path, _FakeHarness(), lambda _request: None)
+    original = _l1("medium")
+    revised = replace(
+        original,
+        notes=({"kind": "concern", "summary": "New unresolved lead"},),
+    )
+    assert original.finding_digest == revised.finding_digest
+    assert agent._cache_key("ab" * 32, original) != agent._cache_key("ab" * 32, revised)
+    assert agent._analyst_cache_key("ab" * 32, original) != agent._analyst_cache_key(
+        "ab" * 32, revised
+    )
+
+
+def test_l2_lead_disposition_requires_exact_source_citation(tmp_path: Path) -> None:
+    archive, _ = _tar(tmp_path, "fn main() {}\n")
+    repository = TarSourceRepository(str(archive))
+    leads = _l1_lead_packet(_l1("medium"))
+    digest = hashlib.sha256(b"fn main() {}\n").hexdigest()
+    analyzed = ({"path": "src/main.rs", "sha256": digest},)
+    item = {
+        "lead_id": leads[0]["lead_id"],
+        "disposition": "resolved",
+        "reason": "The cited branch still delegates the answer to the model.",
+        "citation": {"path": "src/main.rs", "line": 1, "file_sha256": digest},
+    }
+    assert _validate_lead_dispositions(
+        [item], leads=leads, analyzed=analyzed, repository=repository
+    ) == (item,)
+    with pytest.raises(ValueError, match="artifact-bound"):
+        _validate_lead_dispositions(
+            [{**item, "citation": {**item["citation"], "file_sha256": "0" * 64}}],
+            leads=leads,
+            analyzed=analyzed,
+            repository=repository,
+        )
+    with pytest.raises(ValueError, match="every unique"):
+        _validate_lead_dispositions(
+            [], leads=leads, analyzed=analyzed, repository=repository
+        )
+
+
+def test_v13_medium_l1_requires_resolved_leads_and_direct_clear_graph() -> None:
+    l1 = _l1("medium")
+    lead = _l1_lead_packet(l1)[0]
+    candidate = _clearance_candidate(response_models=("openai/gpt-6-sol",))
+    kwargs = {
+        "dossier_tools": (),
+        "analyst_cache_hit": False,
+        "policy_version": 13,
+        "l1_observation": l1,
+        "dossier": {"deterministic": {"main_call_graph": {}}},
+        "expected_model": "openai/gpt-6-sol",
+    }
+    unresolved = _finalize_without_l3(candidate, **kwargs)
+    assert unresolved.failure_subcode is not None
+    assert "l1-leads-unresolved" in unresolved.failure_subcode
+    assert unresolved.analyst_finding == candidate.observation.finding
+    resolved = replace(
+        candidate,
+        l1_lead_dispositions=(
+            {
+                "lead_id": lead["lead_id"],
+                "disposition": "resolved",
+                "citation": {"path": "src/main.rs", "line": 1, "file_sha256": "e" * 64},
+            },
+        ),
+    )
+    clear = _finalize_without_l3(resolved, **kwargs)
+    assert clear.observation.clearance_certified
+    assert clear.clearance_path == "l2_only_certified_low"
+    incomplete_graph = _finalize_without_l3(
+        replace(resolved, direct_clear_graph_complete=False), **kwargs
+    )
+    assert not incomplete_graph.observation.ok
+    assert "direct-clear-graph" in (incomplete_graph.failure_subcode or "")
+
+
 def test_v13_l3_off_certifies_only_complete_clean_l1_l2_agreement() -> None:
     candidate = _clearance_candidate()
     analyst = L2RunResult(
@@ -1332,6 +1517,77 @@ def test_v13_l3_off_certifies_only_complete_clean_l1_l2_agreement() -> None:
     assert missing_dossier.observation.error_code == "l2-only-clearance-unproven"
 
 
+def test_v13_low_l1_concerns_require_complete_cited_l2_resolution() -> None:
+    l1 = replace(
+        _l1("low"),
+        notes=(
+            {
+                "kind": "concern",
+                "path": "src/main.rs",
+                "line": 1,
+                "area": "model_call",
+                "category": "data_exfiltration",
+                "confidence": 0.99,
+            },
+        ),
+    )
+    lead = _l1_lead_packet(l1)[0]
+    disposition = {
+        "lead_id": lead["lead_id"],
+        "disposition": "resolved",
+        "reason": "The cited target is the validator's case-scoped broker.",
+        "citation": {"path": "src/main.rs", "line": 1, "file_sha256": "e" * 64},
+    }
+    candidate = replace(
+        _clearance_candidate(response_models=("openai/gpt-6-sol",)),
+        l1_lead_dispositions=(disposition,),
+    )
+    kwargs = {
+        "dossier_tools": (),
+        "analyst_cache_hit": False,
+        "policy_version": 13,
+        "l1_observation": l1,
+        "dossier": {"deterministic": {}},
+        "expected_model": "openai/gpt-6-sol",
+    }
+    clear = _finalize_without_l3(candidate, **kwargs)
+    assert clear.observation.clearance_certified
+    assert clear.clearance_path == "l2_only_certified_low"
+
+    for changed in (
+        {"l1_lead_dispositions": ()},
+        {"l1_lead_dispositions": ({**disposition, "disposition": "unresolved"},)},
+        {"l1_lead_dispositions": ({**disposition, "lead_id": "wrong"},)},
+        {"l1_lead_dispositions": ({**disposition, "citation": None},)},
+    ):
+        held = _finalize_without_l3(replace(candidate, **changed), **kwargs)
+        assert not held.observation.clearance_certified
+        assert "l1-concern-unresolved" in (held.failure_subcode or "")
+
+    unlocated = replace(
+        l1, notes=({"kind": "concern", "category": "data_exfiltration"},)
+    )
+    unlocated_lead = _l1_lead_packet(unlocated)[0]
+    unlocated_disposition = {
+        **disposition,
+        "lead_id": unlocated_lead["lead_id"],
+    }
+    held_unlocated = _finalize_without_l3(
+        replace(candidate, l1_lead_dispositions=(unlocated_disposition,)),
+        **{**kwargs, "l1_observation": unlocated},
+    )
+    assert "l1-concern-unresolved" in (held_unlocated.failure_subcode or "")
+
+    low_confidence = replace(
+        candidate,
+        observation=replace(
+            candidate.observation, finding={"confidence": 0.97, "evidence": []}
+        ),
+    )
+    held_confidence = _finalize_without_l3(low_confidence, **kwargs)
+    assert "finding-confidence" in (held_confidence.failure_subcode or "")
+
+
 @pytest.mark.parametrize("risk", ["medium", "high"])
 async def test_l3_off_preserves_elevated_analyst_result_without_static_attention(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, risk: str
@@ -1485,7 +1741,11 @@ async def test_l2_failure_preserves_the_l1_finding_as_a_hold() -> None:
     assert result.finding_digest is not None
 
 
-def _clearance_candidate(*, confidence: float = 0.99) -> L2RunResult:
+def _clearance_candidate(
+    *,
+    confidence: float = 0.99,
+    response_models: tuple[str, ...] = ("openai/gpt-5.6-terra",),
+) -> L2RunResult:
     observation = SourceReviewObservation(
         ok=True,
         risk_level="low",
@@ -1504,22 +1764,69 @@ def _clearance_candidate(*, confidence: float = 0.99) -> L2RunResult:
         tools=("read_file",),
         usage=L2Usage(),
         cache_hit=False,
-        response_models=("openai/gpt-5.6-terra",),
+        response_models=response_models,
         resolution_basis="authoritative_model_tool_path",
     )
 
 
+_TERRA = "openai/gpt-5.6-terra"
+_GPT6_SOL = "openai/gpt-6-sol"
+
+
 def test_complete_medium_primary_terra_certificate_can_skip_l3() -> None:
-    assert _qualifies_for_direct_clear(_l1("medium"), _clearance_candidate())
+    assert _qualifies_for_direct_clear(
+        _l1("medium"), _clearance_candidate(), expected_model=_TERRA
+    )
+
+
+@pytest.mark.parametrize(
+    "response_models",
+    [(_GPT6_SOL,), (f"{_GPT6_SOL}-2026-09-01",), (_GPT6_SOL, _GPT6_SOL)],
+)
+def test_configured_primary_model_certificate_can_skip_l3(
+    response_models: tuple[str, ...],
+) -> None:
+    # L2 moved to gpt-6-sol; a hard-coded Terra pin made this path dead.
+    assert _qualifies_for_direct_clear(
+        _l1("medium"),
+        _clearance_candidate(response_models=response_models),
+        expected_model=_GPT6_SOL,
+    )
+
+
+@pytest.mark.parametrize(
+    ("response_models", "expected_model"),
+    [
+        (("z-ai/glm-5.2",), _GPT6_SOL),
+        ((_GPT6_SOL, "z-ai/glm-5.2"), _GPT6_SOL),
+        (("openai/gpt-5.6-sol",), _GPT6_SOL),
+        (("openai/gpt-6-solar",), _GPT6_SOL),
+        ((_GPT6_SOL,), _TERRA),
+        ((_TERRA,), _GPT6_SOL),
+        ((), _GPT6_SOL),
+    ],
+)
+def test_fallback_or_foreign_model_certificate_never_skips_l3(
+    response_models: tuple[str, ...], expected_model: str
+) -> None:
+    assert not _qualifies_for_direct_clear(
+        _l1("medium"),
+        _clearance_candidate(response_models=response_models),
+        expected_model=expected_model,
+    )
 
 
 @pytest.mark.parametrize("risk", ["high", "low"])
 def test_non_medium_l1_never_skips_l3(risk: str) -> None:
-    assert not _qualifies_for_direct_clear(_l1(risk), _clearance_candidate())
+    assert not _qualifies_for_direct_clear(
+        _l1(risk), _clearance_candidate(), expected_model=_TERRA
+    )
 
 
 def test_incomplete_low_confidence_or_fallback_certificate_never_skips_l3() -> None:
-    assert not _qualifies_for_direct_clear(_l1(), _clearance_candidate(confidence=0.97))
+    assert not _qualifies_for_direct_clear(
+        _l1(), _clearance_candidate(confidence=0.97), expected_model=_TERRA
+    )
     candidate = _clearance_candidate()
     assert not _qualifies_for_direct_clear(
         _l1(),
@@ -1529,10 +1836,12 @@ def test_incomplete_low_confidence_or_fallback_certificate_never_skips_l3() -> N
                 "response_models": ("z-ai/glm-5.2",),
             }
         ),
+        expected_model=_TERRA,
     )
     assert not _qualifies_for_direct_clear(
         _l1(),
         L2RunResult(**{**candidate.__dict__, "causal_path": candidate.causal_path[:2]}),
+        expected_model=_TERRA,
     )
 
 
@@ -1589,7 +1898,16 @@ def test_served_generator_constellation_cannot_auto_clear(
     assert "benchmark_emulation" in held.observation.categories
     assert held.clearance_path == "deterministic_served_generator_hold"
     assert held.critic_disposition == "not_required_static_hold"
-    assert held.resolution_basis == "benchmark_answer_replacement"
+    assert held.resolution_basis == "insufficient_static_evidence"
+    finding = SourceReviewFinding.model_validate(held.observation.finding)
+    assert finding.invariant_assessment is not None
+    i5 = next(
+        decision
+        for decision in finding.invariant_assessment.decisions
+        if decision.invariant == SourceReviewInvariant.PRODUCTION_ENGINE
+    )
+    assert i5.disposition == SourceReviewInvariantDisposition.INCONCLUSIVE
+    assert i5.evidence_indices
     assert (
         _finalize_without_l3(
             analyst,
@@ -1600,8 +1918,8 @@ def test_served_generator_constellation_cannot_auto_clear(
             static_attention=held,
             dossier=dossier,
             expected_model="openai/gpt-5.6-terra",
-        )
-        is held
+        ).observation
+        is held.observation
     )
     assert {item["role"] for item in held.causal_path} == {
         "trigger",
@@ -1666,6 +1984,23 @@ def test_served_generator_constellation_cannot_auto_clear(
     )
     assert scorer_hold is not None
     assert scorer_hold.resolution_basis == "scorer_field_manipulation"
+
+
+def test_static_hold_revision_does_not_reuse_prior_breach_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert L2_STATIC_HOLD_REVISION == "l2-integrity-static-hold-v4"
+    agent = _sol_agent(tmp_path, _FakeHarness(), lambda _request: None)
+    (tmp_path / "cache").mkdir()
+    observation = _l1()
+    monkeypatch.setattr(
+        l2_review, "L2_STATIC_HOLD_REVISION", "l2-integrity-static-hold-v3"
+    )
+    old_key = agent._cache_key("ab" * 32, observation)
+    agent._store_cache(old_key, _clearance_candidate())
+    assert agent._load_cache(old_key) is not None
+    monkeypatch.setattr(l2_review, "L2_STATIC_HOLD_REVISION", L2_STATIC_HOLD_REVISION)
+    assert agent._load_cache(agent._cache_key("ab" * 32, observation)) is None
 
 
 def test_review_adaptive_model_routing_cannot_auto_clear(tmp_path: Path) -> None:
@@ -1737,8 +2072,8 @@ def test_review_adaptive_model_routing_cannot_auto_clear(tmp_path: Path) -> None
             static_attention=held,
             dossier=dossier,
             expected_model="openai/gpt-5.6-terra",
-        )
-        is held
+        ).observation
+        is held.observation
     )
     assert held.critic_disposition == "not_required_static_hold"
     assert {item["role"] for item in held.causal_path} == {
@@ -5936,7 +6271,7 @@ async def test_model_turn_has_an_aggregate_wall_clock_deadline(
 
 
 async def test_model_turn_timeout_is_bounded_and_retried_once(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     requests = 0
 
@@ -5946,7 +6281,6 @@ async def test_model_turn_timeout_is_bounded_and_retried_once(
         await asyncio.sleep(1)
         return httpx.Response(200, json={})
 
-    monkeypatch.setattr(l2_review, "_MAX_COMPLETION_REQUEST_SECONDS", 0.01)
     agent = SolL2SourceReviewAgent(
         api_key_file=None,
         base_url="https://openrouter.test/api/v1",
@@ -5962,6 +6296,7 @@ async def test_model_turn_timeout_is_bounded_and_retried_once(
         cache_ttl_seconds=86_400,
         transport=httpx.MockTransport(handler),
     )
+    agent._max_completion_request_seconds = 0.01
     async with httpx.AsyncClient(transport=agent._transport) as client:
         with pytest.raises(TimeoutError):
             await agent._post(
@@ -5977,6 +6312,87 @@ async def test_model_turn_timeout_is_bounded_and_retried_once(
             )
 
     assert requests == 2
+
+
+def _timeout_agent(tmp_path: Path, **overrides: Any) -> SolL2SourceReviewAgent:
+    kwargs: dict[str, Any] = {
+        "api_key_file": None,
+        "base_url": "https://openrouter.test/api/v1",
+        "harness": _FakeHarness(),
+        "cache_dir": str(tmp_path / "cache"),
+        "audit_journal": L2AuditJournal(None, retention_days=30),
+        "timeout_seconds": 1800,
+        "max_steps": 12,
+        "max_input_tokens": 80_000,
+        "max_output_tokens": 1_000_000,
+        "max_completion_tokens": 16_000,
+        "max_cost_usd": 1.5,
+        "cache_ttl_seconds": 86_400,
+    }
+    kwargs.update(overrides)
+    return SolL2SourceReviewAgent(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("max_completion_tokens", "expected_seconds"),
+    [
+        (2_400, 45.0),
+        (8_192, 8_192 / 60),
+        (16_000, 16_000 / 60),
+        (64_000, 600.0),
+    ],
+)
+def test_default_turn_timeout_scales_with_completion_budget(
+    tmp_path: Path, max_completion_tokens: int, expected_seconds: float
+) -> None:
+    # The live 16k budget used to inherit a flat 45s cap sized for 2.4k and
+    # timed out as l2-timeouterror / l3-critic-timeouterror holds.
+    assert l2_review.default_completion_request_seconds(
+        max_completion_tokens
+    ) == pytest.approx(expected_seconds)
+    agent = _timeout_agent(tmp_path, max_completion_tokens=max_completion_tokens)
+    assert agent._max_completion_request_seconds == pytest.approx(expected_seconds)
+
+
+def test_explicit_turn_timeout_overrides_the_budget_default(tmp_path: Path) -> None:
+    agent = _timeout_agent(tmp_path, max_completion_request_seconds=120)
+    assert agent._max_completion_request_seconds == 120.0
+
+
+@pytest.mark.parametrize("value", [29.9, 600.1])
+def test_explicit_turn_timeout_stays_bounded(tmp_path: Path, value: float) -> None:
+    with pytest.raises(ValueError, match="30-600 seconds"):
+        _timeout_agent(tmp_path, max_completion_request_seconds=value)
+
+
+async def test_turn_timeout_never_exceeds_the_review_deadline(
+    tmp_path: Path,
+) -> None:
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={})
+
+    agent = _timeout_agent(tmp_path, transport=httpx.MockTransport(handler))
+    assert agent._max_completion_request_seconds > 200
+    started = asyncio.get_running_loop().time()
+    async with httpx.AsyncClient(transport=agent._transport) as client:
+        with pytest.raises((TimeoutError, ValueError)):
+            await agent._post(
+                client,
+                "test-key",
+                [],
+                artifact_sha256="d" * 64,
+                reasoning_effort="low",
+                model="openai/gpt-6-sol",
+                fallback_models=(),
+                provider=None,
+                deadline=asyncio.get_running_loop().time() + 0.05,
+            )
+    assert asyncio.get_running_loop().time() - started < 2
 
 
 def test_catalog_pricing_budget_accounts_for_long_context_tier() -> None:
@@ -6600,6 +7016,150 @@ class _FakeAdjudicator:
             prompt_revision=(f"adjudicator-v3-policy-v{self.policy_version or 11}"),
             policy_version=self.policy_version or 11,
         )
+
+
+async def test_long_report_lease_preserves_separate_l1_and_l2_windows() -> None:
+    l1 = _FakeL1(_l1("medium"))
+    l1._timeout_seconds = 3_600
+    l2 = _FakeL2(_model_result(_safe()))
+    layered = LayeredSourceReviewAgent(  # type: ignore[arg-type]
+        l1=l1, l2=l2, mode="enforce"
+    )
+    started = asyncio.get_running_loop().time()
+    deadline = started + 6_000
+
+    await layered.review(
+        "unused", artifact_sha256="c" * 64, attempt_id=ATTEMPT, deadline=deadline
+    )
+
+    assert l1.deadline == pytest.approx(started + 3_600, abs=0.1)
+    assert l2.deadline == deadline
+    assert l2.deadline - l1.deadline >= 1_800
+
+
+async def test_slow_real_l1_transport_leaves_l2_time_under_report_lease(
+    tmp_path: Path,
+) -> None:
+    from tests.test_source_review import _BENIGN_REVIEW, _tool
+
+    archive, sha = _tar(tmp_path, "fn main() {}")
+    key = tmp_path / "review-key"
+    key.write_text("sk-test-private-review")
+    key.chmod(0o600)
+    transport_calls = 0
+
+    async def slow_transport(_request: httpx.Request) -> httpx.Response:
+        nonlocal transport_calls
+        transport_calls += 1
+        await asyncio.sleep(0.12)
+        tool = (
+            _tool("read", "read_file", {"path": "src/main.rs"})
+            if transport_calls == 1
+            else _tool("submit", "submit_review", _BENIGN_REVIEW)
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "tool_calls": [tool]}}]
+            },
+        )
+
+    l1 = OpenRouterSourceReviewAgent(
+        api_key_file=str(key),
+        model="openai/gpt-6-luna",
+        base_url="https://openrouter.test/api/v1",
+        timeout_seconds=0.5,
+        max_steps=2,
+        transport=httpx.MockTransport(slow_transport),
+        transport_retry_delays=(),
+        max_completion_request_seconds=0.25,
+    )
+
+    class SlowL2(_FakeL2):
+        async def review(self, *_args: Any, **kwargs: Any) -> L2RunResult:
+            result = await super().review(*_args, **kwargs)
+            assert self.deadline is not None
+            await asyncio.sleep(0.1)
+            assert asyncio.get_running_loop().time() < self.deadline
+            return result
+
+    l2 = SlowL2(_model_result(_safe()))
+    layered = LayeredSourceReviewAgent(  # type: ignore[arg-type]
+        l1=l1, l2=l2, mode="enforce"
+    )
+    started = asyncio.get_running_loop().time()
+    parent_deadline = started + 1.0
+    await layered.review(
+        str(archive),
+        artifact_sha256=sha,
+        attempt_id=ATTEMPT,
+        deadline=parent_deadline,
+    )
+
+    assert transport_calls == 2
+    assert l2.calls == 1
+    assert l2.deadline == parent_deadline
+    assert asyncio.get_running_loop().time() - started >= 0.34
+
+
+async def test_short_parent_deadline_caps_l1_even_with_large_local_timeout() -> None:
+    l1 = _FakeL1(_l1("medium"))
+    l1._timeout_seconds = 3_600
+    l2 = _FakeL2(_model_result(_safe()))
+    layered = LayeredSourceReviewAgent(  # type: ignore[arg-type]
+        l1=l1, l2=l2, mode="enforce"
+    )
+    deadline = asyncio.get_running_loop().time() + 0.1
+    await layered.review(
+        "unused",
+        artifact_sha256="c" * 64,
+        attempt_id=ATTEMPT,
+        deadline=deadline,
+    )
+    assert l1.deadline == deadline
+    assert l2.deadline == deadline
+
+
+async def test_short_parent_deadline_cancels_slow_l1_transport(
+    tmp_path: Path,
+) -> None:
+    archive, sha = _tar(tmp_path, "fn main() {}")
+    key = tmp_path / "review-key"
+    key.write_text("sk-test-private-review")
+    key.chmod(0o600)
+    cancelled = asyncio.Event()
+
+    async def blocked_transport(_request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return httpx.Response(500)
+
+    l1 = OpenRouterSourceReviewAgent(
+        api_key_file=str(key),
+        model="openai/gpt-6-luna",
+        base_url="https://openrouter.test/api/v1",
+        timeout_seconds=3_600,
+        max_steps=1,
+        transport=httpx.MockTransport(blocked_transport),
+        transport_retry_delays=(),
+    )
+    l2 = _FakeL2(_model_result(_safe()))
+    layered = LayeredSourceReviewAgent(  # type: ignore[arg-type]
+        l1=l1, l2=l2, mode="enforce"
+    )
+    started = asyncio.get_running_loop().time()
+    await layered.review(
+        str(archive),
+        artifact_sha256=sha,
+        attempt_id=ATTEMPT,
+        deadline=started + 0.1,
+    )
+    assert cancelled.is_set()
+    assert l2.calls == 0
+    assert asyncio.get_running_loop().time() - started < 0.5
 
 
 async def test_exploration_reserves_the_terminal_adjudicator_deadline() -> None:

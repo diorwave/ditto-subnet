@@ -38,7 +38,7 @@ import os
 import re
 import statistics
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from datetime import time as datetime_time
@@ -2242,6 +2242,45 @@ async def _attested_owner_roots_for_rows(
     return {row.agent.agent_id: root for row, root in zip(rows, roots, strict=True)}
 
 
+async def _attested_owner_roots_for_agents(
+    session: Any, agent_ids: Iterable[UUID]
+) -> dict[UUID, str]:
+    """Attested payment-owner root per agent id, as name claims record it.
+
+    For surfaces that only hold agent ids. A root built without the payment
+    coldkey (or with no owner at all) never equals the claimant's root, so an
+    upheld handle would strike its own owner's agents as disputed.
+    """
+    ids = list(set(agent_ids))
+    if not ids:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                select(
+                    Agent.agent_id, Agent.miner_hotkey, EvaluationPayment.miner_coldkey
+                )
+                .select_from(Agent)
+                .outerjoin(
+                    EvaluationPayment, EvaluationPayment.agent_id == Agent.agent_id
+                )
+                .where(Agent.agent_id.in_(ids))
+            )
+        )
+        .tuples()
+        .all()
+    )
+    identities = [
+        (hotkey, emission_owner(miner_hotkey=hotkey, miner_coldkey=coldkey))
+        for _agent_id, hotkey, coldkey in rows
+    ]
+    roots = await attested_emission_owner_roots(session, identities)
+    return {
+        agent_id: root
+        for (agent_id, _hotkey, _coldkey), root in zip(rows, roots, strict=True)
+    }
+
+
 def _public_coding_shadow(
     bundle: CodingShadowRunBundle | None,
     *,
@@ -3100,15 +3139,8 @@ async def benchmark_timeline(
     from ditto.db.queries.name_claims import active_handle_claims
 
     handle_claims = await active_handle_claims(session, netuid=_name_claim_netuid())
-    identities = [
-        (
-            point.miner_hotkey,
-            emission_owner(miner_hotkey=point.miner_hotkey, miner_coldkey=None),
-        )
-        for point in points
-    ]
-    timeline_roots = (
-        await attested_emission_owner_roots(session, identities) if points else []
+    timeline_roots = await _attested_owner_roots_for_agents(
+        session, (point.agent_id for point in points)
     )
     return PublicBenchmarkTimelineResponse(
         generated_at=datetime.now(UTC),
@@ -3120,14 +3152,17 @@ async def benchmark_timeline(
                 bench_version=point.bench_version,
                 agent_id=point.agent_id,
                 agent_name=_public_named(
-                    point.agent_name, root, handle_claims, strike=True
+                    point.agent_name,
+                    timeline_roots.get(point.agent_id),
+                    handle_claims,
+                    strike=True,
                 )[0],
                 miner_hotkey=point.miner_hotkey,
                 memory_mean=point.memory_mean,
                 composite=point.composite,
                 score_count=point.score_count,
             )
-            for point, root in zip(points, timeline_roots, strict=True)
+            for point in points
         ],
     )
 
@@ -4093,8 +4128,11 @@ async def _ledger_actor_names(
         .all()
     )
     claims = await active_handle_claims(session, netuid=_name_claim_netuid())
+    roots = await _attested_owner_roots_for_agents(
+        session, (agent_id for agent_id, _name, _version in rows)
+    )
     return {
-        agent_id: (_public_named(name, None, claims)[0], version)
+        agent_id: (_public_named(name, roots.get(agent_id), claims)[0], version)
         for agent_id, name, version in rows
     }
 
