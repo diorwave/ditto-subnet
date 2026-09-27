@@ -7,7 +7,8 @@ import (
 )
 
 // TestLifecycleWriteCategoryUnreachableFromV8 backs the scorer's v13
-// memory-write exclusion (services/dittobench-api scorer.memoryWriteCategory):
+// memory-write exemption (services/dittobench-api scorer.memoryWriteCategory and
+// scorer.declarativeMemoryWrite):
 // the category the over-call factor used to exclude is not generated from v8 on,
 // so that exclusion protected nothing, while the live declarative-acknowledgement
 // category — whose intended work is a memory write — is generated at every

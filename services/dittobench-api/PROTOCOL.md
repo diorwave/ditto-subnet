@@ -556,6 +556,9 @@ Composite gate depths (all still pure functions of dataset + transcript):
 - tool-efficiency: no free overshoot, saturates at +3 extra calls, max penalty
   15% → 40%; only cases scoring ≥ 0.6 contribute.
 - memory over-call max penalty 10% → 25%; metamorphic split max 15% → 40%.
+  From v13 only, `save_memory`, `update_memory` and `delete_memory` on a
+  `conversational-declarative` case are not over-calls; any other non-memory
+  call on that case (e.g. `set_theme`, `gmail_send`) still is.
 - bounded-product floor 0.75 → 0.40; conversational-sanity floor 0.5 → 0.25.
 - canary LEAK multiplier 0.5 → 0.25 (an honest miss still carries no gate).
 - the reproduce-under-transform audit is ENFORCED as part of the v7 contract

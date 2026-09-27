@@ -135,18 +135,33 @@ func ToolEfficiencyFactorForVersion(perCase []protocol.CaseScore, benchVersion i
 	return toolEfficiencyFactorWith(perCase, legacyEffParams)
 }
 
-// memoryWriteCategory reports whether a memory case's INTENDED work is a memory
-// write, so a save/update/delete call on it is not an over-call.
+// memoryWriteCategory reports whether a memory case's INTENDED work is a
+// lifecycle memory write, so the whole case sits outside the over-call rate.
 //
 // gen.QTLifecycleWrite is the pre-v8 lifecycle-chain write. It is unreachable
 // from v8 on: the lifecycle suite is not built at all above v8
 // (gen.generateMemorySuite skips buildLifecycle), the v3 cross-user lifecycle
 // probe is gated `< BenchVersionV8`, and gen.removeV8LegacyWriteCases strips any
 // residual write-family case from the staged set. So from v8 the exclusion
-// matched nothing, while gen.QTDeclarativeAck — the live category whose whole
-// point is that the user states a value in-turn for the harness to keep —
-// counted every save_memory call as an over-call and charged a competent harness
-// the bounded penalty for doing the case's own work.
+// matches nothing; the live write-shaped category is handled per call by
+// declarativeMemoryWrite.
+func memoryWriteCategory(category string) bool {
+	return category == gen.QTLifecycleWrite
+}
+
+// memoryWriteTools are the catalog's memory-write tools.
+var memoryWriteTools = map[string]bool{
+	"save_memory":   true,
+	"update_memory": true,
+	"delete_memory": true,
+}
+
+// declarativeMemoryWrite reports whether call is authorized persistence on a
+// memory case rather than an over-call. gen.QTDeclarativeAck is the case where
+// the user states a value in-turn for the harness to keep, so a save_memory /
+// update_memory / delete_memory call there is the case's own work. Only those
+// calls qualify: the case stays in the rate, and any other non-memory call on it
+// (set_theme, gmail_send, ...) is still an unrelated action and still counts.
 //
 // The repair is gated at v13 rather than applied from v8. Widening it to v8
 // would change the composite gate a v8..v12 transcript scores to, i.e. it would
@@ -154,27 +169,20 @@ func ToolEfficiencyFactorForVersion(perCase []protocol.CaseScore, benchVersion i
 // was scored, which is exactly what the frozen-contract rule forbids. Whether to
 // repair v8..v12 retrospectively is a fairness/backfill decision: making it is a
 // one-line change to the version bound below, plus a rescore.
-func memoryWriteCategory(category string, benchVersion int) bool {
-	switch category {
-	case gen.QTLifecycleWrite:
-		return true
-	case gen.QTDeclarativeAck:
-		return benchVersion >= protocol.BenchVersionV13
-	default:
-		return false
-	}
+func declarativeMemoryWrite(category, call string, benchVersion int) bool {
+	return category == gen.QTDeclarativeAck && benchVersion >= protocol.BenchVersionV13 && memoryWriteTools[call]
 }
 
 // memoryOverCallFactorWith is MemoryOverCallFactor with an explicit max penalty.
 func memoryOverCallFactorWith(perCase []protocol.CaseScore, maxPenalty float64, benchVersion int) float64 {
 	observed, overCalled := 0, 0
 	for _, cs := range perCase {
-		if cs.Kind != protocol.KindMemory || !cs.Observed || memoryWriteCategory(cs.Category, benchVersion) {
+		if cs.Kind != protocol.KindMemory || !cs.Observed || memoryWriteCategory(cs.Category) {
 			continue
 		}
 		observed++
 		for _, name := range cs.Called {
-			if !memoryTools[name] {
+			if !memoryTools[name] && !declarativeMemoryWrite(cs.Category, name, benchVersion) {
 				overCalled++
 				break
 			}
