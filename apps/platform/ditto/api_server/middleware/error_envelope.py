@@ -504,7 +504,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         _request: Request, _exc: ScreenResultConstraintError
     ) -> JSONResponse:
         # Logged with its attempt and constraint where the verdict was refused.
-        return _envelope_response(
+        return envelope_response(
             409,
             ERROR_CODE_SCREEN_RESULT_CONSTRAINT_VIOLATION,
             "result-constraint-violation: verdict was not applied",
