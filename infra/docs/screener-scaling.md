@@ -22,12 +22,14 @@ controller:
    capacity when the primary is not ready;
 6. scales GCE down only after GCE-owned leases finish.
 
-`SCREENING=0` (`screening_concurrency=0`) on a ready primary is an operator
-closure, not an outage: it is a global full stop recorded as
+`SCREENING=0` (`screening_concurrency=0`) on the primary is an operator closure,
+not an outage: it is a global full stop recorded as
 `HETZNER_PRIMARY_ADMISSION_CLOSED`, and GCE does not overflow it regardless of
-backlog or `gce_overflow_enabled`. Reopening screening needs a deliberate
+backlog, `gce_overflow_enabled`, or the host's readiness and heartbeat, so a
+host health failure cannot reopen screening. Reopening needs a deliberate
 `screening_concurrency >= 1` activation on the primary. Explicit GCP-first
-provider routing is a separate operator decision and still takes precedence.
+provider routing is a separate operator decision, takes precedence, and is the
+only outage failover for a closed primary.
 
 Production uses `['hetzner', 'gcp']` for build, runtime smoke, and source review.
 The second entry means that separate GCE workers may claim still-unclaimed
