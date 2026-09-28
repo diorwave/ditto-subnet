@@ -194,7 +194,12 @@ class CapacityDecisionTests(unittest.TestCase):
         target, reason = gce_overflow_target(
             demand=Demand(runnable=7, active=0, desired=2),
             routing=routing,
-            primary_node={"status": "active", "ready": False},
+            primary_node={
+                "status": "active",
+                "ready": False,
+                "admission_open": True,
+                "screening_concurrency": 4,
+            },
             jobs_per_slot=6,
             global_cap=6,
         )
@@ -264,17 +269,27 @@ class CapacityDecisionTests(unittest.TestCase):
                 self.assertEqual(target, 0)
                 self.assertEqual(reason, "HETZNER_PRIMARY_ADMISSION_CLOSED")
 
-    def test_unready_open_or_unknown_primary_is_a_host_failure(self) -> None:
-        for primary in (
-            {
+    def test_unready_open_primary_is_a_host_failure(self) -> None:
+        target, reason = gce_overflow_target(
+            demand=Demand(runnable=24, active=0, desired=4),
+            routing=_overflow_routing(),
+            primary_node={
                 "status": "active",
                 "ready": False,
                 "admission_open": True,
                 "screening_concurrency": 4,
             },
-            {"status": "active", "ready": False},
-            None,
-        ):
+            jobs_per_slot=6,
+            global_cap=6,
+        )
+
+        self.assertEqual(target, 4)
+        self.assertEqual(reason, "HETZNER_PRIMARY_UNAVAILABLE")
+
+    def test_unknown_primary_fails_closed(self) -> None:
+        # An omitted primary row (or a failed inventory read) and a row without
+        # its admission setting cannot rule out the operator stop.
+        for primary in (None, {"status": "active", "ready": False}):
             with self.subTest(primary=primary):
                 target, reason = gce_overflow_target(
                     demand=Demand(runnable=24, active=0, desired=4),
@@ -284,8 +299,38 @@ class CapacityDecisionTests(unittest.TestCase):
                     global_cap=6,
                 )
 
-                self.assertEqual(target, 4)
-                self.assertEqual(reason, "HETZNER_PRIMARY_UNAVAILABLE")
+                self.assertEqual(target, 0)
+                self.assertEqual(reason, "HETZNER_PRIMARY_UNKNOWN")
+
+    def test_reconcile_never_overflows_without_the_primary_inventory(self) -> None:
+        def failed_read() -> dict[str, Any]:
+            raise ControllerError("Platform node readiness response is invalid")
+
+        for label, node_states in (
+            ("inventory-read-failure", failed_read),
+            ("omitted-primary-row", lambda: {"other-node": {"status": "active"}}),
+        ):
+            with self.subTest(label), TemporaryDirectory() as directory:
+                platform = SimpleNamespace(
+                    demand=lambda **_kwargs: Demand(runnable=24, active=0, desired=4),
+                    provider_routing=_overflow_routing,
+                    node_states=node_states,
+                    renew=lambda snapshot: snapshot,
+                    fence=lambda **_kwargs: None,
+                )
+                gce = _GCE()
+                with (
+                    patch(
+                        "screener_capacity.controller.PlatformControl",
+                        return_value=platform,
+                    ),
+                    patch("screener_capacity.controller.GCEFleet", return_value=gce),
+                ):
+                    snapshot = reconcile(_settings(Path(directory)))
+
+                self.assertEqual(snapshot["gce_target"], 0)
+                self.assertEqual(snapshot["fallback_reason"], "HETZNER_PRIMARY_UNKNOWN")
+                self.assertEqual(gce.resized, [])
 
     def test_admission_closed_falls_back_to_concurrency_when_field_missing(
         self,

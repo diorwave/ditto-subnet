@@ -29,7 +29,11 @@ backlog, `gce_overflow_enabled`, or the host's readiness and heartbeat, so a
 host health failure cannot reopen screening. Reopening needs a deliberate
 `screening_concurrency >= 1` activation on the primary. Explicit GCP-first
 provider routing is a separate operator decision, takes precedence, and is the
-only outage failover for a closed primary.
+only outage failover for a closed primary. A primary the controller cannot vouch
+for -- a failed node-inventory read, an omitted primary row, or a row without
+its admission setting -- also fails closed (`HETZNER_PRIMARY_UNKNOWN`), so an
+inventory outage cannot bypass an operator stop. Only a primary known to be
+open but unready is a host failure that overflows to GCE.
 
 Production uses `['hetzner', 'gcp']` for build, runtime smoke, and source review.
 The second entry means that separate GCE workers may claim still-unclaimed

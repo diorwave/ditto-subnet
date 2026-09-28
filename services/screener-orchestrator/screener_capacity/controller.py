@@ -118,14 +118,16 @@ def gce_overflow_target(
     """Choose GCE only for an explicit GCP route, outage, or queue overflow.
 
     Precedence: explicit operator GCP routing wins, and it is the only outage
-    failover for a closed primary. Then a primary whose admission is known to
-    be closed (``admission_open`` false, or ``screening_concurrency == 0`` from a
-    Platform that predates that field) is an operator closure: a global full
-    stop that GCE never overflows, whatever the backlog, ``gce_overflow_enabled``,
-    or the host's readiness and heartbeat. Only raising the primary's
-    ``screening_concurrency`` to at least one reopens screening. A primary that
-    is unavailable with admission open, or whose admission is unknown, is a host
-    failure and still overflows.
+    failover for a closed or unknown primary. Then a primary whose admission is
+    known to be closed (``admission_open`` false, or ``screening_concurrency ==
+    0`` from a Platform that predates that field) is an operator closure: a
+    global full stop that GCE never overflows, whatever the backlog,
+    ``gce_overflow_enabled``, or the host's readiness and heartbeat. Only raising
+    the primary's ``screening_concurrency`` to at least one reopens screening. A
+    primary the inventory cannot vouch for -- a failed node read, an omitted
+    primary row, or a row without its admission setting -- also fails closed,
+    since the operator stop cannot be ruled out. Only a primary known to be open
+    but unavailable is a host failure that overflows.
     """
     if jobs_per_slot < 1 or global_cap < 0:
         raise ValueError("capacity inputs are out of range")
@@ -160,6 +162,8 @@ def gce_overflow_target(
     cap = min(global_cap, policy.max_instances)
     if cap == 0:
         return 0, "GCE_OVERFLOW_CAPPED_AT_ZERO"
+    if admission_open is None:
+        return 0, "HETZNER_PRIMARY_UNKNOWN"
     if not primary_ready:
         return min(cap, demand.desired), "HETZNER_PRIMARY_UNAVAILABLE"
     threshold = max(
