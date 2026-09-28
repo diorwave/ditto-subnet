@@ -118,7 +118,9 @@ def gce_overflow_target(
     """Choose GCE only for an explicit GCP route, outage, or queue overflow.
 
     Precedence: explicit operator GCP routing wins, and it is the only outage
-    failover for a closed or unknown primary. Then a primary whose admission is
+    failover for a closed or unknown primary; a stale revision that still names
+    the retired Targon provider does not bypass the stop and falls back to GCE
+    only for a primary known to be open. Then a primary whose admission is
     known to be closed (``admission_open`` false, or ``screening_concurrency ==
     0`` from a Platform that predates that field) is an operator closure: a
     global full stop that GCE never overflows, whatever the backlog,
@@ -131,18 +133,6 @@ def gce_overflow_target(
     """
     if jobs_per_slot < 1 or global_cap < 0:
         raise ValueError("capacity inputs are out of range")
-    if any(
-        priority and priority[0] == "targon"
-        for priority in (
-            routing.build_provider_priority,
-            routing.runtime_provider_priority,
-            routing.source_review_provider_priority,
-        )
-    ):
-        return (
-            min(global_cap, demand.desired),
-            "RETIRED_PROVIDER_ROUTING",
-        )
     if routing.gcp_first:
         return min(global_cap, demand.desired), "GCP_SCREENERS_PRIORITIZED_BY_POLICY"
     primary = primary_node or {}
@@ -156,6 +146,19 @@ def gce_overflow_target(
         # A known operator closure holds through any host health change, so a
         # failed heartbeat cannot reopen screening through GCE.
         return 0, "HETZNER_PRIMARY_ADMISSION_CLOSED"
+    if any(
+        priority and priority[0] == "targon"
+        for priority in (
+            routing.build_provider_priority,
+            routing.runtime_provider_priority,
+            routing.source_review_provider_priority,
+        )
+    ):
+        # A stale revision naming the retired provider still falls back to GCE,
+        # but only behind the same operator stop: never for an unknown primary.
+        if admission_open is None:
+            return 0, "HETZNER_PRIMARY_UNKNOWN"
+        return min(global_cap, demand.desired), "RETIRED_PROVIDER_ROUTING"
     policy = routing.overflow
     if not routing.hetzner_first or not policy.enabled:
         return 0, "GCE_OVERFLOW_DISABLED"

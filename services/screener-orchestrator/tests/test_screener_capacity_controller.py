@@ -123,6 +123,17 @@ class _GCE:
         self._target = target
 
 
+def _targon_routing() -> ProviderRouting:
+    """A stale revision still naming the retired Targon provider first."""
+    return ProviderRouting(
+        revision=0,
+        runtime_provider_priority=("targon", "gcp"),
+        source_review_provider_priority=("targon", "gcp"),
+        build_provider_priority=("targon", "gcp"),
+        overflow=OverflowPolicy(True, "subnet-screener-1", 3, 12, 6),
+    )
+
+
 def _overflow_routing(*, enabled: bool = True) -> ProviderRouting:
     return ProviderRouting(
         revision=1,
@@ -672,12 +683,15 @@ class CapacityDecisionTests(unittest.TestCase):
             settings = _settings(Path(directory))
             platform = SimpleNamespace(
                 demand=lambda **_kwargs: Demand(runnable=5, active=0, desired=3),
-                provider_routing=lambda: ProviderRouting(
-                    revision=0,
-                    runtime_provider_priority=("targon", "gcp"),
-                    source_review_provider_priority=("targon", "gcp"),
-                    build_provider_priority=("targon", "gcp"),
-                ),
+                provider_routing=_targon_routing,
+                node_states=lambda: {
+                    "subnet-screener-1": {
+                        "status": "active",
+                        "ready": True,
+                        "admission_open": True,
+                        "screening_concurrency": 4,
+                    }
+                },
                 renew=lambda snapshot: snapshot,
                 fence=lambda **_kwargs: None,
             )
@@ -711,6 +725,38 @@ class CapacityDecisionTests(unittest.TestCase):
                 snapshot = reconcile(settings)
             self.assertEqual(snapshot["gce_target"], 0)
             self.assertEqual(resized, [3, 0])
+
+    def test_targon_first_lanes_never_bypass_the_primary_stop(self) -> None:
+        # A stale routing revision that still names the retired provider must not
+        # reopen screening through GCE while the operator's stop holds or the
+        # primary's admission is unknown.
+        for primary, reason in (
+            (
+                {
+                    "status": "active",
+                    "ready": True,
+                    "admission_open": False,
+                    "screening_concurrency": 0,
+                },
+                "HETZNER_PRIMARY_ADMISSION_CLOSED",
+            ),
+            (
+                {"status": "offline", "ready": False, "screening_concurrency": 0},
+                "HETZNER_PRIMARY_ADMISSION_CLOSED",
+            ),
+            (None, "HETZNER_PRIMARY_UNKNOWN"),
+        ):
+            with self.subTest(primary=primary):
+                target, actual_reason = gce_overflow_target(
+                    demand=Demand(runnable=24, active=0, desired=4),
+                    routing=_targon_routing(),
+                    primary_node=primary,
+                    jobs_per_slot=6,
+                    global_cap=6,
+                )
+
+                self.assertEqual(target, 0)
+                self.assertEqual(actual_reason, reason)
 
     def test_missing_node_inventory_blocks_gce_scale_in_with_live_work(self) -> None:
         with TemporaryDirectory() as directory:

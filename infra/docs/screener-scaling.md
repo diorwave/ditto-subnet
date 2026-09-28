@@ -33,7 +33,10 @@ only outage failover for a closed primary. A primary the controller cannot vouch
 for -- a failed node-inventory read, an omitted primary row, or a row without
 its admission setting -- also fails closed (`HETZNER_PRIMARY_UNKNOWN`), so an
 inventory outage cannot bypass an operator stop. Only a primary known to be
-open but unready is a host failure that overflows to GCE.
+open but unready is a host failure that overflows to GCE. A stale routing
+revision that still names the retired Targon provider first honors the same
+closed and unknown stops; its GCE fallback (`RETIRED_PROVIDER_ROUTING`) applies
+only to a primary known to be open.
 
 Production uses `['hetzner', 'gcp']` for build, runtime smoke, and source review.
 The second entry means that separate GCE workers may claim still-unclaimed
