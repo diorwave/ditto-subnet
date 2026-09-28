@@ -1752,6 +1752,7 @@ async def _verified_v13_court_clear(
     if (
         revision is None
         or revision.checksum != attempt.review_settings_checksum
+        or revision.scope != attempt.review_settings_scope
         or ScreenerReviewSettings.model_validate(revision.settings).adjudicator_mode
         != "enforce"
     ):

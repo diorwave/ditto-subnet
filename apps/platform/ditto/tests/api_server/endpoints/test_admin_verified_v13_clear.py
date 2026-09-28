@@ -381,6 +381,10 @@ def _other_artifact(a: ScreeningAttempt, _: object, __: object) -> None:
     a.artifact_sha256 = "cd" * 32
 
 
+def _other_review_scope(a: ScreeningAttempt, _: object, __: object) -> None:
+    a.review_settings_scope = "other-screener"
+
+
 def _tamper_adjudication(_: object, __: object, e: ScreeningReviewEvent) -> None:
     e.evidence = {
         **e.evidence,
@@ -563,6 +567,15 @@ async def _seed_held_clear(
             None,
             "court clear was not produced under an enforced adjudicator",
             id="shadow-adjudicator",
+        ),
+        pytest.param(
+            13,
+            "clear",
+            "enforce",
+            True,
+            _other_review_scope,
+            "court clear was not produced under an enforced adjudicator",
+            id="other-review-scope",
         ),
         pytest.param(
             13,
