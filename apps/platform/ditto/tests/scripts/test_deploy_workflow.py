@@ -78,13 +78,11 @@ def test_public_proxy_denials_precede_every_proxy_route() -> None:
 def test_public_rate_limit_routes_go_upload_admission_to_python() -> None:
     caddy = CADDYFILE_TEMPLATE.read_text()
     env = (
-        MONOREPO_ROOT
-        / "infra/ansible/roles/platform_app/templates/platform.env.j2"
+        MONOREPO_ROOT / "infra/ansible/roles/platform_app/templates/platform.env.j2"
     ).read_text()
 
     assert (
-        "DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE="
-        "{{ platform_public_rate_limit_per_minute }}"
+        "DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE={{ platform_public_rate_limit_per_minute }}"
     ) in env
     assert (
         "{% if platform_upload_admission_relay_enabled | bool and "
