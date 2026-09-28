@@ -47,10 +47,7 @@ from ditto.db.queries.screening import (
     fail_orphaned_screening_attempts,
     try_acquire_screening_claim_lock,
 )
-from ditto.db.queries.screening_infra_retry import (
-    infra_retry_delay,
-    plan_infra_retries,
-)
+from ditto.db.queries.screening_infra_retry import plan_infra_retries
 from ditto.screener_policy_state import update_effective_screener_policy
 from ditto_screening_protocol import SCREENING_FLOOR_POLICY_VERSION
 
@@ -665,14 +662,15 @@ async def test_claim_releases_heartbeat_proven_orphan_without_expiry_penalty(
     assert agent.status == AgentStatus.SCREENING_FAILED
 
 
-async def test_orphaned_attempt_auto_retries_after_backoff(
+async def test_orphaned_attempt_parks_for_an_operator_retry(
     session: AsyncSession,
 ) -> None:
+    """A worker can drop an attempt for artifact-reachable reasons (#2449)."""
     now = datetime.now(UTC)
     agent = Agent(
         agent_id=uuid4(),
-        miner_hotkey="5HK-orphan-auto-retry",
-        name="orphan-auto-retry",
+        miner_hotkey="5HK-orphan-parks",
+        name="orphan-parks",
         sha256=uuid4().hex * 2,
         status=AgentStatus.SCREENING,
     )
@@ -693,23 +691,14 @@ async def test_orphaned_attempt_auto_retries_after_backoff(
     assert orphan.status == "failed"
     assert orphan.reason_code == "worker-lease-orphaned"
     assert orphan.public_reason is not None
-    assert "retrying automatically" in orphan.public_reason
+    assert "manual retry required" in orphan.public_reason
     assert agent.status == AgentStatus.SCREENING_FAILED
-    assert agent.screening_reason == orphan.public_reason
 
-    delay = infra_retry_delay(1, orphan.attempt_id)
-    assert await _claim(session, now=now + delay - timedelta(seconds=1)) == []
-    claimed = await _claim(session, now=now + delay + timedelta(seconds=1))
-    assert [claimed_agent.agent_id for claimed_agent, _, _ in claimed] == [
-        agent.agent_id
-    ]
+    later = now + timedelta(hours=2)
+    assert await _claim(session, now=later) == []
+    assert agent.status == AgentStatus.SCREENING_FAILED
     assert (
-        await session.scalar(
-            select(ScreeningRetryOverride).where(
-                ScreeningRetryOverride.agent_id == agent.agent_id
-            )
-        )
-        is None
+        agent.agent_id not in (await plan_infra_retries(session, now=later)).decisions
     )
 
 

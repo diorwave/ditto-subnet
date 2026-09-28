@@ -8,13 +8,11 @@ import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 
-from ditto_screener.adjudicator import SourceReviewAdjudicator
 from ditto_screener.config import ScreenerConfig
 from ditto_screener.errors import PlatformError
 from ditto_screener.gate import BuiltImageArtifact, LeaseDeadline
@@ -25,9 +23,6 @@ from ditto_screener.heartbeat import (
 )
 from ditto_screener.l2_review import L2RunResult, L2Usage
 from ditto_screener.policy import (
-    CORE_ONLY_MANIFEST,
-    SOURCE_REVIEW_RETRYABLE_INFRA_CODE,
-    PolicyEngine,
     PolicyEvidence,
     ScreeningDecision,
     ScreeningOutcome,
@@ -1099,38 +1094,6 @@ async def test_screen_one_retryable_failure_preserves_v6_screening_failed_verdic
     assert platform.verdicts[0]["outcome"] == ScreenResultOutcome.RETRYABLE_INFRA
     assert platform.verdicts[0]["private_failure_detail"] is not None
     assert platform.verdicts[0]["private_failure_log_tail"] is not None
-
-
-async def test_unreadable_adjudicator_key_submits_the_stable_retry_code(
-    make_config: Callable[..., ScreenerConfig], tmp_path: Path
-) -> None:
-    key = tmp_path / "adjudicator.key"
-    key.write_text("k" * 32)
-    key.chmod(0o644)
-    adjudication = await SourceReviewAdjudicator(
-        api_key_file=str(key), base_url="https://openrouter.test/api/v1"
-    ).adjudicate(str(tmp_path / "source.tar.gz"), notes=[])
-    assert adjudication.escalation_code == "adjudicator-unavailable"
-    decision = PolicyEngine(CORE_ONLY_MANIFEST).preexecution_source_decision(
-        SourceReviewObservation(
-            ok=False,
-            risk_level=None,
-            finding_digest=None,
-            categories=(),
-            error_code="l2-model-inconclusive",
-            failure_disposition="inconclusive",
-            adjudication=adjudication.model_dump(mode="json"),
-        )
-    )
-    platform = _FakePlatform([])
-    worker = _worker(make_config(), platform, _FakeGate(decision))
-
-    await worker._screen_one(_item(uuid4()), policy_version=SCREENING_POLICY_VERSION)
-
-    assert len(platform.verdicts) == 1
-    verdict = platform.verdicts[0]
-    assert verdict["outcome"] == ScreenResultOutcome.RETRYABLE_INFRA
-    assert verdict["reason_code"] == SOURCE_REVIEW_RETRYABLE_INFRA_CODE
 
 
 async def test_inconclusive_completes_attempt_without_mislabeling_infrastructure(

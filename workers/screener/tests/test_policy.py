@@ -12,7 +12,6 @@ import pytest
 from ditto_screener.policy import (
     _ORACLE_SYSTEM_PROMPT,
     CORE_ONLY_MANIFEST,
-    SOURCE_REVIEW_RETRYABLE_INFRA_CODE,
     AgenticSourceReviewModule,
     BehavioralChallengePackModule,
     BehavioralOracleModule,
@@ -1574,109 +1573,7 @@ def test_unavailable_court_is_retryable_infra_not_a_hold_or_admission() -> None:
         observation
     )
     assert decision.outcome == ScreeningOutcome.RETRYABLE_INFRA
-    assert decision.evidence[0].code == SOURCE_REVIEW_RETRYABLE_INFRA_CODE
-    assert "adjudicator-unavailable" in decision.evidence[0].summary
-
-
-def _source_review_engine() -> PolicyEngine:
-    return PolicyEngine(
-        PolicyManifest(
-            rotation_id="source-review",
-            module_specs=({"kind": "agentic_source_review"},),
-        ),
-        (AgenticSourceReviewModule(module_id="private-source-review"),),
-    )
-
-
-async def _no_challenge(*_args: object) -> ChallengeObservation:
-    raise AssertionError("source-review infrastructure stops before /run")
-
-
-async def test_court_unavailable_uses_stable_retry_code() -> None:
-    async def review() -> SourceReviewObservation:
-        return SourceReviewObservation(
-            ok=False,
-            risk_level=None,
-            finding_digest=None,
-            categories=(),
-            error_code="source-review-timeout",
-            failure_disposition="retryable_infra",
-            adjudication={
-                "decision": "escalate",
-                "reason": "Automated adjudication was unavailable on this node",
-                "escalation_code": "adjudicator-unavailable",
-            },
-        )
-
-    decision = await _source_review_engine().evaluate(_context(_no_challenge, review))
-    assert decision.outcome == ScreeningOutcome.RETRYABLE_INFRA
-    assert [item.code for item in decision.evidence] == [
-        SOURCE_REVIEW_RETRYABLE_INFRA_CODE
-    ]
-    assert "adjudicator-unavailable" in decision.evidence[0].summary
-
-
-async def test_retryable_infra_observation_uses_stable_retry_code() -> None:
-    async def review() -> SourceReviewObservation:
-        return SourceReviewObservation(
-            ok=False,
-            risk_level=None,
-            finding_digest=None,
-            categories=(),
-            error_code="l2-cache-lock-timeout",
-            failure_disposition="retryable_infra",
-        )
-
-    decision = await _source_review_engine().evaluate(_context(_no_challenge, review))
-    assert decision.outcome == ScreeningOutcome.RETRYABLE_INFRA
-    assert [item.code for item in decision.evidence] == [
-        SOURCE_REVIEW_RETRYABLE_INFRA_CODE
-    ]
-    assert "l2-cache-lock-timeout" in decision.evidence[0].summary
-
-
-async def test_missing_review_source_uses_stable_retry_code() -> None:
-    decision = await _source_review_engine().evaluate(_context(_no_challenge))
-    assert decision.outcome == ScreeningOutcome.RETRYABLE_INFRA
-    assert [item.code for item in decision.evidence] == [
-        SOURCE_REVIEW_RETRYABLE_INFRA_CODE
-    ]
-    assert "source-review-unavailable" in decision.evidence[0].summary
-
-
-def test_preexecution_retryable_infra_observation_uses_stable_retry_code() -> None:
-    observation = SourceReviewObservation(
-        ok=False,
-        risk_level=None,
-        finding_digest=None,
-        categories=(),
-        error_code="l2-filenotfounderror",
-        failure_disposition="retryable_infra",
-    )
-    decision = PolicyEngine(CORE_ONLY_MANIFEST).preexecution_source_decision(
-        observation
-    )
-    assert decision.outcome == ScreeningOutcome.RETRYABLE_INFRA
-    assert [item.code for item in decision.evidence] == [
-        SOURCE_REVIEW_RETRYABLE_INFRA_CODE
-    ]
-    assert "l2-filenotfounderror" in decision.evidence[0].summary
-
-
-def test_stable_retry_code_summary_stays_within_the_evidence_bound() -> None:
-    observation = SourceReviewObservation(
-        ok=False,
-        risk_level=None,
-        finding_digest=None,
-        categories=(),
-        error_code="l2-" + "x" * 400,
-        failure_disposition="retryable_infra",
-    )
-    decision = PolicyEngine(CORE_ONLY_MANIFEST).preexecution_source_decision(
-        observation
-    )
-    assert decision.evidence[0].code == SOURCE_REVIEW_RETRYABLE_INFRA_CODE
-    assert len(decision.evidence[0].summary) == 240
+    assert decision.evidence[0].code == "source-review-unavailable"
 
 
 @pytest.mark.parametrize(

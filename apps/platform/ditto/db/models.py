@@ -530,18 +530,6 @@ class ScreenedImageUpload(Base):
     )
 
 
-# ``screening_infra_retry.INFRA_AUTO_RETRY_REASON_CODES`` as the partial index
-# predicate (migration ``6b8e2f4c9a17``).
-_INFRA_FAILED_ATTEMPT_PREDICATE = (
-    "status = 'failed' AND reason_code IN ("
-    "'docker-build-infrastructure', "
-    "'worker-lease-orphaned', "
-    "'worker-platform-request-failed', "
-    "'l2-cache-lock-timeout', "
-    "'source-review-retryable-infra')"
-)
-
-
 class ScreeningAttempt(Base):
     """One claimed, versioned screening lease for a submission."""
 
@@ -648,8 +636,12 @@ class ScreeningAttempt(Base):
         Index(
             "screening_attempts_infra_failed_idx",
             "finished_at",
-            postgresql_where=text(_INFRA_FAILED_ATTEMPT_PREDICATE),
-            sqlite_where=text(_INFRA_FAILED_ATTEMPT_PREDICATE),
+            postgresql_where=text(
+                "status = 'failed' AND reason_code = 'docker-build-infrastructure'"
+            ),
+            sqlite_where=text(
+                "status = 'failed' AND reason_code = 'docker-build-infrastructure'"
+            ),
         ),
         Index(
             "screening_attempts_one_running_idx",
