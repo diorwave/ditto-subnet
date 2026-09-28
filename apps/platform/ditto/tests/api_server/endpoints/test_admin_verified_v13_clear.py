@@ -418,6 +418,95 @@ def _resolved(_: object, q: ScreeningQuarantine, __: object) -> None:
 Edit = Callable[[ScreeningAttempt, ScreeningQuarantine, ScreeningReviewEvent], None]
 
 
+async def _seed_held_clear(
+    session_maker: async_sessionmaker[AsyncSession],
+    *,
+    policy_version: int = 13,
+    decision: str = "clear",
+    adjudicator_mode: AdjudicatorMode = "enforce",
+    receipt: bool = True,
+    edit: Edit | None = None,
+) -> tuple[UUID, UUID]:
+    """Seed one held court decision exactly as the verdict path stores it."""
+    agent_id = await _seed_agent(session_maker, status=AgentStatus.QUARANTINED)
+    adjudication = _adjudication(decision, receipt=receipt)
+    attempt_id = uuid4()
+    quarantine_id = uuid4()
+    now = datetime.now(UTC)
+    async with session_maker() as session, session.begin():
+        revision_id, checksum = await _settings_revision(session, adjudicator_mode)
+        attempt = ScreeningAttempt(
+            attempt_id=attempt_id,
+            agent_id=agent_id,
+            artifact_sha256=_SHA256,
+            screener_hotkey=_SCREENER_HOTKEY,
+            policy_version=policy_version,
+            status="quarantined",
+            started_at=now - timedelta(minutes=2),
+            finished_at=now - timedelta(minutes=1),
+            deadline=now + timedelta(minutes=8),
+            review_settings_revision=revision_id,
+            review_settings_instance_id="ditto-screener-prod",
+            review_settings_scope="*",
+            review_settings_checksum=checksum,
+        )
+        quarantine = ScreeningQuarantine(
+            quarantine_id=quarantine_id,
+            agent_id=agent_id,
+            attempt_id=attempt_id,
+            screener_hotkey=_SCREENER_HOTKEY,
+            policy_version=policy_version,
+            manifest_digest="12" * 32,
+            reason_code=f"adjudicated-source-review-{decision}",
+            evidence=[
+                {"module_id": "luna-source-review", "code": _AWAITING, "summary": "."},
+                {
+                    "module_id": "adjudication",
+                    "code": f"adjudicated-source-review-{decision}",
+                    "summary": adjudication.reason,
+                    "digest": adjudication.canonical_digest(),
+                },
+            ],
+            court_completion_receipt=(
+                _RECEIPT.model_dump(mode="json") if receipt else None
+            ),
+            status="active",
+        )
+        event = ScreeningReviewEvent(
+            event_id=uuid4(),
+            agent_id=agent_id,
+            attempt_id=attempt_id,
+            quarantine_id=quarantine_id,
+            event_kind="automated",
+            artifact_sha256=_SHA256,
+            policy_version=policy_version,
+            actor=f"screener:{_SCREENER_HOTKEY}",
+            outcome="quarantine",
+            effective_decision="hold",
+            prior_agent_status=AgentStatus.SCREENING,
+            next_agent_status=AgentStatus.QUARANTINED,
+            evidence={
+                "adjudication_digest": adjudication.canonical_digest(),
+                "adjudication": adjudication.model_dump(mode="json"),
+                "completion_receipt_signature": (
+                    _receipt_signature(agent_id, attempt_id, adjudication)
+                    if receipt
+                    else None
+                ),
+            },
+            created_at=now,
+        )
+        if edit is not None:
+            edit(attempt, quarantine, event)
+        session.add(attempt)
+        await session.flush()
+        session.add(quarantine)
+        await session.flush()
+        session.add(event)
+
+    return agent_id, quarantine_id
+
+
 @pytest.mark.parametrize(
     ("policy_version", "decision", "adjudicator_mode", "receipt", "edit", "message"),
     [
@@ -541,81 +630,14 @@ async def test_release_refuses_anything_but_a_verified_v13_clear(
     edit: Edit | None,
     message: str,
 ) -> None:
-    agent_id = await _seed_agent(session_maker, status=AgentStatus.QUARANTINED)
-    adjudication = _adjudication(decision, receipt=receipt)
-    attempt_id = uuid4()
-    quarantine_id = uuid4()
-    now = datetime.now(UTC)
-    async with session_maker() as session, session.begin():
-        revision_id, checksum = await _settings_revision(session, adjudicator_mode)
-        attempt = ScreeningAttempt(
-            attempt_id=attempt_id,
-            agent_id=agent_id,
-            artifact_sha256=_SHA256,
-            screener_hotkey=_SCREENER_HOTKEY,
-            policy_version=policy_version,
-            status="quarantined",
-            started_at=now - timedelta(minutes=2),
-            finished_at=now - timedelta(minutes=1),
-            deadline=now + timedelta(minutes=8),
-            review_settings_revision=revision_id,
-            review_settings_instance_id="ditto-screener-prod",
-            review_settings_scope="*",
-            review_settings_checksum=checksum,
-        )
-        quarantine = ScreeningQuarantine(
-            quarantine_id=quarantine_id,
-            agent_id=agent_id,
-            attempt_id=attempt_id,
-            screener_hotkey=_SCREENER_HOTKEY,
-            policy_version=policy_version,
-            manifest_digest="12" * 32,
-            reason_code=f"adjudicated-source-review-{decision}",
-            evidence=[
-                {"module_id": "luna-source-review", "code": _AWAITING, "summary": "."},
-                {
-                    "module_id": "adjudication",
-                    "code": f"adjudicated-source-review-{decision}",
-                    "summary": adjudication.reason,
-                    "digest": adjudication.canonical_digest(),
-                },
-            ],
-            court_completion_receipt=(
-                _RECEIPT.model_dump(mode="json") if receipt else None
-            ),
-            status="active",
-        )
-        event = ScreeningReviewEvent(
-            event_id=uuid4(),
-            agent_id=agent_id,
-            attempt_id=attempt_id,
-            quarantine_id=quarantine_id,
-            event_kind="automated",
-            artifact_sha256=_SHA256,
-            policy_version=policy_version,
-            actor=f"screener:{_SCREENER_HOTKEY}",
-            outcome="quarantine",
-            effective_decision="hold",
-            prior_agent_status=AgentStatus.SCREENING,
-            next_agent_status=AgentStatus.QUARANTINED,
-            evidence={
-                "adjudication_digest": adjudication.canonical_digest(),
-                "adjudication": adjudication.model_dump(mode="json"),
-                "completion_receipt_signature": (
-                    _receipt_signature(agent_id, attempt_id, adjudication)
-                    if receipt
-                    else None
-                ),
-            },
-            created_at=now,
-        )
-        if edit is not None:
-            edit(attempt, quarantine, event)
-        session.add(attempt)
-        await session.flush()
-        session.add(quarantine)
-        await session.flush()
-        session.add(event)
+    agent_id, quarantine_id = await _seed_held_clear(
+        session_maker,
+        policy_version=policy_version,
+        decision=decision,
+        adjudicator_mode=adjudicator_mode,
+        receipt=receipt,
+        edit=edit,
+    )
 
     refused = await client.post(
         _release_url(quarantine_id), headers=_ADMIN_HEADERS, json=_release_body()
@@ -636,3 +658,40 @@ async def test_release_refuses_anything_but_a_verified_v13_clear(
                 ScreeningReviewEvent.event_kind == "manual",
             )
         )
+
+
+async def test_release_refuses_a_hold_superseded_by_a_later_attempt(
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    agent_id, quarantine_id = await _seed_held_clear(session_maker)
+    now = datetime.now(UTC)
+    async with session_maker() as session, session.begin():
+        # Same artifact, screened again after the hold was recorded.
+        session.add(
+            ScreeningAttempt(
+                attempt_id=uuid4(),
+                agent_id=agent_id,
+                artifact_sha256=_SHA256,
+                screener_hotkey=_SCREENER_HOTKEY,
+                policy_version=13,
+                status="expired",
+                started_at=now,
+                finished_at=now,
+                deadline=now,
+            )
+        )
+
+    refused = await client.post(
+        _release_url(quarantine_id), headers=_ADMIN_HEADERS, json=_release_body()
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["message"] == (
+        "a later screening attempt supersedes this hold"
+    )
+    async with session_maker() as session:
+        agent = await session.get(Agent, agent_id)
+        retained = await session.get(ScreeningQuarantine, quarantine_id)
+        assert agent is not None and agent.status == AgentStatus.QUARANTINED
+        assert retained is not None and retained.status == "active"

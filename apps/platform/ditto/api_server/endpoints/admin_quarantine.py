@@ -1869,6 +1869,21 @@ async def _verified_clear_release_target(
             return quarantine, agent, released["verified_v13_court_clear"], True
     if quarantine.status != "active" or agent.status != AgentStatus.QUARANTINED:
         raise HTTPException(status_code=409, detail="quarantine is not active")
+    # Only the hold on the agent's latest attempt may be released: an older
+    # court clear must never release a quarantine from a later screen, even of
+    # the same artifact. Same ordering as the claim path's latest attempt.
+    latest_attempt_id = await session.scalar(
+        select(ScreeningAttempt.attempt_id)
+        .where(ScreeningAttempt.agent_id == agent.agent_id)
+        .order_by(
+            ScreeningAttempt.started_at.desc(), ScreeningAttempt.attempt_id.desc()
+        )
+        .limit(1)
+    )
+    if quarantine.attempt_id is None or quarantine.attempt_id != latest_attempt_id:
+        raise HTTPException(
+            status_code=409, detail="a later screening attempt supersedes this hold"
+        )
     return (
         quarantine,
         agent,
