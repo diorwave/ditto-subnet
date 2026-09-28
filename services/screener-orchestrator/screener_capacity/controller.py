@@ -115,7 +115,12 @@ def gce_overflow_target(
     jobs_per_slot: int,
     global_cap: int,
 ) -> tuple[int, str]:
-    """Choose GCE only for an explicit GCP route, outage, or queue overflow."""
+    """Choose GCE only for an explicit GCP route, outage, or queue overflow.
+
+    A ready primary with closed admission (``screening_concurrency == 0``) is
+    an outage for waiting work, not base load. ``gce_overflow_enabled=false``
+    is the only full stop for screening.
+    """
     if jobs_per_slot < 1 or global_cap < 0:
         raise ValueError("capacity inputs are out of range")
     if any(
@@ -145,6 +150,14 @@ def gce_overflow_target(
         return min(cap, demand.desired), "HETZNER_PRIMARY_UNAVAILABLE"
     assert primary_node is not None
     screening_concurrency = int(primary_node.get("screening_concurrency", 0))
+    admission_open = primary_node.get("admission_open")
+    if admission_open is None:
+        # Platform releases before admission_open still report concurrency.
+        admission_open = screening_concurrency > 0
+    if not admission_open:
+        if demand.runnable > 0:
+            return min(cap, demand.desired), "HETZNER_PRIMARY_ADMISSION_CLOSED"
+        return 0, "HETZNER_PRIMARY_ADMISSION_CLOSED"
     threshold = max(
         policy.min_backlog,
         screening_concurrency * policy.backlog_multiplier,
@@ -782,6 +795,15 @@ def reconcile(settings: Settings) -> dict[str, Any]:
                 "detail": f"GCE target {current_target} -> {target}",
             }
         )
+    last_reason = _load_state(settings.state_file).get("last_fallback_reason")
+    if isinstance(last_reason, str) and last_reason != reason:
+        events.append(
+            {
+                "event_type": "fallback_reason_changed",
+                "provider": "hetzner",
+                "detail": f"{last_reason} -> {reason}",
+            }
+        )
     prior_provider_ready, prior_error_code, prior_error_at = _provider_state(
         settings.state_file
     )
@@ -810,6 +832,11 @@ def reconcile(settings: Settings) -> dict[str, Any]:
     # Lease acquisition/renewal fences every mutation below.  A concurrent
     # epoch receives 409 while the existing lease remains live.
     platform.renew(snapshot)
+    # The renewed snapshot delivered any reason-change event; record the
+    # reason now so a later failed mutation cannot repeat the transition.
+    state = _load_state(settings.state_file)
+    state["last_fallback_reason"] = reason
+    _write_state(settings.state_file, state)
     watchdog_enabled = target > 0
     if target == current_target:
         try:

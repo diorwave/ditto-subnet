@@ -56,3 +56,5 @@ Terraform. Protected apply must not replace the VMs.
 ## Capacity invariants
 
 The enrolled Hetzner worker is primary. GCE normally targets zero and supplies bounded backlog or outage capacity. The controller must be fenced and count pending workers; an independently fenced GCP watchdog may add fallback capacity only when backlog exists and the primary heartbeat is stale. Fail closed when provider isolation cannot be proven.
+
+`SCREENING=0` on the primary closes its admission, so the controller overflows waiting work to GCE (`HETZNER_PRIMARY_ADMISSION_CLOSED`); `gce_overflow_enabled=false` is the only full stop for screening.

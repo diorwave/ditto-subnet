@@ -19,7 +19,8 @@ controller:
 4. keeps GCE at zero while the primary is ready and unclaimed backlog is at or
    below `max(min_backlog, screening_concurrency * backlog_multiplier)`;
 5. adds only residual GCE capacity above that threshold, or full bounded GCE
-   capacity when the primary is not ready;
+   capacity when the primary is not ready or its admission is closed
+   (`screening_concurrency=0`) while work waits;
 6. scales GCE down only after GCE-owned leases finish.
 
 Production uses `['hetzner', 'gcp']` for build, runtime smoke, and source review.

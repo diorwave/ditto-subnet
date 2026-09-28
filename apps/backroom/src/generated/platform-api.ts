@@ -26252,7 +26252,7 @@ export interface components {
              * Reason
              * @enum {string}
              */
-            reason: "controller_fresh" | "controller_stale" | "controller_missing" | "provider_not_ready";
+            reason: "controller_fresh" | "controller_stale" | "controller_missing" | "provider_not_ready" | "primary_admission_closed";
         };
         /**
          * PublicScreeningAttempt
@@ -29280,6 +29280,11 @@ export interface components {
         ScreenerControllerNodeState: {
             /** Active Lease */
             active_lease: boolean;
+            /**
+             * Admission Open
+             * @default true
+             */
+            admission_open: boolean;
             /** Heartbeat Seen At */
             heartbeat_seen_at?: string | null;
             /** Image Reference */
