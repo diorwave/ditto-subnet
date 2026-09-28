@@ -10,6 +10,7 @@
 - name: Require {{ required_group }} to resolve to at least one host
   hosts: localhost:all
   gather_facts: false
+  tags: always
   tasks:
     - name: Fail when {{ required_group }} resolves to no hosts
       run_once: true
