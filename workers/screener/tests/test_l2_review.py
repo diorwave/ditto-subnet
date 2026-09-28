@@ -40,6 +40,7 @@ from ditto_screener.l2_review import (
     IsolatedCodingHarness,
     L2AuditJournal,
     L2InconclusiveError,
+    L2LeaseBudgetExhausted,
     L2RunResult,
     L2Usage,
     LayeredSourceReviewAgent,
@@ -216,7 +217,7 @@ def test_starter_provenance_generator_ignores_untracked_build_outputs(
 def test_causal_basis_prefers_reconstructed_generator_over_downstream_effects() -> None:
     assert l2_prompt_revision(11) == "l2-terra-source-review-v37-policy-v11"
     assert l2_prompt_revision(10) == "l2-terra-source-review-v37-policy-v10"
-    assert L2_DOSSIER_REVISION == "language-neutral-source-v14"
+    assert L2_DOSSIER_REVISION == "language-neutral-source-v15"
     assert l2_cause_prompt_revision(11) == "l3-sol-violation-cause-v27-policy-v11"
     assert l2_cause_tiebreaker_prompt_revision(11) == (
         "l3-sol-cause-disagreement-v7-policy-v11"
@@ -3148,7 +3149,23 @@ async def test_partial_dossier_can_prove_violation_but_never_clear(
     assert result.clearance_path == "l2_violation"
 
 
-async def test_partial_dossier_safe_consensus_cannot_clear(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inventory_gap", [None, "failed", "omitted"])
+async def test_partial_dossier_safe_consensus_cannot_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inventory_gap: str | None
+) -> None:
+    harness = _FakeHarness() if inventory_gap else _PartialHarness()
+    if inventory_gap:
+        # Failure alone must block clearance even if truncation semantics change.
+        inventory = (
+            {"binary_analysis": [{"analysis_failed": True}]}
+            if inventory_gap == "failed"
+            else {"binary_analysis": [], "opaque_truncated": True}
+        )
+        monkeypatch.setattr(
+            TarSourceRepository,
+            "inventory",
+            lambda _self: json.dumps(inventory),
+        )
     source = "fn main() { serve(); }\nfn serve() {}"
     archive, artifact_sha = _tar(tmp_path, source)
     digest = hashlib.sha256(source.encode()).hexdigest()
@@ -3171,7 +3188,7 @@ async def test_partial_dossier_safe_consensus_cannot_clear(tmp_path: Path) -> No
         requests += 1
         return _response([_tool_call(str(requests), "submit_l2_review", safe)])
 
-    result = await _sol_agent(tmp_path, _PartialHarness(), handler).review(
+    result = await _sol_agent(tmp_path, harness, handler).review(
         str(archive),
         artifact_sha256=artifact_sha,
         attempt_id=ATTEMPT,
@@ -3184,6 +3201,41 @@ async def test_partial_dossier_safe_consensus_cannot_clear(tmp_path: Path) -> No
     assert result.observation.failure_disposition == "retryable_infra"
     assert result.observation.error_code == "l3-adjudicator-incomplete"
     assert not result.dossier_complete
+
+
+@pytest.mark.parametrize("deep_nesting", [False, True])
+async def test_dossier_incomplete_when_binary_analysis_fails(
+    tmp_path: Path, deep_nesting: bool
+) -> None:
+    header = (
+        b"[" * 1_000_000 + b"]" * 1_000_000
+        if deep_nesting
+        else b'{"weight":{"data_offsets":[0,' + b"9" * 5000 + b"]}}"
+    )
+    model = len(header).to_bytes(8, "little") + header + b"\xff" * 16
+    archive_path = tmp_path / "hostile.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("models/hostile.weights")
+        info.size = len(model)
+        archive.addfile(info, io.BytesIO(model))
+    repository = TarSourceRepository(str(archive_path))
+    agent = _sol_agent(tmp_path, _FakeHarness(), None)
+    dossier, tools, complete, _ = await agent._build_dossier(
+        tmp_path,
+        repository,
+        artifact_sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        l1_observation=_l1(),
+        policy_version=SCREENING_POLICY_VERSION,
+        deadline=None,
+    )
+    assert not complete
+    assert tools == l2_review._DOSSIER_ANALYZERS
+    inventory = dossier["bounded_source_inventory"]
+    assert isinstance(inventory, dict)
+    entry = inventory["binary_analysis"][0]
+    assert entry["analysis_failed"] is True
+    assert entry["analysis_truncated"] is True
+    assert entry["format_confidence"] == "low"
 
 
 @pytest.mark.parametrize("recovers", [False, True])
@@ -4315,6 +4367,189 @@ async def test_partial_exploratory_tool_requires_correction_before_submission(
         and "search" in json.loads(item.get("output", "{}")).get("message", "")
         for item in corrected_items
     )
+
+
+class _FailingExploratoryHarness(_FakeHarness):
+    """Dossier analyzers succeed; exploratory calls return ``outputs`` in turn."""
+
+    supports_shell = True
+
+    def __init__(self, *outputs: str | Exception) -> None:
+        super().__init__()
+        self._outputs = list(outputs)
+
+    async def run(
+        self,
+        _workspace: Path,
+        command: str,
+        _arguments: dict[str, object],
+        *,
+        deadline: float | None = None,
+    ) -> str:
+        del deadline
+        self.calls.append(command)
+        if command not in {"shell", "search"}:
+            return "{}"
+        output = self._outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+
+def _analyst_violation(source: str) -> dict[str, object]:
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    return {
+        "disposition": "violation",
+        "risk_level": "medium",
+        "confidence": 0.91,
+        "resolution_basis": "hidden_model_bypass",
+        "categories": ["provider_bypass"],
+        "analyzed_files": [{"path": "src/main.rs", "sha256": digest}],
+        "evidence": [
+            {
+                "path": "src/main.rs",
+                "line": 2,
+                "file_sha256": digest,
+                "category": "provider_bypass",
+                "role": "effect",
+            }
+        ],
+        "causal_path": [
+            {"path": "src/main.rs", "line": 1, "role": "trigger"},
+            {"path": "src/main.rs", "line": 2, "role": "effect"},
+        ],
+        "summary": "sanitized",
+    }
+
+
+async def test_trajectory_recovers_after_bounded_shell_error(tmp_path: Path) -> None:
+    source = "fn main() { bypass(); }\nfn bypass() {}"
+    archive, artifact_sha = _tar(tmp_path, source)
+    bounded = json.dumps(
+        {
+            "error": "shell-output-bounded",
+            "exit_code": None,
+            "stderr": "",
+            "stdout": "src/main.rs:1:bypass\n",
+            "truncated": True,
+        }
+    )
+    clean = json.dumps(
+        {"exit_code": 0, "stderr": "", "stdout": "src/main.rs\n", "truncated": False}
+    )
+    harness = _FailingExploratoryHarness(bounded, clean)
+    shell = {"script": "rg -n bypass ."}
+    submitted = _analyst_violation(source)
+    request_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_payloads.append(json.loads(request.content))
+        step = len(request_payloads)
+        if step in {1, 3}:
+            output = [_tool_call(str(step), "shell", shell)]
+        else:
+            output = [_tool_call(str(step), "submit_l2_review", submitted)]
+        return _response(output)
+
+    result = await _sol_agent(tmp_path, harness, handler).review(
+        str(archive),
+        artifact_sha256=artifact_sha,
+        attempt_id=ATTEMPT,
+        l1_observation=_l1(),
+        deadline=None,
+    )
+
+    assert len(request_payloads) == 4
+    assert harness.calls.count("shell") == 2
+    assert result.observation.risk_level == "medium"
+    assert result.observation.error_code is None
+    outputs = [
+        json.loads(item["output"])
+        for item in request_payloads[2]["input"]  # type: ignore[union-attr]
+        if item.get("type") == "function_call_output"
+    ]
+    assert outputs[0]["error"] == "shell-output-bounded"
+    # The bounded observation blocks submission until the model retries it.
+    assert outputs[1]["error"] == "submission-contract"
+    assert "shell" in outputs[1]["message"]
+
+
+async def test_trajectory_lease_exhaustion_is_lease_budget_exhausted(
+    tmp_path: Path,
+) -> None:
+    archive, artifact_sha = _tar(tmp_path, "fn main() {}")
+    harness = _FailingExploratoryHarness(
+        L2LeaseBudgetExhausted("L2 analyzer exceeded lease budget")
+    )
+
+    result = await _sol_agent(
+        tmp_path,
+        harness,
+        lambda _request: _response([_tool_call("1", "search", {"query": "x"})]),
+    ).review(
+        str(archive),
+        artifact_sha256=artifact_sha,
+        attempt_id=ATTEMPT,
+        l1_observation=_l1(),
+        deadline=None,
+    )
+
+    assert result.observation.error_code == "l2-lease-budget-exhausted"
+    assert result.observation.failure_disposition == "retryable_infra"
+    assert result.observation.review_audit is None
+    assert result.clearance_path == "l2_retryable_infra"
+
+
+async def test_analyzer_contract_carries_classified_subcode(tmp_path: Path) -> None:
+    archive, artifact_sha = _tar(tmp_path, "fn main() {}")
+    harness = _FailingExploratoryHarness(
+        ValueError("L2 analyzer returned invalid JSON")
+    )
+
+    result = await _sol_agent(
+        tmp_path,
+        harness,
+        lambda _request: _response([_tool_call("1", "search", {"query": "x"})]),
+    ).review(
+        str(archive),
+        artifact_sha256=artifact_sha,
+        attempt_id=ATTEMPT,
+        l1_observation=_l1(),
+        deadline=None,
+    )
+
+    assert result.observation.error_code == "l2-analyzer-contract"
+    assert result.observation.failure_disposition == "retryable_infra"
+    assert result.failure_subcode == "analyzer-invalid-json"
+
+
+async def test_dossier_analyzer_timeout_stays_retryable_infra(tmp_path: Path) -> None:
+    class _SlowDossierHarness(_FakeHarness):
+        async def run(
+            self,
+            _workspace: Path,
+            command: str,
+            _arguments: dict[str, object],
+            *,
+            deadline: float | None = None,
+        ) -> str:
+            del deadline
+            self.calls.append(command)
+            return '{"error":"analyzer-timeout","truncated":true}'
+
+    archive, artifact_sha = _tar(tmp_path, "fn main() {}")
+    result = await _sol_agent(
+        tmp_path, _SlowDossierHarness(), lambda _request: None
+    ).review(
+        str(archive),
+        artifact_sha256=artifact_sha,
+        attempt_id=ATTEMPT,
+        l1_observation=_l1(),
+        deadline=None,
+    )
+
+    assert result.observation.error_code == "l2-analyzer-timeout"
+    assert result.observation.failure_disposition == "retryable_infra"
 
 
 async def test_critic_challenge_keeps_quarantine(tmp_path: Path) -> None:
@@ -6379,6 +6614,60 @@ async def test_integrity_scan_keeps_large_text_incomplete(tmp_path: Path) -> Non
     )
     assert result["truncated"] is True
     assert result["omitted"] == [{"path": "agent.py", "reason": "read_cap"}]
+    assert result["nontext_count"] == 0
+
+
+async def test_stock_kit_dossier_analyzers_are_complete() -> None:
+    starter = ROOT.parent.parent / "miners/dittobench-starter-kit"
+    harness = InProcessAnalyzerHarness()
+    for command in l2_review._DOSSIER_ANALYZERS:
+        output = await harness.run(starter, command, {})
+        assert not l2_review._contains_truncation(json.loads(output)), command
+
+
+async def test_search_accepts_exact_starter_model_on_stock_kit() -> None:
+    starter = ROOT.parent.parent / "miners/dittobench-starter-kit"
+    payload = (starter / "fixtures/models/cross-encoder.onnx").read_bytes()
+    output = await InProcessAnalyzerHarness().run(
+        starter, "search", {"query": "reranker"}
+    )
+    assert not l2_review._analysis_requires_correction(output)
+    result = json.loads(output)
+    assert 0 < len(result["hits"]) < 120
+    assert result["truncated"] is False
+    assert result["omitted_count"] == 0
+    assert result["nontext"] == [
+        {
+            "path": "fixtures/models/cross-encoder.onnx",
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "provenance": "starter_manifest_digest",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "head"),
+    [
+        ("model.onnx", b"\x00"),
+        ("fixtures/models/cross-encoder.onnx", b"\x00model_answer"),
+        ("agent.py", b"model_answer\n\x00"),
+        ("agent.py", b"model_answer\n"),
+    ],
+)
+async def test_search_keeps_unproven_large_file_incomplete(
+    tmp_path: Path, path: str, head: bytes
+) -> None:
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(head + b"x" * (2 * 1024 * 1024))
+    result = json.loads(
+        await InProcessAnalyzerHarness().run(
+            tmp_path, "search", {"query": "model_answer"}
+        )
+    )
+    assert result["truncated"] is True
+    assert result["omitted"] == [{"path": path, "reason": "read_cap"}]
     assert result["nontext_count"] == 0
 
 

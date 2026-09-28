@@ -2,6 +2,53 @@
 
 <!-- version list -->
 
+## v0.321.8 (2026-09-28)
+
+### Bug Fixes
+
+- **dashboard**: Rank miners within their eligible tier
+  ([#2416](https://github.com/ditto-assistant/ditto-subnet/pull/2416),
+  [`b6ab70d`](https://github.com/ditto-assistant/ditto-subnet/commit/b6ab70dba44077efaf8adc4ad49d761fb66a7b6a))
+
+- **screener**: Contain hostile binary analysis failures
+  ([#2492](https://github.com/ditto-assistant/ditto-subnet/pull/2492),
+  [`363022e`](https://github.com/ditto-assistant/ditto-subnet/commit/363022e53024b1dc19bbc394295f1a803090e04f))
+
+- **screener**: Count v13 terminal verdicts in diagnostics
+  ([#2491](https://github.com/ditto-assistant/ditto-subnet/pull/2491),
+  [`fe8d04a`](https://github.com/ditto-assistant/ditto-subnet/commit/fe8d04abd11b0ac30ceae173d2e1c6d832faec86))
+
+- **screener**: Preserve verdicts when shadow telemetry fails
+  ([#2493](https://github.com/ditto-assistant/ditto-subnet/pull/2493),
+  [`c3b2b15`](https://github.com/ditto-assistant/ditto-subnet/commit/c3b2b153ab2e788107a274da1dcca816d50bc139))
+
+- **upload**: Show retry countdowns and preserve duplicate credits
+  ([#2479](https://github.com/ditto-assistant/ditto-subnet/pull/2479),
+  [`5ecf44f`](https://github.com/ditto-assistant/ditto-subnet/commit/5ecf44f8029b49ad1f7d5d56506857654a8150dc))
+
+
+## v0.321.7 (2026-09-28)
+
+### Bug Fixes
+
+- **screener**: Accept the provenance-matched starter model in L2 search
+  ([#2480](https://github.com/ditto-assistant/ditto-subnet/pull/2480),
+  [`a15f028`](https://github.com/ditto-assistant/ditto-subnet/commit/a15f0289fec710c86e9163d94e19016e07cf932e))
+
+- **screener**: Return bounded L2 analyzer failures as observations
+  ([#2481](https://github.com/ditto-assistant/ditto-subnet/pull/2481),
+  [`c521b38`](https://github.com/ditto-assistant/ditto-subnet/commit/c521b38d661c81a2c4f98d6dfaca976c5a7e5ef9))
+
+
+## v0.321.6 (2026-09-28)
+
+### Bug Fixes
+
+- **platform**: Match worker source-review manifest digest
+  ([#2489](https://github.com/ditto-assistant/ditto-subnet/pull/2489),
+  [`1911311`](https://github.com/ditto-assistant/ditto-subnet/commit/19113116e9a99983c2e800274bab3123aaff6674))
+
+
 ## v0.321.5 (2026-09-27)
 
 ### Bug Fixes
