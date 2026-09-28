@@ -423,7 +423,7 @@ describe("admissionRetryLine (#1215)", () => {
         now,
       );
     const head =
-      "A Ditto build infrastructure failure, not a miner failure. It retries automatically with backoff";
+      "A Ditto infrastructure failure, not a miner failure. It retries automatically with backoff";
     // A UTC wall clock, whatever offset the wire timestamp carries.
     expect(line("2099-08-28T10:20:45Z")).toBe(head + ", no earlier than 2099-08-28 10:20 UTC.");
     expect(line("2099-08-28T12:20:00+02:00")).toBe(

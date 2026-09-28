@@ -4164,6 +4164,12 @@ def _public_screening_reason(detail: str, reason_code: str | None = None) -> str
             "is operator-owned and is retried automatically with backoff for a "
             "limited time, then held for an operator retry."
         )
+    if reason_code in INFRA_AUTO_RETRY_REASON_CODES:
+        return (
+            "Screening infrastructure failed before screening completed. This "
+            "is operator-owned and is retried automatically with backoff for a "
+            "limited time, then held for an operator retry."
+        )
     if reason_code == "docker-build" or normalized.startswith("build failed"):
         if (
             "couldn't read" in normalized or "could not read" in normalized
@@ -4904,9 +4910,11 @@ async def submit_result(
         target = AgentStatus.QUARANTINED
         public_reason = "Submission held for anti-cheat review"
     elif payload.outcome == ScreenResultOutcome.RETRYABLE_INFRA:
-        # The wire value is retained for worker compatibility. Policy is now
+        # The wire value is retained for worker compatibility. Policy is
         # fail-closed: the terminal attempt parks until an operator authorizes
-        # one exact retry through Backroom.
+        # one exact retry through Backroom, except a fleet-owned failure in
+        # INFRA_AUTO_RETRY_REASON_CODES, which ``plan_infra_retries`` retries
+        # automatically within its backoff, breaker, and age/streak caps.
         target = AgentStatus.SCREENING_FAILED
         public_reason = (
             _public_screening_reason(payload.detail, payload.reason_code)

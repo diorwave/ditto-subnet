@@ -121,6 +121,9 @@ _DEFERRED_MECHANICAL_REASON = "deferred-mechanical-admission"
 POLICY_ONLY_RESCREEN_REASON = "policy-only-rescreen"
 _ORPHANED_ATTEMPT_REASON_CODE = "worker-lease-orphaned"
 _ORPHANED_ATTEMPT_REASON = (
+    "Screening worker stopped reporting this attempt; retrying automatically"
+)
+_ORPHANED_ATTEMPT_MANUAL_REASON = (
     "Screening worker stopped reporting this attempt; manual retry required"
 )
 # Provider/reviewer failures held on reclaim for ``FAILED_ATTEMPT_RETRY_BACKOFF`` and,
@@ -135,10 +138,6 @@ PROVIDER_BACKOFF_REASON_CODES = (
     "targon-source-review-unavailable",
     "cloudrun-build-unavailable",
     "cloudrun-runtime-unavailable",
-    # The agentic reviewer reported a pre-verdict failure it marked
-    # retryable_infra; immediate reclaim would hot-loop against the same
-    # broken court, so hold the retry briefly before re-queueing.
-    "source-review-retryable-infra",
 )
 # How long a provider-backoff failure waits after its FAILURE before the agent
 # is claimable again, capped by the attempt deadline. Backing off to the full
@@ -432,7 +431,8 @@ async def fail_orphaned_screening_attempts(
     build is positive evidence the attempt is still being worked.
 
     These are infrastructure failures, not inconclusive reviews. Mark them
-    ``failed`` so they retry immediately without consuming the five-expiry
+    ``failed`` so ``plan_infra_retries`` retries them under its backoff, fleet
+    breaker, and age/streak caps, without consuming the five-expiry
     adjudication budget.
     """
     candidates = list(
@@ -557,9 +557,18 @@ async def fail_orphaned_screening_attempts(
         )
         if not observed_after_lock or active_after_lock or build_after_lock:
             continue
+        agent = await session.get(Agent, attempt.agent_id)
+        parks = agent is not None and agent.status == AgentStatus.SCREENING
+        # As for a verdict: only a parked, admitted agent is picked up by the
+        # automatic retry, so only it may be promised one.
+        public_reason = (
+            _ORPHANED_ATTEMPT_REASON
+            if parks and await infra_retry_agent_admitted(session, attempt.agent_id)
+            else _ORPHANED_ATTEMPT_MANUAL_REASON
+        )
         attempt.status = "failed"
         attempt.finished_at = now
-        attempt.public_reason = _ORPHANED_ATTEMPT_REASON
+        attempt.public_reason = public_reason
         attempt.reason_code = _ORPHANED_ATTEMPT_REASON_CODE
         release = await session.scalar(
             select(ScoredPolicyRescreenRelease)
@@ -568,10 +577,9 @@ async def fail_orphaned_screening_attempts(
         )
         if release is not None:
             release.state = "paused"
-        agent = await session.get(Agent, attempt.agent_id)
-        if agent is not None and agent.status == AgentStatus.SCREENING:
+        if parks and agent is not None:
             agent.status = AgentStatus.SCREENING_FAILED
-            agent.screening_reason = _ORPHANED_ATTEMPT_REASON
+            agent.screening_reason = public_reason
             agent.screening_reason_code = _ORPHANED_ATTEMPT_REASON_CODE
         failed += 1
     return failed

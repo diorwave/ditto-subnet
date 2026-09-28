@@ -120,6 +120,7 @@ from ditto.db.queries.screening import (
     MAX_SCREENING_EXPIRIES,
     POLICY_ONLY_RESCREEN_REASON,
 )
+from ditto.db.queries.screening_infra_retry import INFRA_AUTO_RETRY_REASON_CODES
 from ditto.db.queries.tickets import issue_ticket, ticket_attempt_cap
 from ditto.tests.legacy_era import retired_era_writes_allowed
 from ditto_screening_protocol import (
@@ -11565,11 +11566,13 @@ class TestQuarantineReviewContext:
             assert attempt is not None
             assert attempt.reason_code == "source-review-model-response-invalid"
 
-    async def test_docker_build_infrastructure_promises_only_the_automatic_retry(
+    @pytest.mark.parametrize("reason_code", INFRA_AUTO_RETRY_REASON_CODES)
+    async def test_fleet_infrastructure_failure_promises_only_the_automatic_retry(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
+        reason_code: str,
     ) -> None:
         """The miner-facing text must match what the claim path really does."""
         agent_id = await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
@@ -11585,8 +11588,8 @@ class TestQuarantineReviewContext:
                 passed=False,
                 attempt_id=attempt_id,
                 outcome="retryable_infra",
-                reason_code="docker-build-infrastructure",
-                detail="screener error: Docker build infrastructure: daemon down",
+                reason_code=reason_code,
+                detail="screener error: private policy infrastructure unavailable",
             ),
         )
 
@@ -11597,10 +11600,11 @@ class TestQuarantineReviewContext:
             assert refreshed.status == AgentStatus.SCREENING_FAILED
             assert refreshed.screening_reason is not None
             assert "retried automatically" in refreshed.screening_reason
+            assert "manual retry required" not in refreshed.screening_reason
             attempt = await session.get(ScreeningAttempt, attempt_id)
             assert attempt is not None
             assert attempt.status == "failed"
-            assert attempt.reason_code == "docker-build-infrastructure"
+            assert attempt.reason_code == reason_code
             assert attempt.public_reason == refreshed.screening_reason
 
     async def test_withdrawn_agent_is_not_promised_an_automatic_retry(

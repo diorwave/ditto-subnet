@@ -1,9 +1,9 @@
 """Honest fail-once admission state on the public pipeline (issue #1215).
 
 ``admission_retry`` distinguishes parked provider failures, stuck Ditto
-infrastructure, and guarded retries. Only a Docker build infrastructure
-failure promises (and schedules) an automatic retry. ``lane`` names the
-admission lane only where Platform holds evidence for it.
+infrastructure, and guarded retries. Only a fleet-owned failure in
+``INFRA_AUTO_RETRY_REASON_CODES`` promises (and schedules) an automatic retry.
+``lane`` names the admission lane only where Platform holds evidence for it.
 """
 
 from __future__ import annotations
@@ -106,33 +106,6 @@ async def _seed_failed_attempt(
     return attempt_id
 
 
-async def test_source_review_failure_reports_parked_without_retry_time(
-    app: FastAPI, client: httpx.AsyncClient, maker: async_sessionmaker[AsyncSession]
-) -> None:
-    agent_id = await _seed_agent(
-        maker, name="retry-visible", status=AgentStatus.SCREENING_FAILED
-    )
-    now = datetime.now(UTC)
-    finished_at = now - timedelta(minutes=3)
-    await _seed_failed_attempt(
-        maker,
-        agent_id=agent_id,
-        finished_at=finished_at,
-        deadline=now + timedelta(minutes=40),
-        reason_code="source-review-retryable-infra",
-    )
-    _install(app, maker)
-
-    response = await client.get(f"/api/v1/public/agent/{agent_id}/pipeline")
-    assert response.status_code == 200, response.text
-    retry = response.json()["admission_retry"]
-    assert retry is not None
-    assert retry["state"] == "parked"
-    assert retry["attempt_count"] == 1
-    assert retry["last_failure_infrastructure"] is True
-    assert retry["next_retry_at"] is None
-
-
 async def test_operator_override_reports_immediate_eligibility(
     app: FastAPI, client: httpx.AsyncClient, maker: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -193,11 +166,15 @@ async def test_ditto_infrastructure_failure_reports_stuck(
     assert retry["next_retry_at"] is None
 
 
-async def test_docker_build_infrastructure_reports_the_scheduled_automatic_retry(
-    app: FastAPI, client: httpx.AsyncClient, maker: async_sessionmaker[AsyncSession]
+@pytest.mark.parametrize("reason_code", INFRA_AUTO_RETRY_REASON_CODES)
+async def test_infrastructure_failure_reports_the_scheduled_automatic_retry(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    maker: async_sessionmaker[AsyncSession],
+    reason_code: str,
 ) -> None:
     agent_id = await _seed_agent(
-        maker, name="infra-auto", status=AgentStatus.SCREENING_FAILED
+        maker, name=f"infra-auto-{reason_code}", status=AgentStatus.SCREENING_FAILED
     )
     now = datetime.now(UTC)
     finished_at = now - timedelta(minutes=1)
@@ -206,7 +183,7 @@ async def test_docker_build_infrastructure_reports_the_scheduled_automatic_retry
         agent_id=agent_id,
         finished_at=finished_at,
         deadline=now + timedelta(minutes=60),
-        reason_code="docker-build-infrastructure",
+        reason_code=reason_code,
     )
     _install(app, maker)
 
@@ -214,6 +191,7 @@ async def test_docker_build_infrastructure_reports_the_scheduled_automatic_retry
     assert response.status_code == 200, response.text
     retry = response.json()["admission_retry"]
     assert retry["state"] == "retry_queued"
+    assert retry["attempt_count"] == 1
     assert retry["last_failure_infrastructure"] is True
     assert datetime.fromisoformat(retry["next_retry_at"]) == (
         finished_at + infra_retry_delay(1, attempt_id)
@@ -511,10 +489,12 @@ async def test_failed_attempt_reports_the_lane_its_reason_names(
 def test_every_infrastructure_retry_code_names_a_lane() -> None:
     from ditto.api_server.endpoints.public import _ADMISSION_LANE_BY_REASON_CODE
 
+    # A worker that stopped reporting or could not reach Platform may have been
+    # in any lane, so those two codes name none.
     assert set(_ADMISSION_LANE_BY_REASON_CODE) == {
         *PROVIDER_BACKOFF_REASON_CODES,
         *INFRA_AUTO_RETRY_REASON_CODES,
-    }
+    } - {"worker-lease-orphaned", "worker-platform-request-failed"}
 
 
 async def test_queued_submission_reports_no_lane(

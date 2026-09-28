@@ -7211,6 +7211,7 @@ _ADMISSION_LANE_BY_REASON_CODE: dict[str, PublicAdmissionLane] = {
     "cloudrun-runtime-unavailable": "runtime_smoke",
     "targon-source-review-unavailable": "source_review",
     "source-review-retryable-infra": "source_review",
+    "l2-cache-lock-timeout": "source_review",
 }
 
 
@@ -7311,8 +7312,6 @@ async def agent_pipeline(
             )
             if overridden is not None:
                 retry_state = "retry_queued"
-            elif latest_attempt.reason_code == "source-review-retryable-infra":
-                retry_state = "parked"
             elif scheduled is not None and scheduled.state != "capped":
                 # Automatic, bounded retry: the miner sees the earliest start
                 # (per-artifact backoff; the fleet breaker is not consulted on

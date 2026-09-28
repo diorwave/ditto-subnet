@@ -1,8 +1,10 @@
-"""Automatic, bounded retry and a fleet circuit breaker for infrastructure builds.
+"""Automatic, bounded retry and a fleet circuit breaker for infrastructure failures.
 
-A screener that reports ``docker-build-infrastructure`` (Docker daemon, BuildKit,
-or the build host failed; the miner's archive was never judged) parks the agent
-as ``screening_failed``. Unlike the provider codes in
+A screening attempt that fails on fleet-owned infrastructure
+(``INFRA_AUTO_RETRY_REASON_CODES``: the Docker build host, a worker that stopped
+reporting, a worker that could not reach Platform, or the private source-review
+infrastructure; the miner's archive was never judged) parks the agent as
+``screening_failed``. Unlike the provider codes in
 ``PROVIDER_BACKOFF_REASON_CODES`` it is retried without an operator, so this
 module owns three things and nothing else:
 
@@ -74,13 +76,25 @@ from ditto.db.queries.screening_retry import latest_screening_attempt_id
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-# Retried automatically. Deliberately separate from PROVIDER_BACKOFF_REASON_CODES,
-# whose members are held on reclaim AND counted toward the inconclusive park cap.
-# Adding a code here means updating the partial index
-# ``screening_attempts_infra_failed_idx`` (models.py, its migration, and
+# Retried automatically. #1201 made every retry that spends screener capacity an
+# operator decision; these codes are the deliberate exception (#2449). A code
+# belongs here only if the fleet owns the failure and it cannot depend on the
+# artifact: anything a submission could provoke (inconclusive or budget-exhausted
+# reviews, late results, unexpected crashes) stays on the manual retry, or a
+# hostile archive could loop the fleet. Deliberately separate from
+# PROVIDER_BACKOFF_REASON_CODES, whose members are held on reclaim AND counted
+# toward the inconclusive park cap. Adding a code here means updating the partial
+# index ``screening_attempts_infra_failed_idx`` (models.py, a migration, and
 # ``_infra_failure_filters``) in the same change, or the breaker scan silently
 # goes back to a sequential scan under the claim lock.
-INFRA_AUTO_RETRY_REASON_CODES: tuple[str, ...] = ("docker-build-infrastructure",)
+INFRA_AUTO_RETRY_REASON_CODES: tuple[str, ...] = (
+    "docker-build-infrastructure",
+    # ``screening._ORPHANED_ATTEMPT_REASON_CODE`` (that module imports this one).
+    "worker-lease-orphaned",
+    "worker-platform-request-failed",
+    "l2-cache-lock-timeout",
+    "source-review-retryable-infra",
+)
 
 INFRA_RETRY_BASE_BACKOFF = timedelta(minutes=10)
 INFRA_RETRY_MAX_BACKOFF = timedelta(minutes=60)

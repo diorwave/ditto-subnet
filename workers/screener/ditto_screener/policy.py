@@ -78,6 +78,9 @@ _ORIGINALITY_CATEGORIES = frozenset({"duplicate_submission"})
 _ADVISORY_SOURCE_CATEGORIES = frozenset(
     {"external_build_dependency", "user_isolation_correctness"}
 )
+# Every source-review RETRYABLE_INFRA exit reports this one code, which Platform
+# retries automatically; the specific cause travels in the evidence summary.
+SOURCE_REVIEW_RETRYABLE_INFRA_CODE = "source-review-retryable-infra"
 
 
 class ScreeningOutcome(StrEnum):
@@ -590,6 +593,15 @@ def _court_unavailable(adjudication: Mapping[str, object]) -> bool:
     return adjudication.get("escalation_code") == "adjudicator-unavailable"
 
 
+def _source_review_infra_evidence(module_id: str, cause: str) -> PolicyEvidence:
+    """Stable-code evidence for a source-review infrastructure failure."""
+    return PolicyEvidence(
+        module_id,
+        SOURCE_REVIEW_RETRYABLE_INFRA_CODE,
+        f"private source review infrastructure failed ({cause})"[:_MAX_SUMMARY],
+    )
+
+
 def _refusal_evidence(
     module_id: str, adjudication: Mapping[str, object]
 ) -> PolicyEvidence:
@@ -611,10 +623,8 @@ class AgenticSourceReviewModule(_BaseModule):
             return ModuleResult(
                 ModuleDisposition.RETRYABLE_INFRA,
                 (
-                    PolicyEvidence(
-                        self.module_id,
-                        "source-review-unavailable",
-                        "private source-review infrastructure was unavailable",
+                    _source_review_infra_evidence(
+                        self.module_id, "source-review-unavailable"
                     ),
                 ),
             )
@@ -657,10 +667,8 @@ class AgenticSourceReviewModule(_BaseModule):
                 return ModuleResult(
                     ModuleDisposition.RETRYABLE_INFRA,
                     (
-                        PolicyEvidence(
-                            self.module_id,
-                            "source-review-unavailable",
-                            "private source-review adjudication was unavailable",
+                        _source_review_infra_evidence(
+                            self.module_id, "adjudicator-unavailable"
                         ),
                     ),
                     finding=observation.finding,
@@ -694,18 +702,25 @@ class AgenticSourceReviewModule(_BaseModule):
                     review_audit=observation.review_audit,
                     review_notes=review_notes,
                 )
-            disposition = (
-                ModuleDisposition.INCONCLUSIVE
-                if observation.failure_disposition == "inconclusive"
-                else ModuleDisposition.RETRYABLE_INFRA
-            )
+            if observation.failure_disposition == "inconclusive":
+                return ModuleResult(
+                    ModuleDisposition.INCONCLUSIVE,
+                    (
+                        PolicyEvidence(
+                            self.module_id,
+                            observation.error_code or "source-review-inconclusive",
+                            "private source review did not produce a usable result",
+                        ),
+                    ),
+                    review_audit=observation.review_audit,
+                    review_notes=review_notes,
+                )
             return ModuleResult(
-                disposition,
+                ModuleDisposition.RETRYABLE_INFRA,
                 (
-                    PolicyEvidence(
+                    _source_review_infra_evidence(
                         self.module_id,
-                        observation.error_code or "source-review-inconclusive",
-                        "private source review did not produce a usable result",
+                        observation.error_code or "source-review-failed",
                     ),
                 ),
                 review_audit=observation.review_audit,
@@ -1393,10 +1408,8 @@ class PolicyEngine:
                 return self._decision(
                     ScreeningOutcome.RETRYABLE_INFRA,
                     (
-                        PolicyEvidence(
-                            "agentic-preexecution-review",
-                            "source-review-unavailable",
-                            "private source-review adjudication was unavailable",
+                        _source_review_infra_evidence(
+                            "agentic-preexecution-review", "adjudicator-unavailable"
                         ),
                     ),
                     observation.finding,
@@ -1445,14 +1458,15 @@ class PolicyEngine:
                     else ScreeningOutcome.INCONCLUSIVE
                 ),
                 (
-                    PolicyEvidence(
+                    _source_review_infra_evidence(
+                        "agentic-preexecution-review",
+                        observation.error_code or "source-review-failed",
+                    )
+                    if retryable
+                    else PolicyEvidence(
                         "agentic-preexecution-review",
                         observation.error_code or "source-review-inconclusive",
-                        (
-                            "private source review infrastructure was unavailable"
-                            if retryable
-                            else "private source review could not resolve the lead"
-                        ),
+                        "private source review could not resolve the lead",
                     ),
                 ),
                 observation.finding,

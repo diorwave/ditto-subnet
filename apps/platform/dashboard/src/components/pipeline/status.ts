@@ -542,7 +542,7 @@ export function admissionRetryLine(
   }
   if (retry.state === "retry_queued" && retry.next_retry_at) {
     const infra =
-      "A Ditto build infrastructure failure, not a miner failure. It retries automatically with backoff";
+      "A Ditto infrastructure failure, not a miner failure. It retries automatically with backoff";
     const due = new Date(retry.next_retry_at);
     if (Number.isNaN(due.getTime())) return infra + ".";
     if (due.getTime() <= now.getTime()) {

@@ -1,4 +1,4 @@
-"""Automatic bounded retry and the fleet breaker for infrastructure build failures.
+"""Automatic bounded retry and the fleet breaker for fleet infrastructure failures.
 
 Real Postgres, real claim transaction: the assertions are about what
 ``claim_screening_attempts`` does with persisted attempt history, never about
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -61,6 +62,19 @@ _CODE = INFRA_AUTO_RETRY_REASON_CODES[0]
 _SECOND = timedelta(seconds=1)
 _PROVIDER = "gcp"
 _LANE = "buildkit"
+# Budget-exhaustion outcomes and outcomes an artifact can provoke (#2449 Fix §7):
+# automatic retries of these could be looped by a hostile archive.
+_MANUAL_RETRY_CODES = (
+    "l2-late-result",
+    "lease-budget-exhausted",
+    "worker-verdict-rejected",
+    "worker-result-processing-failed",
+    "unexpected-infrastructure",
+    "l2-model-inconclusive",
+    "l2-model-total-budget",
+    "l2-model-step-budget",
+    "l2-model-tool-budget",
+)
 
 
 def _id_with_jitter_unit(*, at_most: float) -> UUID:
@@ -138,6 +152,7 @@ async def _infra_failure(
     attempt_id: UUID | None = None,
     provider: str | None = _PROVIDER,
     lane: str | None = _LANE,
+    reason_code: str = _CODE,
 ) -> UUID:
     return await _add_attempt(
         session_maker,
@@ -145,7 +160,7 @@ async def _infra_failure(
         status="failed",
         started_at=finished_at - timedelta(minutes=2),
         finished_at=finished_at,
-        reason_code=_CODE,
+        reason_code=reason_code,
         attempt_id=attempt_id,
         provider=provider,
         lane=lane,
@@ -159,6 +174,7 @@ async def _failing_agent(
     attempt_id: UUID | None = None,
     provider: str | None = _PROVIDER,
     lane: str | None = _LANE,
+    reason_code: str = _CODE,
 ) -> UUID:
     agent_id = await _seed_agent(session_maker)
     await _infra_failure(
@@ -168,6 +184,7 @@ async def _failing_agent(
         attempt_id=attempt_id,
         provider=provider,
         lane=lane,
+        reason_code=reason_code,
     )
     return agent_id
 
@@ -324,21 +341,26 @@ def test_jitter_does_not_depend_on_the_process_hash_seed() -> None:
 
 def test_infra_code_is_split_from_the_park_cap_tuple() -> None:
     assert _CODE == "docker-build-infrastructure"
-    assert _CODE not in PROVIDER_BACKOFF_REASON_CODES
+    assert not set(INFRA_AUTO_RETRY_REASON_CODES) & set(PROVIDER_BACKOFF_REASON_CODES)
+    assert not set(INFRA_AUTO_RETRY_REASON_CODES) & set(_MANUAL_RETRY_CODES)
 
 
 # --- per-artifact retry ---------------------------------------------------
 
 
+@pytest.mark.parametrize("reason_code", INFRA_AUTO_RETRY_REASON_CODES)
 async def test_infra_failure_is_held_for_its_backoff_then_retried(
-    session_maker: async_sessionmaker[AsyncSession],
+    session_maker: async_sessionmaker[AsyncSession], reason_code: str
 ) -> None:
     now = datetime.now(UTC)
     attempt_id = uuid4()
     delay = infra_retry_delay(1, attempt_id)
     failed_at = now - timedelta(minutes=30)
     agent_id = await _failing_agent(
-        session_maker, finished_at=failed_at, attempt_id=attempt_id
+        session_maker,
+        finished_at=failed_at,
+        attempt_id=attempt_id,
+        reason_code=reason_code,
     )
 
     assert await _claim(session_maker, now=failed_at + delay - _SECOND) == []
@@ -349,6 +371,23 @@ async def test_infra_failure_is_held_for_its_backoff_then_retried(
         assert agent is not None
         assert agent.status == AgentStatus.SCREENING
     assert await _running(session_maker) == [agent_id]
+
+
+@pytest.mark.parametrize("reason_code", _MANUAL_RETRY_CODES)
+async def test_artifact_dependent_codes_stay_parked(
+    session_maker: async_sessionmaker[AsyncSession], reason_code: str
+) -> None:
+    now = datetime.now(UTC)
+    agent_id = await _failing_agent(
+        session_maker, finished_at=now - timedelta(hours=2), reason_code=reason_code
+    )
+
+    assert agent_id not in (await _plan(session_maker, now=now)).decisions
+    assert await _claim(session_maker, now=now) == []
+    async with session_maker() as session:
+        agent = await session.get(Agent, agent_id)
+        assert agent is not None
+        assert agent.status == AgentStatus.SCREENING_FAILED
 
 
 async def test_streak_doubles_per_consecutive_failure_and_caps(
@@ -594,6 +633,7 @@ async def _tripped_fleet(
     t0: datetime,
     provider: str | None = _PROVIDER,
     lane: str | None = _LANE,
+    reason_code: str = _CODE,
 ) -> list[UUID]:
     """``BREAKER_DISTINCT_AGENTS`` agents failing one minute apart from ``t0``.
 
@@ -610,6 +650,7 @@ async def _tripped_fleet(
                 attempt_id=_id_with_jitter_unit(at_most=0.25),
                 provider=provider,
                 lane=lane,
+                reason_code=reason_code,
             )
         )
     return agents
@@ -621,11 +662,12 @@ def _opened_at(t0: datetime) -> datetime:
     )
 
 
+@pytest.mark.parametrize("reason_code", INFRA_AUTO_RETRY_REASON_CODES)
 async def test_breaker_holds_retries_then_admits_one_probe_per_interval(
-    session_maker: async_sessionmaker[AsyncSession],
+    session_maker: async_sessionmaker[AsyncSession], reason_code: str
 ) -> None:
     t0 = datetime.now(UTC) - timedelta(hours=1)
-    agents = await _tripped_fleet(session_maker, t0=t0)
+    agents = await _tripped_fleet(session_maker, t0=t0, reason_code=reason_code)
     opened = _opened_at(t0)
     open_until = opened + BREAKER_OPEN_DURATION
     # Per-artifact backoffs are over, so only the breaker can hold them.
@@ -649,7 +691,11 @@ async def test_breaker_holds_retries_then_admits_one_probe_per_interval(
     # probe is admitted one interval after the previous one started.
     failed_at = probe_at + timedelta(minutes=1)
     await _settle_probe(
-        session_maker, probed[0], status="failed", at=failed_at, reason_code=_CODE
+        session_maker,
+        probed[0],
+        status="failed",
+        at=failed_at,
+        reason_code=reason_code,
     )
     assert (
         await _claim(session_maker, now=probe_at + BREAKER_PROBE_INTERVAL - _SECOND)
@@ -824,15 +870,20 @@ async def test_operator_manual_retry_bypasses_and_can_close_the_breaker(
 # --- bounds on automatic retries -------------------------------------------
 
 
+@pytest.mark.parametrize("reason_code", INFRA_AUTO_RETRY_REASON_CODES)
 async def test_long_parked_agent_is_not_retried_automatically(
-    session_maker: async_sessionmaker[AsyncSession],
+    session_maker: async_sessionmaker[AsyncSession], reason_code: str
 ) -> None:
     now = datetime.now(UTC)
     old = await _failing_agent(
-        session_maker, finished_at=now - INFRA_AUTO_RETRY_MAX_AGE - _SECOND
+        session_maker,
+        finished_at=now - INFRA_AUTO_RETRY_MAX_AGE - _SECOND,
+        reason_code=reason_code,
     )
     recent = await _failing_agent(
-        session_maker, finished_at=now - INFRA_AUTO_RETRY_MAX_AGE + timedelta(hours=1)
+        session_maker,
+        finished_at=now - INFRA_AUTO_RETRY_MAX_AGE + timedelta(hours=1),
+        reason_code=reason_code,
     )
 
     assert old not in (await _plan(session_maker, now=now)).decisions
@@ -848,7 +899,10 @@ async def test_long_parked_agent_is_not_retried_automatically(
 
 
 async def _capped_agent(
-    session_maker: async_sessionmaker[AsyncSession], *, now: datetime
+    session_maker: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime,
+    reason_code: str = _CODE,
 ) -> UUID:
     agent_id = await _seed_agent(session_maker)
     for index in range(INFRA_AUTO_RETRY_MAX_STREAK):
@@ -856,15 +910,17 @@ async def _capped_agent(
             session_maker,
             agent_id,
             finished_at=now - timedelta(hours=6) + timedelta(minutes=30 * index),
+            reason_code=reason_code,
         )
     return agent_id
 
 
+@pytest.mark.parametrize("reason_code", INFRA_AUTO_RETRY_REASON_CODES)
 async def test_streak_cap_hands_the_agent_to_the_operator_without_a_verdict(
-    session_maker: async_sessionmaker[AsyncSession],
+    session_maker: async_sessionmaker[AsyncSession], reason_code: str
 ) -> None:
     now = datetime.now(UTC)
-    agent_id = await _capped_agent(session_maker, now=now)
+    agent_id = await _capped_agent(session_maker, now=now, reason_code=reason_code)
 
     decision = (await _plan(session_maker, now=now)).decisions[agent_id]
     assert decision.streak == INFRA_AUTO_RETRY_MAX_STREAK
@@ -891,11 +947,12 @@ async def test_streak_cap_hands_the_agent_to_the_operator_without_a_verdict(
         assert statuses == {"failed"}
 
 
+@pytest.mark.parametrize("reason_code", INFRA_AUTO_RETRY_REASON_CODES)
 async def test_operator_retry_lifts_the_streak_cap(
-    session_maker: async_sessionmaker[AsyncSession],
+    session_maker: async_sessionmaker[AsyncSession], reason_code: str
 ) -> None:
     now = datetime.now(UTC)
-    agent_id = await _capped_agent(session_maker, now=now)
+    agent_id = await _capped_agent(session_maker, now=now, reason_code=reason_code)
     async with session_maker() as session, session.begin():
         latest = await session.scalar(
             select(ScreeningAttempt.attempt_id)
@@ -924,7 +981,7 @@ async def test_operator_retry_lifts_the_streak_cap(
         agent_id,
         status="failed",
         at=now + timedelta(minutes=5),
-        reason_code=_CODE,
+        reason_code=reason_code,
     )
     # The streak started over, so the agent is auto-retried again, not capped.
     decision = (await _plan(session_maker, now=now + timedelta(minutes=6))).decisions[
@@ -1079,12 +1136,22 @@ async def test_partial_index_predicate_matches_the_scan_query(
     assert "screening_attempts_infra_failed_idx" in plan, plan
 
 
-def test_partial_index_covers_exactly_one_reason_code() -> None:
-    assert len(INFRA_AUTO_RETRY_REASON_CODES) == 1, (
-        "The partial index screening_attempts_infra_failed_idx (models.py, its "
-        "migration, and screening_infra_retry._infra_failure_filters) names one "
-        "reason code; update all three together with INFRA_AUTO_RETRY_REASON_CODES"
+def test_partial_index_covers_exactly_the_auto_retry_codes() -> None:
+    index = next(
+        index
+        for index in ScreeningAttempt.metadata.tables["screening_attempts"].indexes
+        if index.name == "screening_attempts_infra_failed_idx"
     )
+    for dialect in ("postgresql", "sqlite"):
+        predicate = str(index.dialect_options[dialect]["where"])
+        assert set(re.findall(r"'([^']*)'", predicate)) == {
+            "failed",
+            *INFRA_AUTO_RETRY_REASON_CODES,
+        }, (
+            "The partial index screening_attempts_infra_failed_idx (models.py, a "
+            "migration, and screening_infra_retry._infra_failure_filters) must "
+            "name exactly INFRA_AUTO_RETRY_REASON_CODES; update all three together"
+        )
 
 
 async def test_agent_only_plan_skips_the_fleet_history_query(
