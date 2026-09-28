@@ -26252,7 +26252,7 @@ export interface components {
              * Reason
              * @enum {string}
              */
-            reason: "controller_fresh" | "controller_stale" | "controller_missing" | "provider_not_ready" | "primary_admission_closed";
+            reason: "controller_fresh" | "controller_stale" | "controller_missing" | "provider_not_ready";
         };
         /**
          * PublicScreeningAttempt

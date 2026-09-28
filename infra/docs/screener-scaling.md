@@ -19,9 +19,15 @@ controller:
 4. keeps GCE at zero while the primary is ready and unclaimed backlog is at or
    below `max(min_backlog, screening_concurrency * backlog_multiplier)`;
 5. adds only residual GCE capacity above that threshold, or full bounded GCE
-   capacity when the primary is not ready or its admission is closed
-   (`screening_concurrency=0`) while work waits;
+   capacity when the primary is not ready;
 6. scales GCE down only after GCE-owned leases finish.
+
+`SCREENING=0` (`screening_concurrency=0`) on a ready primary is an operator
+closure, not an outage: it is a global full stop recorded as
+`HETZNER_PRIMARY_ADMISSION_CLOSED`, and GCE does not overflow it regardless of
+backlog or `gce_overflow_enabled`. Reopening screening needs a deliberate
+`screening_concurrency >= 1` activation on the primary. Explicit GCP-first
+provider routing is a separate operator decision and still takes precedence.
 
 Production uses `['hetzner', 'gcp']` for build, runtime smoke, and source review.
 The second entry means that separate GCE workers may claim still-unclaimed

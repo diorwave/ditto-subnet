@@ -117,9 +117,12 @@ def gce_overflow_target(
 ) -> tuple[int, str]:
     """Choose GCE only for an explicit GCP route, outage, or queue overflow.
 
-    A ready primary with closed admission (``screening_concurrency == 0``) is
-    an outage for waiting work, not base load. ``gce_overflow_enabled=false``
-    is the only full stop for screening.
+    Precedence: explicit operator GCP routing wins; then a ready primary with
+    closed admission (``screening_concurrency == 0``) is an operator closure,
+    a global full stop that GCE never overflows whatever the backlog or
+    ``gce_overflow_enabled``. Only raising the primary's
+    ``screening_concurrency`` to at least one reopens screening. An
+    unavailable primary is a host failure and still overflows.
     """
     if jobs_per_slot < 1 or global_cap < 0:
         raise ValueError("capacity inputs are out of range")
@@ -137,27 +140,23 @@ def gce_overflow_target(
         )
     if routing.gcp_first:
         return min(global_cap, demand.desired), "GCP_SCREENERS_PRIORITIZED_BY_POLICY"
+    primary = primary_node or {}
+    primary_ready = primary.get("status") == "active" and primary.get("ready") is True
+    screening_concurrency = int(primary.get("screening_concurrency", 0))
+    admission_open = primary.get("admission_open")
+    if admission_open is None:
+        # Platform releases before admission_open still report concurrency.
+        admission_open = screening_concurrency > 0
+    if primary_ready and not admission_open:
+        return 0, "HETZNER_PRIMARY_ADMISSION_CLOSED"
     policy = routing.overflow
     if not routing.hetzner_first or not policy.enabled:
         return 0, "GCE_OVERFLOW_DISABLED"
     cap = min(global_cap, policy.max_instances)
     if cap == 0:
         return 0, "GCE_OVERFLOW_CAPPED_AT_ZERO"
-    primary_ready = primary_node is not None and bool(
-        primary_node.get("status") == "active" and primary_node.get("ready") is True
-    )
     if not primary_ready:
         return min(cap, demand.desired), "HETZNER_PRIMARY_UNAVAILABLE"
-    assert primary_node is not None
-    screening_concurrency = int(primary_node.get("screening_concurrency", 0))
-    admission_open = primary_node.get("admission_open")
-    if admission_open is None:
-        # Platform releases before admission_open still report concurrency.
-        admission_open = screening_concurrency > 0
-    if not admission_open:
-        if demand.runnable > 0:
-            return min(cap, demand.desired), "HETZNER_PRIMARY_ADMISSION_CLOSED"
-        return 0, "HETZNER_PRIMARY_ADMISSION_CLOSED"
     threshold = max(
         policy.min_backlog,
         screening_concurrency * policy.backlog_multiplier,

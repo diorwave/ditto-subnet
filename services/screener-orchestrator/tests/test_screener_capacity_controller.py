@@ -202,13 +202,50 @@ class CapacityDecisionTests(unittest.TestCase):
         self.assertEqual(target, 2)
         self.assertEqual(reason, "HETZNER_PRIMARY_UNAVAILABLE")
 
-    def test_admission_closed_primary_overflows_waiting_work(self) -> None:
+    def test_admission_closed_primary_is_a_global_full_stop(self) -> None:
+        for enabled in (True, False):
+            with self.subTest(gce_overflow_enabled=enabled):
+                target, reason = gce_overflow_target(
+                    demand=Demand(runnable=24, active=0, desired=4),
+                    routing=_overflow_routing(enabled=enabled),
+                    primary_node={
+                        "status": "active",
+                        "ready": True,
+                        "admission_open": False,
+                        "screening_concurrency": 0,
+                    },
+                    jobs_per_slot=6,
+                    global_cap=6,
+                )
+
+                self.assertEqual(target, 0)
+                self.assertEqual(reason, "HETZNER_PRIMARY_ADMISSION_CLOSED")
+
+    def test_one_slot_activation_restores_backlog_threshold(self) -> None:
         target, reason = gce_overflow_target(
-            demand=Demand(runnable=2, active=0, desired=1),
+            demand=Demand(runnable=24, active=0, desired=4),
             routing=_overflow_routing(),
             primary_node={
                 "status": "active",
                 "ready": True,
+                "admission_open": True,
+                "screening_concurrency": 1,
+            },
+            jobs_per_slot=6,
+            global_cap=6,
+        )
+
+        # threshold = max(min_backlog=12, 1 * 3); (24 - 12) / 6 slots.
+        self.assertEqual(target, 2)
+        self.assertEqual(reason, "HETZNER_BACKLOG_OVERFLOW")
+
+    def test_unready_closed_primary_is_a_host_failure(self) -> None:
+        target, reason = gce_overflow_target(
+            demand=Demand(runnable=24, active=0, desired=4),
+            routing=_overflow_routing(),
+            primary_node={
+                "status": "active",
+                "ready": False,
                 "admission_open": False,
                 "screening_concurrency": 0,
             },
@@ -216,48 +253,40 @@ class CapacityDecisionTests(unittest.TestCase):
             global_cap=6,
         )
 
-        self.assertEqual(target, 1)
-        self.assertEqual(reason, "HETZNER_PRIMARY_ADMISSION_CLOSED")
-
-    def test_admission_closed_primary_idle_queue_stays_zero(self) -> None:
-        target, reason = gce_overflow_target(
-            demand=Demand(runnable=0, active=0, desired=0),
-            routing=_overflow_routing(),
-            primary_node={
-                "status": "active",
-                "ready": True,
-                "admission_open": False,
-                "screening_concurrency": 0,
-            },
-            jobs_per_slot=6,
-            global_cap=6,
-        )
-
-        self.assertEqual(target, 0)
-        self.assertEqual(reason, "HETZNER_PRIMARY_ADMISSION_CLOSED")
+        self.assertEqual(target, 4)
+        self.assertEqual(reason, "HETZNER_PRIMARY_UNAVAILABLE")
 
     def test_admission_closed_falls_back_to_concurrency_when_field_missing(
         self,
     ) -> None:
-        target, reason = gce_overflow_target(
-            demand=Demand(runnable=2, active=0, desired=1),
-            routing=_overflow_routing(),
-            primary_node={
-                "status": "active",
-                "ready": True,
-                "screening_concurrency": 0,
-            },
-            jobs_per_slot=6,
-            global_cap=6,
-        )
+        for concurrency, expected in (
+            (0, (0, "HETZNER_PRIMARY_ADMISSION_CLOSED")),
+            (1, (2, "HETZNER_BACKLOG_OVERFLOW")),
+        ):
+            with self.subTest(screening_concurrency=concurrency):
+                result = gce_overflow_target(
+                    demand=Demand(runnable=24, active=0, desired=4),
+                    routing=_overflow_routing(),
+                    primary_node={
+                        "status": "active",
+                        "ready": True,
+                        "screening_concurrency": concurrency,
+                    },
+                    jobs_per_slot=6,
+                    global_cap=6,
+                )
 
-        self.assertEqual(target, 1)
-        self.assertEqual(reason, "HETZNER_PRIMARY_ADMISSION_CLOSED")
+                self.assertEqual(result, expected)
 
-    def test_admission_closed_respects_overflow_disabled(self) -> None:
+    def test_explicit_gcp_routing_precedes_admission_closure(self) -> None:
         target, reason = gce_overflow_target(
-            demand=Demand(runnable=2, active=0, desired=1),
-            routing=_overflow_routing(enabled=False),
+            demand=Demand(runnable=24, active=0, desired=4),
+            routing=ProviderRouting(
+                revision=1,
+                runtime_provider_priority=("gcp", "hetzner"),
+                source_review_provider_priority=("gcp", "hetzner"),
+                build_provider_priority=("gcp", "hetzner"),
+            ),
             primary_node={
                 "status": "active",
                 "ready": True,
@@ -268,8 +297,8 @@ class CapacityDecisionTests(unittest.TestCase):
             global_cap=6,
         )
 
-        self.assertEqual(target, 0)
-        self.assertEqual(reason, "GCE_OVERFLOW_DISABLED")
+        self.assertEqual(target, 4)
+        self.assertEqual(reason, "GCP_SCREENERS_PRIORITIZED_BY_POLICY")
 
     def test_reconcile_records_each_fallback_reason_transition_once(self) -> None:
         with TemporaryDirectory() as directory:
@@ -281,11 +310,16 @@ class CapacityDecisionTests(unittest.TestCase):
                 "screening_concurrency": 4,
             }
             renewed: list[dict[str, Any]] = []
+
+            def renew(snapshot: dict[str, Any]) -> dict[str, Any]:
+                renewed.append(snapshot)
+                return snapshot
+
             platform = SimpleNamespace(
                 demand=lambda **_kwargs: Demand(runnable=2, active=0, desired=1),
                 provider_routing=_overflow_routing,
                 node_states=lambda: {"subnet-screener-1": primary},
-                renew=lambda snapshot: renewed.append(snapshot) or snapshot,
+                renew=renew,
                 fence=lambda **_kwargs: None,
             )
             gce = _GCE()
@@ -313,7 +347,8 @@ class CapacityDecisionTests(unittest.TestCase):
                 self.assertEqual(
                     snapshot["fallback_reason"], "HETZNER_PRIMARY_ADMISSION_CLOSED"
                 )
-                self.assertEqual(gce.resized, [1])
+                self.assertEqual(snapshot["gce_target"], 0)
+                self.assertEqual(gce.resized, [])
                 self.assertEqual(
                     reason_events(),
                     [
@@ -331,6 +366,19 @@ class CapacityDecisionTests(unittest.TestCase):
                 renewed.clear()
                 reconcile(settings)
                 self.assertEqual(reason_events(), [])
+                self.assertEqual(gce.resized, [])
+
+                # The deliberate one-slot activation reopens the primary.
+                primary.update(admission_open=True, screening_concurrency=1)
+                renewed.clear()
+                reconcile(settings)
+                self.assertEqual(
+                    [event["detail"] for event in reason_events()],
+                    [
+                        "HETZNER_PRIMARY_ADMISSION_CLOSED -> "
+                        "HETZNER_PRIMARY_HANDLING_BASE_LOAD"
+                    ],
+                )
 
     @patch("screener_capacity.controller.subprocess.run")
     def test_gce_resize_pauses_and_leaves_watchdog_disabled_at_zero(

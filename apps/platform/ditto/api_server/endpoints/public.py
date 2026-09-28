@@ -6562,26 +6562,12 @@ async def screener_capacity_watchdog(
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=UTC)
     stale = now >= expiry
-    # A closed primary with waiting work must overflow; a zero GCE target
-    # means the controller failed to, so the watchdog scales out instead.
-    admission_closed = (
-        snapshot.fallback_reason == "HETZNER_PRIMARY_ADMISSION_CLOSED"
-        and snapshot.runnable_backlog > 0
-        and snapshot.gce_target == 0
-    )
-    activate_fallback = stale or not snapshot.provider_ready or admission_closed
-    reason: Literal[
-        "controller_fresh",
-        "controller_stale",
-        "provider_not_ready",
-        "primary_admission_closed",
-    ]
+    activate_fallback = stale or not snapshot.provider_ready
+    reason: Literal["controller_fresh", "controller_stale", "provider_not_ready"]
     if stale:
         reason = "controller_stale"
     elif not snapshot.provider_ready:
         reason = "provider_not_ready"
-    elif admission_closed:
-        reason = "primary_admission_closed"
     else:
         reason = "controller_fresh"
     return PublicScreenerWatchdogResponse(

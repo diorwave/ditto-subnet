@@ -17,9 +17,7 @@ FLEET_TERRAFORM = (
 )
 
 
-def _fallback_depth(
-    counts: dict[str, int], *, activate: bool, reason: str = "controller_stale"
-) -> int:
+def _fallback_depth(counts: dict[str, int], *, activate: bool) -> int:
     source = TEMPLATE.read_text()
     for marker, value in {
         "{{ screening_queue_metric_api_port }}": "8000",
@@ -31,8 +29,7 @@ def _fallback_depth(
     exec(compile(source, str(TEMPLATE), "exec"), namespace)
     helper = namespace["fallback_depth"]
     assert callable(helper)
-    watchdog = {"activate_fallback": activate, "reason": reason}
-    return helper(counts, watchdog)  # type: ignore[operator]
+    return helper(counts, {"activate_fallback": activate})  # type: ignore[operator]
 
 
 def test_fresh_controller_suppresses_gce_fallback() -> None:
@@ -49,17 +46,6 @@ def test_stale_controller_publishes_bounded_backlog() -> None:
 
 def test_stale_controller_with_empty_queue_stays_at_zero() -> None:
     assert _fallback_depth({"waiting_screening": 0, "screening": 0}, activate=True) == 0
-
-
-def test_primary_admission_closed_publishes_waiting_backlog() -> None:
-    assert (
-        _fallback_depth(
-            {"waiting_screening": 2, "screening": 0},
-            activate=True,
-            reason="primary_admission_closed",
-        )
-        == 2
-    )
 
 
 def test_watchdog_can_never_scale_gce_in() -> None:

@@ -3359,7 +3359,6 @@ class PublicScreenerWatchdogResponse(BaseModel):
         "controller_stale",
         "controller_missing",
         "provider_not_ready",
-        "primary_admission_closed",
     ]
     controller_epoch: str | None = None
     controller_source_sha: str | None = None

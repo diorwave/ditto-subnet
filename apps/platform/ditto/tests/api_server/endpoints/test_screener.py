@@ -1944,7 +1944,7 @@ class TestFederatedScreenerNodes:
         assert nodes["open-node"]["admission_open"] is True
         assert nodes["open-node"]["ready"] is True
 
-    async def test_watchdog_activates_on_primary_admission_closed(
+    async def test_watchdog_leaves_operator_admission_closure_stopped(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
@@ -1958,39 +1958,27 @@ class TestFederatedScreenerNodes:
                 controller_api_token=_CONTROLLER_TOKEN,
             ),
         )
-        closed = {
-            **_capacity_payload("prod:first"),
-            "runnable_backlog": 2,
-            "desired_slots": 1,
-            "fallback_reason": "HETZNER_PRIMARY_ADMISSION_CLOSED",
-        }
         capacity = await client.put(
             "/api/v1/screener/controller/capacity",
             headers={"Authorization": f"Bearer {_CONTROLLER_TOKEN}"},
-            json=closed,
+            json={
+                **_capacity_payload("prod:first"),
+                "runnable_backlog": 2,
+                "desired_slots": 1,
+                "gce_target": 0,
+                "fallback_reason": "HETZNER_PRIMARY_ADMISSION_CLOSED",
+            },
         )
         assert capacity.status_code == 200, capacity.text
 
-        stranded = await client.get(
+        response = await client.get(
             "/api/v1/public/screener-capacity-watchdog?environment=prod"
         )
 
-        assert stranded.status_code == 200
-        assert stranded.json()["activate_fallback"] is True
-        assert stranded.json()["reason"] == "primary_admission_closed"
-        assert stranded.json()["provider_ready"] is True
-
-        overflowing = await client.put(
-            "/api/v1/screener/controller/capacity",
-            headers={"Authorization": f"Bearer {_CONTROLLER_TOKEN}"},
-            json={**closed, "gce_target": 1},
-        )
-        assert overflowing.status_code == 200, overflowing.text
-        fresh = await client.get(
-            "/api/v1/public/screener-capacity-watchdog?environment=prod"
-        )
-        assert fresh.json()["activate_fallback"] is False
-        assert fresh.json()["reason"] == "controller_fresh"
+        # Zero admission is a deliberate global stop, not a host failure.
+        assert response.status_code == 200
+        assert response.json()["activate_fallback"] is False
+        assert response.json()["reason"] == "controller_fresh"
 
     async def test_watchdog_is_quiet_while_controller_lease_is_fresh(
         self,

@@ -377,9 +377,7 @@ _CLOSE_ADMISSION = {
 }
 
 
-async def _seed_open_primary(
-    maker: async_sessionmaker[AsyncSession], *, gce_overflow_enabled: bool
-) -> None:
+async def _seed_open_primary(maker: async_sessionmaker[AsyncSession]) -> None:
     now = datetime.now(UTC)
     async with maker() as session, session.begin():
         session.add(
@@ -413,7 +411,7 @@ async def _seed_open_primary(
                     "runtime_provider_priority": ["hetzner", "gcp"],
                     "source_review_provider_priority": ["hetzner", "gcp"],
                     "build_provider_priority": ["hetzner", "gcp"],
-                    "gce_overflow_enabled": gce_overflow_enabled,
+                    "gce_overflow_enabled": False,
                     "primary_node_id": "subnet-screener-1",
                 },
                 reason="Route screening to the Hetzner primary",
@@ -422,46 +420,22 @@ async def _seed_open_primary(
         )
 
 
-@pytest.mark.parametrize("gce_overflow_enabled", [False, True])
-async def test_close_last_node_with_backlog_requires_overflow(
+async def test_closing_last_node_with_backlog_needs_only_explicit_confirmation(
     app: FastAPI,
     client: httpx.AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
-    gce_overflow_enabled: bool,
 ) -> None:
     from ditto.api_models.agent_status import AgentStatus
     from ditto.tests.api_server.endpoints.test_screener import _seed_agent
 
-    _install(app, session_maker)
-    await _seed_open_primary(session_maker, gce_overflow_enabled=gce_overflow_enabled)
-    await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
-
-    response = await client.post(
-        "/api/v1/admin/screener-nodes/subnet-screener-1/channel-settings",
-        headers=_HEADERS,
-        json=_CLOSE_ADMISSION,
-    )
-
-    if gce_overflow_enabled:
-        assert response.status_code == 200, response.text
-        assert response.json()["settings"]["screening_concurrency"] == 0
-    else:
-        assert response.status_code == 409, response.text
-        assert "last active node while 1 agents are waiting" in response.text
-
-
-async def test_close_confirmation_suffix(
-    app: FastAPI,
-    client: httpx.AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
     open_settings = ScreenerNodeChannelSettings(**_OPEN_NODE_SETTINGS)
     assert node_channel_settings_confirmation("subnet-screener-1", open_settings) == (
         "APPLY SCREENER NODE subnet-screener-1 SCREENING=4 SANDBOX=4 BUILD=4 "
         "RUNTIME=4 SOURCE_REVIEW=4"
     )
     _install(app, session_maker)
-    await _seed_open_primary(session_maker, gce_overflow_enabled=False)
+    await _seed_open_primary(session_maker)
+    await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
     path = "/api/v1/admin/screener-nodes/subnet-screener-1/channel-settings"
 
     unsuffixed = await client.post(
@@ -477,9 +451,11 @@ async def test_close_confirmation_suffix(
     assert unsuffixed.status_code == 409
     assert _CLOSE_CONFIRMATION in unsuffixed.text
 
-    # With no waiting agents, closing the last open node strands nothing.
+    # Closure is a deliberate operator stop, even with waiting agents and
+    # no GCE overflow to pick them up.
     closed = await client.post(path, headers=_HEADERS, json=_CLOSE_ADMISSION)
     assert closed.status_code == 200, closed.text
+    assert closed.json()["settings"]["screening_concurrency"] == 0
 
 
 async def test_independent_replay_capacity_is_guarded_and_audited(

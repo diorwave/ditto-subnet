@@ -57,4 +57,4 @@ Terraform. Protected apply must not replace the VMs.
 
 The enrolled Hetzner worker is primary. GCE normally targets zero and supplies bounded backlog or outage capacity. The controller must be fenced and count pending workers; an independently fenced GCP watchdog may add fallback capacity only when backlog exists and the primary heartbeat is stale. Fail closed when provider isolation cannot be proven.
 
-`SCREENING=0` on the primary closes its admission, so the controller overflows waiting work to GCE (`HETZNER_PRIMARY_ADMISSION_CLOSED`); `gce_overflow_enabled=false` is the only full stop for screening.
+`SCREENING=0` on the primary is an operator closure and a global full stop (`HETZNER_PRIMARY_ADMISSION_CLOSED`): GCE does not overflow it and the watchdog does not activate fallback for it, whatever the backlog or `gce_overflow_enabled`. Reopening needs a deliberate `screening_concurrency >= 1` activation.

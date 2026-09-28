@@ -10,11 +10,10 @@ from typing import Annotated, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ditto.api_models.agent_status import AgentStatus
 from ditto.api_models.screener_node_settings import (
     ScreenerNodeAdminStatusWriteRequest,
     ScreenerNodeChannelSettings,
@@ -62,7 +61,6 @@ from ditto.api_server.dependencies import get_session
 from ditto.api_server.endpoints.admin_quarantine import require_admin
 from ditto.api_server.screener_node_identity import is_enrolled_node_heartbeat_instance
 from ditto.db.models import (
-    Agent,
     ScreenerCapacityEvent,
     ScreenerCapacitySnapshot,
     ScreenerHeartbeat,
@@ -81,14 +79,11 @@ from ditto.db.models import (
 from ditto.db.queries.screener_node_settings import (
     DEFAULT_SCREENER_NODE_CHANNEL_SETTINGS,
     latest_screener_node_channel_settings,
-    resolve_screener_node_channel_settings,
 )
 from ditto.db.queries.screener_provider_settings import (
     DEFAULT_SCREENER_PROVIDER_SETTINGS,
     latest_screener_provider_settings,
-    resolve_screener_provider_settings,
 )
-from ditto.db.queries.screening_retry import failed_screening_retry_authorized
 from ditto_screening_protocol import SCREENING_POLICY_VERSION
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -587,50 +582,6 @@ async def get_screener_node_channel_settings(
     )
 
 
-async def _agents_stranded_by_closing_admission(
-    session: AsyncSession, *, environment: str, node_id: str
-) -> int:
-    """Count waiting agents no worker could claim once this node closes."""
-    _, provider_settings = await resolve_screener_provider_settings(
-        session, environment=environment
-    )
-    if provider_settings.gce_overflow_enabled or "gcp" in (
-        provider_settings.build_provider_priority[0],
-        provider_settings.runtime_provider_priority[0],
-        provider_settings.source_review_provider_priority[0],
-    ):
-        # GCE takes the work: by overflow, or because GCP is routed first.
-        return 0
-    open_node_ids: list[str] = []
-    for node in await session.scalars(
-        select(ScreenerNode).where(
-            ScreenerNode.environment == environment,
-            ScreenerNode.status == "active",
-        )
-    ):
-        _, limits = await resolve_screener_node_channel_settings(
-            session, node_id=node.node_id
-        )
-        if limits.screening_concurrency > 0:
-            open_node_ids.append(node.node_id)
-    if open_node_ids != [node_id]:
-        return 0
-    return int(
-        await session.scalar(
-            select(func.count())
-            .select_from(Agent)
-            .where(
-                or_(
-                    Agent.status == AgentStatus.UPLOADED,
-                    (Agent.status == AgentStatus.SCREENING_FAILED)
-                    & failed_screening_retry_authorized(),
-                )
-            )
-        )
-        or 0
-    )
-
-
 @router.post(
     "/screener-nodes/{node_id}/channel-settings",
     response_model=ScreenerNodeChannelSettingsRevision,
@@ -662,21 +613,6 @@ async def set_screener_node_channel_settings(
                 f"(expected {payload.expected_revision}, current {actual_revision})"
             ),
         )
-    if payload.settings.screening_concurrency == 0:
-        # GCE overflow picks up work behind a closed primary; without it,
-        # closing the last open node would strand every waiting agent.
-        waiting = await _agents_stranded_by_closing_admission(
-            session, environment=payload.environment, node_id=node_id
-        )
-        if waiting:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "closing admission on the last active node while "
-                    f"{waiting} agents are waiting; set gce_overflow_enabled "
-                    "or confirm"
-                ),
-            )
     row = ScreenerNodeChannelSettingsRevisionRow(
         environment=payload.environment,
         node_id=node_id,
