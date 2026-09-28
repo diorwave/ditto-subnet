@@ -850,8 +850,6 @@ async def test_lease_sweep_orphans_one_hotkey_or_every_running_hotkey(
     assert foreign.status == ("failed" if screener_hotkey is None else "running")
 
 
-
-
 async def test_claim_preserves_attempt_reported_active_by_a_fresh_worker(
     session: AsyncSession,
 ) -> None:

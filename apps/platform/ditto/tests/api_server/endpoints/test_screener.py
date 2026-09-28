@@ -4091,7 +4091,6 @@ class TestClaim:
         assert attempt.reason_code == "worker-lease-orphaned"
         assert agent is not None and agent.status == AgentStatus.SCREENING_FAILED
 
-
     async def test_mechanical_admission_claim_uses_its_dedicated_contract_fields(
         self,
         app: FastAPI,
