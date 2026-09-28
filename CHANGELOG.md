@@ -2,6 +2,179 @@
 
 <!-- version list -->
 
+## v0.321.5 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Require provenance for large starter model
+  ([#2476](https://github.com/ditto-assistant/ditto-subnet/pull/2476),
+  [`944b772`](https://github.com/ditto-assistant/ditto-subnet/commit/944b7722f71ffc79d8a923242997236c5a29fbfe))
+
+
+## v0.321.4 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Require observed model usage in control
+  ([#2475](https://github.com/ditto-assistant/ditto-subnet/pull/2475),
+  [`c3940e9`](https://github.com/ditto-assistant/ditto-subnet/commit/c3940e962e5011b761b286f7031decd45fe04491))
+
+### Chores
+
+- **screener**: Add transparent v13 review control
+  ([#2441](https://github.com/ditto-assistant/ditto-subnet/pull/2441),
+  [`cffdf60`](https://github.com/ditto-assistant/ditto-subnet/commit/cffdf60571f8384ed1166219c73a5954c9e304bb))
+
+
+## v0.321.3 (2026-09-27)
+
+### Bug Fixes
+
+- **platform**: Accept enforced source-only canary reports
+  ([#2439](https://github.com/ditto-assistant/ditto-subnet/pull/2439),
+  [`d238c6e`](https://github.com/ditto-assistant/ditto-subnet/commit/d238c6e5387ab607ac248bb48ce0a77447bbb6d4))
+
+
+## v0.321.2 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Preview enforced source decision in canaries
+  ([#2438](https://github.com/ditto-assistant/ditto-subnet/pull/2438),
+  [`e3f2f17`](https://github.com/ditto-assistant/ditto-subnet/commit/e3f2f171ce0ff56cd767d5895dc24233cf3942ea))
+
+
+## v0.321.1 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Ground provider review in scorer contract
+  ([#2437](https://github.com/ditto-assistant/ditto-subnet/pull/2437),
+  [`209a12d`](https://github.com/ditto-assistant/ditto-subnet/commit/209a12d0e75b20e9c367ef24f79e75a3f72e6189))
+
+
+## v0.321.0 (2026-09-27)
+
+### Features
+
+- **screener**: Make private runtime challenge targeted
+  ([`429f02d`](https://github.com/ditto-assistant/ditto-subnet/commit/429f02da9898160227e83b54c63a93cb3c6f8c28))
+
+- **screener**: Use language-neutral source review tools
+  ([`1fb8f60`](https://github.com/ditto-assistant/ditto-subnet/commit/1fb8f602600529513ae11d35592eb800fff9a245))
+
+
+## v0.320.0 (2026-09-27)
+
+### Chores
+
+- **screener**: Retire stale Targon operator guidance
+  ([#2436](https://github.com/ditto-assistant/ditto-subnet/pull/2436),
+  [`55f1aba`](https://github.com/ditto-assistant/ditto-subnet/commit/55f1aba965b7bbbb81e6b9c9120d56affd1a156d))
+
+### Features
+
+- **screener**: Broker bounded source-navigation shell
+  ([`201ce84`](https://github.com/ditto-assistant/ditto-subnet/commit/201ce84a3ae4281082794b81b48cc703ec852467))
+
+
+## v0.319.13 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Remove retired fleet lane unit
+  ([#2435](https://github.com/ditto-assistant/ditto-subnet/pull/2435),
+  [`dea7bef`](https://github.com/ditto-assistant/ditto-subnet/commit/dea7befea1a41b04e9508bb414d9ea15d9adc114))
+
+
+## v0.319.12 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Fail retired one-shot fleet jobs closed
+  ([#2434](https://github.com/ditto-assistant/ditto-subnet/pull/2434),
+  [`57bd44f`](https://github.com/ditto-assistant/ditto-subnet/commit/57bd44f3b0b34d1776b7694b452b26c95629e20b))
+
+### Refactoring
+
+- **screener**: Retire producerless fleet job executor
+  ([#2433](https://github.com/ditto-assistant/ditto-subnet/pull/2433),
+  [`6dd4adb`](https://github.com/ditto-assistant/ditto-subnet/commit/6dd4adb6d03fcf3d6a4c33ad7181cb00ed6b3ddc))
+
+
+## v0.319.11 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Accept retired controller unit flags during rollout
+  ([#2432](https://github.com/ditto-assistant/ditto-subnet/pull/2432),
+  [`0de0dc7`](https://github.com/ditto-assistant/ditto-subnet/commit/0de0dc767744b0023c21e3a617589f824eb9050e))
+
+
+## v0.319.10 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Unblock orchestrator release lint
+  ([#2431](https://github.com/ditto-assistant/ditto-subnet/pull/2431),
+  [`05f221b`](https://github.com/ditto-assistant/ditto-subnet/commit/05f221bb1b93565a0c4ccdc54a1f451782b9f510))
+
+- **screener**: Unblock Targon retirement release
+  ([#2430](https://github.com/ditto-assistant/ditto-subnet/pull/2430),
+  [`2ae122c`](https://github.com/ditto-assistant/ditto-subnet/commit/2ae122cdc0efc7f6ee3479becc7efec835599001))
+
+### Refactoring
+
+- **screener**: Retire Targon screening paths
+  ([#2357](https://github.com/ditto-assistant/ditto-subnet/pull/2357),
+  [`69c80f6`](https://github.com/ditto-assistant/ditto-subnet/commit/69c80f67df25161444bc4054553cc7f5c8c31d3e))
+
+
+## v0.319.9 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Give truthful repeated-note feedback
+  ([#2424](https://github.com/ditto-assistant/ditto-subnet/pull/2424),
+  [`6eb6b86`](https://github.com/ditto-assistant/ditto-subnet/commit/6eb6b867fdc72b97fbeeeeee729586cc25fd543d))
+
+
+## v0.319.8 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Retain distinct L1 concerns at ledger cap
+  ([#2423](https://github.com/ditto-assistant/ditto-subnet/pull/2423),
+  [`2296153`](https://github.com/ditto-assistant/ditto-subnet/commit/2296153fd8ebb044cf3f1a4714c88c042b7d7242))
+
+
+## v0.319.7 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Require offered catalog witness for I7 ID holds
+  ([#2422](https://github.com/ditto-assistant/ditto-subnet/pull/2422),
+  [`2b2d681`](https://github.com/ditto-assistant/ditto-subnet/commit/2b2d68146ba34486ba43229e6c9e98e5a077fbc6))
+
+
+## v0.319.6 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Expose scorer attention locations in canaries
+  ([#2421](https://github.com/ditto-assistant/ditto-subnet/pull/2421),
+  [`aa711a1`](https://github.com/ditto-assistant/ditto-subnet/commit/aa711a1aae1a06b35bf3c3cbdeb89905117fdd5f))
+
+
+## v0.319.5 (2026-09-27)
+
+### Bug Fixes
+
+- **screener**: Expose L1 failure audit in report-only canaries
+  ([#2404](https://github.com/ditto-assistant/ditto-subnet/pull/2404),
+  [`3ef92b0`](https://github.com/ditto-assistant/ditto-subnet/commit/3ef92b01a739187fa1b3af8a93c4544313d022c0))
+
+
 ## v0.319.4 (2026-09-27)
 
 ### Bug Fixes
