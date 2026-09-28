@@ -1781,6 +1781,15 @@ async def _verified_v13_court_clear(
             status_code=409,
             detail=f"court decision is {adjudication.decision}, not clear",
         )
+    if (
+        adjudication.policy_version != attempt.policy_version
+        or not adjudication.prompt_revision.endswith(
+            f"-policy-v{attempt.policy_version}"
+        )
+    ):
+        raise HTTPException(
+            status_code=409, detail="court adjudication policy mismatch"
+        )
     digest = adjudication.canonical_digest()
     if evidence.get("adjudication_digest") != digest:
         raise HTTPException(

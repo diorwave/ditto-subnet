@@ -78,7 +78,11 @@ def _admin_api(app: FastAPI, session_maker: async_sessionmaker[AsyncSession]) ->
 
 
 def _adjudication(
-    decision: str = "clear", *, receipt: bool = True
+    decision: str = "clear",
+    *,
+    receipt: bool = True,
+    policy_version: int = 13,
+    prompt_revision: str | None = None,
 ) -> SourceReviewAdjudication:
     basis: dict[str, object] = {
         "clear": {"clear_clause": "model_authors_graded_slot"},
@@ -92,7 +96,9 @@ def _adjudication(
             "citations": [{"path": "src/main.rs", "line": 6}],
             "notes_considered": 1,
             "model": "z-ai/glm-5.3-flash",
-            "prompt_revision": "adjudicator-v7-policy-v13",
+            "prompt_revision": prompt_revision
+            or f"adjudicator-v7-policy-v{policy_version}",
+            "policy_version": policy_version,
             "completion_receipt": _RECEIPT if receipt else None,
             **basis,
         }
@@ -429,11 +435,18 @@ async def _seed_held_clear(
     decision: str = "clear",
     adjudicator_mode: AdjudicatorMode = "enforce",
     receipt: bool = True,
+    adjudication_policy_version: int = 13,
+    adjudication_prompt_revision: str | None = None,
     edit: Edit | None = None,
 ) -> tuple[UUID, UUID]:
     """Seed one held court decision exactly as the verdict path stores it."""
     agent_id = await _seed_agent(session_maker, status=AgentStatus.QUARANTINED)
-    adjudication = _adjudication(decision, receipt=receipt)
+    adjudication = _adjudication(
+        decision,
+        receipt=receipt,
+        policy_version=adjudication_policy_version,
+        prompt_revision=adjudication_prompt_revision,
+    )
     attempt_id = uuid4()
     quarantine_id = uuid4()
     now = datetime.now(UTC)
@@ -671,6 +684,39 @@ async def test_release_refuses_anything_but_a_verified_v13_clear(
                 ScreeningReviewEvent.event_kind == "manual",
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("adjudication_policy_version", "adjudication_prompt_revision"),
+    [
+        (12, None),
+        (13, "adjudicator-v7-policy-v12"),
+    ],
+)
+async def test_release_refuses_signed_older_policy_adjudication(
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    adjudication_policy_version: int,
+    adjudication_prompt_revision: str | None,
+) -> None:
+    agent_id, quarantine_id = await _seed_held_clear(
+        session_maker,
+        policy_version=13,
+        adjudication_policy_version=adjudication_policy_version,
+        adjudication_prompt_revision=adjudication_prompt_revision,
+    )
+
+    refused = await client.post(
+        _release_url(quarantine_id), headers=_ADMIN_HEADERS, json=_release_body()
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["message"] == "court adjudication policy mismatch"
+    async with session_maker() as session:
+        agent = await session.get(Agent, agent_id)
+        retained = await session.get(ScreeningQuarantine, quarantine_id)
+        assert agent is not None and agent.status == AgentStatus.QUARANTINED
+        assert retained is not None and retained.status == "active"
 
 
 async def test_release_refuses_a_hold_superseded_by_a_later_attempt(
