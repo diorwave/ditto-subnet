@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import tarfile
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -119,6 +120,10 @@ from ditto.db.queries.screening import (
     _SCREENING_CLAIM_LOCK_KEY,
     MAX_SCREENING_EXPIRIES,
     POLICY_ONLY_RESCREEN_REASON,
+)
+from ditto.db.queries.screening_infra_retry import (
+    INFRA_AUTO_RETRY_REASON_CODES,
+    plan_infra_retries,
 )
 from ditto.db.queries.tickets import issue_ticket, ticket_attempt_cap
 from ditto.tests.legacy_era import retired_era_writes_allowed
@@ -2024,6 +2029,95 @@ class TestFederatedScreenerNodes:
         # the consumed bootstrap token cannot recover an older authority.
         assert replay.status_code == 401
 
+    async def test_controller_nodes_reports_admission_closed(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        app.state.config = replace(
+            app.state.config,
+            screener_auth=replace(
+                app.state.config.screener_auth,
+                controller_api_token=_CONTROLLER_TOKEN,
+            ),
+        )
+        now = datetime.now(UTC)
+        for node_id, concurrency in (("closed-node", 0), ("open-node", 2)):
+            hotkey = f"5{node_id}HotkeyXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+            await _seed_screener_node(
+                session_maker,
+                node_id=node_id,
+                hotkey=hotkey,
+                token=f"{node_id}-token-at-least-32-characters",
+                screening_concurrency=concurrency,
+            )
+            async with session_maker() as session, session.begin():
+                session.add(
+                    ScreenerHeartbeat(
+                        screener_hotkey=hotkey,
+                        instance_id=node_id,
+                        software_version="0.21.0",
+                        protocol_version=4,
+                        policy_version=SCREENING_POLICY_VERSION,
+                        state="polling",
+                        first_seen_at=now - timedelta(days=1),
+                        reported_at=now - timedelta(seconds=5),
+                        seen_at=now - timedelta(seconds=5),
+                        signature="ab" * 64,
+                    )
+                )
+
+        response = await client.get(
+            "/api/v1/screener/controller/nodes?environment=prod",
+            headers={"Authorization": f"Bearer {_CONTROLLER_TOKEN}"},
+        )
+
+        assert response.status_code == 200, response.text
+        nodes = {node["node_id"]: node for node in response.json()["nodes"]}
+        assert nodes["closed-node"]["admission_open"] is False
+        assert nodes["closed-node"]["screening_concurrency"] == 0
+        assert nodes["closed-node"]["ready"] is True
+        assert nodes["open-node"]["admission_open"] is True
+        assert nodes["open-node"]["ready"] is True
+
+    async def test_watchdog_leaves_operator_admission_closure_stopped(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        app.state.config = replace(
+            app.state.config,
+            screener_auth=replace(
+                app.state.config.screener_auth,
+                controller_api_token=_CONTROLLER_TOKEN,
+            ),
+        )
+        capacity = await client.put(
+            "/api/v1/screener/controller/capacity",
+            headers={"Authorization": f"Bearer {_CONTROLLER_TOKEN}"},
+            json={
+                **_capacity_payload("prod:first"),
+                "runnable_backlog": 2,
+                "desired_slots": 1,
+                "gce_target": 0,
+                "fallback_reason": "HETZNER_PRIMARY_ADMISSION_CLOSED",
+            },
+        )
+        assert capacity.status_code == 200, capacity.text
+
+        response = await client.get(
+            "/api/v1/public/screener-capacity-watchdog?environment=prod"
+        )
+
+        # Zero admission is a deliberate global stop, not a host failure.
+        assert response.status_code == 200
+        assert response.json()["activate_fallback"] is False
+        assert response.json()["reason"] == "controller_fresh"
+
     async def test_watchdog_is_quiet_while_controller_lease_is_fresh(
         self,
         app: FastAPI,
@@ -3353,6 +3447,7 @@ class TestClaim:
 
         assert response.status_code == 200, response.text
         assert response.json()["items"] == []
+        assert response.headers["X-Ditto-Claim-Empty-Reason"] == "claim_lock_busy"
 
     async def test_concurrent_node_claims_obey_node_limit_not_heartbeat_count(
         self,
@@ -3441,6 +3536,95 @@ class TestClaim:
             )
         assert running == 2
 
+    async def test_claim_zero_admission_sets_empty_reason_header(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        node_id = "closed-admission-node"
+        hotkey = "5ClosedAdmissionNodeHotkeyXXXXXXXXXXXXXXXXXXXXXX"
+        token = "closed-admission-node-token-at-least-32-characters"
+        await _seed_screener_node(
+            session_maker,
+            node_id=node_id,
+            hotkey=hotkey,
+            token=token,
+            screening_concurrency=0,
+        )
+        await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
+        _install_db(app, session_maker)
+        monkeypatch.setattr(
+            "ditto.api_server.endpoints.screener._admission_closed_logged_at", {}
+        )
+        headers = {"Authorization": f"Bearer {token}", "X-Screener-Hotkey": hotkey}
+
+        with caplog.at_level(logging.INFO, logger="ditto.api_server.endpoints"):
+            first = await client.post(_CLAIM_URL, headers=headers)
+            second = await client.post(_CLAIM_URL, headers=headers)
+
+        for response in (first, second):
+            assert response.status_code == 200, response.text
+            assert response.json()["items"] == []
+            assert response.headers["X-Ditto-Claim-Empty-Reason"] == (
+                "admission_closed"
+            )
+        closed_logs = [
+            record.getMessage()
+            for record in caplog.records
+            if "admission closed" in record.getMessage()
+        ]
+        assert closed_logs == [
+            f"screener node={node_id} admission closed: "
+            "screening_concurrency=0 active=0"
+        ]
+
+    async def test_claim_full_admission_sets_admission_full(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        node_id = "full-admission-node"
+        hotkey = "5FullAdmissionNodeHotkeyXXXXXXXXXXXXXXXXXXXXXXXX"
+        token = "full-admission-node-token-at-least-32-characters"
+        await _seed_screener_node(
+            session_maker,
+            node_id=node_id,
+            hotkey=hotkey,
+            token=token,
+            screening_concurrency=1,
+        )
+        now = datetime.now(UTC)
+        async with session_maker() as session, session.begin():
+            session.add_all(
+                [
+                    Agent(
+                        agent_id=uuid4(),
+                        miner_hotkey=f"5HK-endpoint-full-admission-{index}",
+                        name=f"endpoint-full-admission-{index}",
+                        sha256=f"{index + 1:02x}" * 32,
+                        status=AgentStatus.UPLOADED,
+                        created_at=now + timedelta(seconds=index),
+                    )
+                    for index in range(2)
+                ]
+            )
+        _install_db(app, session_maker)
+        headers = {"Authorization": f"Bearer {token}", "X-Screener-Hotkey": hotkey}
+
+        admitted = await client.post(_CLAIM_URL, headers=headers)
+        full = await client.post(_CLAIM_URL, headers=headers)
+
+        assert admitted.status_code == 200, admitted.text
+        assert len(admitted.json()["items"]) == 1
+        assert "X-Ditto-Claim-Empty-Reason" not in admitted.headers
+        assert full.status_code == 200, full.text
+        assert full.json()["items"] == []
+        assert full.headers["X-Ditto-Claim-Empty-Reason"] == "admission_full"
+
     async def test_legacy_gcp_claim_waits_for_fenced_overflow_capacity(
         self,
         app: FastAPI,
@@ -3496,6 +3680,7 @@ class TestClaim:
 
         assert held.status_code == 200, held.text
         assert held.json()["items"] == []
+        assert held.headers["X-Ditto-Claim-Empty-Reason"] == "legacy_gcp_held"
         async with session_maker() as session:
             agent = await session.get(Agent, agent_id)
             assert agent is not None
@@ -3521,6 +3706,7 @@ class TestClaim:
 
         assert admitted.status_code == 200, admitted.text
         assert admitted.json()["items"][0]["agent_id"] == str(agent_id)
+        assert "X-Ditto-Claim-Empty-Reason" not in admitted.headers
 
     async def test_legacy_gcp_claim_fails_closed_after_controller_lease_expires(
         self,
@@ -3576,6 +3762,121 @@ class TestClaim:
 
         assert response.status_code == 200, response.text
         assert response.json()["items"] == []
+
+    async def test_zero_admission_is_a_full_stop_for_automatic_retries(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """A due infrastructure retry starts only in an open screener slot."""
+        now = datetime.now(UTC)
+        node_id = "zero-admission-node"
+        hotkey = "5ZeroAdmissionNodeHotkeyXXXXXXXXXXXXXXXXXXXXXXXXX"
+        token = "zero-admission-node-token-at-least-32-characters"
+        await _seed_screener_node(
+            session_maker,
+            node_id=node_id,
+            hotkey=hotkey,
+            token=token,
+            screening_concurrency=1,
+        )
+        agent_ids = [
+            await _seed_agent(
+                session_maker,
+                status=AgentStatus.SCREENING_FAILED,
+                name=f"infra-parked-{index}",
+                miner_hotkey=f"5HK-zero-admission-{index}",
+                sha256=f"{index + 1:02x}" * 32,
+            )
+            for index in range(3)
+        ]
+        async with session_maker() as session, session.begin():
+            # The operator closes admission on the only node, and a Hetzner
+            # primary without GCE overflow holds the legacy route too.
+            session.add(
+                ScreenerNodeChannelSettingsRevision(
+                    environment="prod",
+                    node_id=node_id,
+                    parent_revision=1,
+                    settings={"screening_concurrency": 0},
+                    reason="Close screening admission",
+                    actor="test",
+                )
+            )
+            session.add(
+                ScreenerProviderSettingsRevision(
+                    environment="prod",
+                    parent_revision=0,
+                    settings={
+                        "runtime_provider_priority": ["hetzner", "gcp"],
+                        "source_review_provider_priority": ["hetzner", "gcp"],
+                        "build_provider_priority": ["hetzner", "gcp"],
+                        "gce_overflow_enabled": False,
+                        "primary_node_id": node_id,
+                    },
+                    reason="Exercise zero screening admission",
+                    actor="test",
+                )
+            )
+            # Spaced past the breaker window, and every backoff has elapsed.
+            session.add_all(
+                ScreeningAttempt(
+                    attempt_id=uuid4(),
+                    agent_id=agent_id,
+                    screener_hotkey=hotkey,
+                    policy_version=SCREENING_POLICY_VERSION,
+                    status="failed",
+                    started_at=now - timedelta(hours=3, minutes=10 * index),
+                    deadline=now - timedelta(hours=2),
+                    finished_at=now - timedelta(hours=2, minutes=10 * index),
+                    reason_code=INFRA_AUTO_RETRY_REASON_CODES[0],
+                )
+                for index, agent_id in enumerate(agent_ids)
+            )
+        async with session_maker() as session:
+            plan = await plan_infra_retries(session, now=now)
+        assert set(plan.claimable_agent_ids) == set(agent_ids)
+        _install_db(app, session_maker)
+        node_headers = {"Authorization": f"Bearer {token}", "X-Screener-Hotkey": hotkey}
+
+        for headers in (node_headers, _AUTH_HEADER):
+            closed = await client.post(_CLAIM_URL, headers=headers)
+            assert closed.status_code == 200, closed.text
+            assert closed.json()["items"] == []
+        async with session_maker() as session:
+            statuses = set(
+                await session.scalars(
+                    select(Agent.status).where(Agent.agent_id.in_(agent_ids))
+                )
+            )
+            running = await session.scalar(
+                select(func.count())
+                .select_from(ScreeningAttempt)
+                .where(ScreeningAttempt.status == "running")
+            )
+        assert statuses == {AgentStatus.SCREENING_FAILED}
+        assert running == 0
+
+        async with session_maker() as session, session.begin():
+            session.add(
+                ScreenerNodeChannelSettingsRevision(
+                    environment="prod",
+                    node_id=node_id,
+                    parent_revision=2,
+                    settings={"screening_concurrency": 1},
+                    reason="Open one screening slot",
+                    actor="test",
+                )
+            )
+        opened = await client.post(_CLAIM_URL, headers=node_headers)
+        assert opened.status_code == 200, opened.text
+        items = opened.json()["items"]
+        assert len(items) == 1
+        assert UUID(items[0]["agent_id"]) in agent_ids
+        full = await client.post(_CLAIM_URL, headers=node_headers)
+        assert full.status_code == 200, full.text
+        assert full.json()["items"] == []
 
     async def test_claim_with_zero_admission_still_expires_overdue_attempts(
         self,
@@ -3789,6 +4090,7 @@ class TestClaim:
         assert attempt.status == "failed"
         assert attempt.reason_code == "worker-lease-orphaned"
         assert agent is not None and agent.status == AgentStatus.SCREENING_FAILED
+
 
     async def test_mechanical_admission_claim_uses_its_dedicated_contract_fields(
         self,

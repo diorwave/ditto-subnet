@@ -433,10 +433,12 @@ async def fail_orphaned_screening_attempts(
     build is positive evidence the attempt is still being worked.
 
     These are infrastructure failures, not inconclusive reviews. Mark them
-    ``failed`` so they retry immediately without consuming the five-expiry
-    adjudication budget. Overdue leases are included: a worker that died while
-    no sweep ran is still an infrastructure failure. An overdue attempt without
-    this positive evidence is left for ``expire_screening_attempts``.
+    ``failed`` so they do not consume the five-expiry adjudication budget. They
+    park for an operator retry and are never retried automatically: a worker
+    also stops reporting an attempt after Platform rejected its verdict or the
+    worker died mid-screen, both of which the artifact can provoke. Overdue
+    leases are included when positive orphan evidence exists; otherwise they
+    are left for ``expire_screening_attempts``.
     """
     candidates = list(
         (
@@ -584,8 +586,8 @@ async def sweep_screening_leases(
     """Retire orphaned, then overdue, running leases; return both counts.
 
     The orphan sweep runs first so an overdue attempt with positive orphan
-    evidence retries as an infrastructure failure instead of parking as an
-    expiry. ``screener_hotkey`` limits the orphan sweep to that fleet; ``None``
+    evidence records an infrastructure failure instead of an expiry.
+    ``screener_hotkey`` limits the orphan sweep to that fleet; ``None``
     sweeps every hotkey holding a running attempt. Both sweeps skip or re-read
     locked rows, so callers need not hold the screening claim lock.
     """
