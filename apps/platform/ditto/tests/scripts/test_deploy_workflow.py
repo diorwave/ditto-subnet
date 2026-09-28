@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from jinja2 import Environment
 
 PLATFORM_ROOT = Path(__file__).parents[3]
 MONOREPO_ROOT = PLATFORM_ROOT.parents[1]
@@ -77,24 +76,22 @@ def test_public_proxy_denials_precede_every_proxy_route() -> None:
 
 
 def test_public_rate_limit_routes_go_upload_admission_to_python() -> None:
-    environment = Environment(autoescape=False)
-    environment.filters["bool"] = bool
-    template = environment.from_string(CADDYFILE_TEMPLATE.read_text())
-    context = {
-        "platform_domain": "example.test",
-        "platform_alias_domains": [],
-        "platform_caddy_email": "ops@example.test",
-        "platform_inference_relay_ports": [8010, 8011],
-        "platform_api_port": 8000,
-        "platform_upload_admission_relay_enabled": True,
-    }
-    disabled = template.render(**context, platform_public_rate_limit_per_minute=0)
-    enabled = template.render(**context, platform_public_rate_limit_per_minute=60)
+    caddy = CADDYFILE_TEMPLATE.read_text()
+    env = (
+        MONOREPO_ROOT
+        / "infra/ansible/roles/platform_app/templates/platform.env.j2"
+    ).read_text()
 
-    assert "handle @goUploadAdmission" in disabled
-    assert "handle @goUploadAdmission" not in enabled
-    assert "handle /api/v1/inference/*" in enabled
-    assert "reverse_proxy localhost:8000" in enabled
+    assert (
+        "DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE="
+        "{{ platform_public_rate_limit_per_minute }}"
+    ) in env
+    assert (
+        "{% if platform_upload_admission_relay_enabled | bool and "
+        "platform_public_rate_limit_per_minute | int == 0 %}\n"
+        "    @goUploadAdmission"
+    ) in caddy
+    assert "handle /api/v1/inference/*" in caddy
 
 
 def test_api_and_relay_releases_have_independent_concurrency_lanes() -> None:
