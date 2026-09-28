@@ -239,22 +239,53 @@ class CapacityDecisionTests(unittest.TestCase):
         self.assertEqual(target, 2)
         self.assertEqual(reason, "HETZNER_BACKLOG_OVERFLOW")
 
-    def test_unready_closed_primary_is_a_host_failure(self) -> None:
-        target, reason = gce_overflow_target(
-            demand=Demand(runnable=24, active=0, desired=4),
-            routing=_overflow_routing(),
-            primary_node={
+    def test_known_closure_survives_a_host_health_failure(self) -> None:
+        # Recovery: the operator's zero admission must persist when the primary
+        # stops heartbeating; only GCP-first routing or a one-slot activation
+        # can reopen screening.
+        for primary in (
+            {
                 "status": "active",
                 "ready": False,
                 "admission_open": False,
                 "screening_concurrency": 0,
             },
-            jobs_per_slot=6,
-            global_cap=6,
-        )
+            {"status": "offline", "ready": False, "screening_concurrency": 0},
+        ):
+            with self.subTest(primary=primary):
+                target, reason = gce_overflow_target(
+                    demand=Demand(runnable=24, active=0, desired=4),
+                    routing=_overflow_routing(),
+                    primary_node=primary,
+                    jobs_per_slot=6,
+                    global_cap=6,
+                )
 
-        self.assertEqual(target, 4)
-        self.assertEqual(reason, "HETZNER_PRIMARY_UNAVAILABLE")
+                self.assertEqual(target, 0)
+                self.assertEqual(reason, "HETZNER_PRIMARY_ADMISSION_CLOSED")
+
+    def test_unready_open_or_unknown_primary_is_a_host_failure(self) -> None:
+        for primary in (
+            {
+                "status": "active",
+                "ready": False,
+                "admission_open": True,
+                "screening_concurrency": 4,
+            },
+            {"status": "active", "ready": False},
+            None,
+        ):
+            with self.subTest(primary=primary):
+                target, reason = gce_overflow_target(
+                    demand=Demand(runnable=24, active=0, desired=4),
+                    routing=_overflow_routing(),
+                    primary_node=primary,
+                    jobs_per_slot=6,
+                    global_cap=6,
+                )
+
+                self.assertEqual(target, 4)
+                self.assertEqual(reason, "HETZNER_PRIMARY_UNAVAILABLE")
 
     def test_admission_closed_falls_back_to_concurrency_when_field_missing(
         self,
