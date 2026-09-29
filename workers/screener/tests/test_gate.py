@@ -300,10 +300,9 @@ async def test_v13_incomplete_source_hold_retains_verified_image_without_passing
         detail="source review incomplete",
         manifest_digest="ab" * 32,
         evidence=(
-            PolicyEvidence(
-                "adjudication", "adjudicated-source-review-escalate", "held"
-            ),
+            PolicyEvidence("adjudication", "source-review-adjudicated", "held"),
         ),
+        adjudication={"decision": "reject"},
         policy_version=13,
     )
     uploads: list[str] = []
