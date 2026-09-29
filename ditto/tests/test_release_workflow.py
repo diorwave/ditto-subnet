@@ -49,6 +49,13 @@ def test_release_is_the_single_post_merge_component_orchestrator() -> None:
         assert "push" not in triggers, workflow_name
 
 
+def test_screener_ci_runs_the_starter_provenance_drift_guard_on_kit_changes() -> None:
+    workflow = yaml.load(
+        (WORKFLOW_DIR / "screener-ci.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    assert "miners/dittobench-starter-kit/**" in workflow["on"]["pull_request"]["paths"]
+
+
 def test_coding_starter_ci_tracks_the_public_contract_and_builds_the_image() -> None:
     workflow = yaml.load(CODING_STARTER_CI_PATH.read_text(), Loader=yaml.BaseLoader)
     paths = workflow["on"]["pull_request"]["paths"]

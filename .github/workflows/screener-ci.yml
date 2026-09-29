@@ -6,6 +6,8 @@ on:
     paths:
       - workers/screener/**
       - packages/ditto-screening-protocol/**
+      # Starter provenance manifests must be regenerated with every kit change.
+      - miners/dittobench-starter-kit/**
       - .github/workflows/screener-ci.yml
 
 permissions:

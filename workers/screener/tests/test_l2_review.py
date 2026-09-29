@@ -84,11 +84,12 @@ from ditto_screening_protocol import (
     SourceReviewInvariant,
     SourceReviewInvariantDisposition,
 )
-from scripts.generate_starter_provenance import _tracked_files
+from scripts.generate_starter_provenance import tracked_starter_files
 
 SYSTEM_PROMPT = _l2_review_system_prompt(SCREENING_POLICY_VERSION)
 
 ROOT = Path(__file__).resolve().parents[1]
+STARTER_KIT = ROOT.parents[1] / "miners/dittobench-starter-kit"
 ATTEMPT = UUID("96af45fd-65da-4f59-87f8-8ddf5d57f88c")
 
 _PASS_CLAUSES = {
@@ -179,39 +180,40 @@ def test_l2_extraction_budget_allows_archives_over_twenty_mib(tmp_path: Path) ->
 
 def test_supported_starter_manifests_are_versioned_and_distinct() -> None:
     manifests = [json.loads(path.read_text()) for path in L2_STARTER_MANIFESTS]
-    assert [manifest["revision"] for manifest in manifests] == [
+    standalone = [
+        manifest
+        for manifest in manifests
+        if manifest["origin"] == "ditto-assistant/dittobench-starter-kit"
+    ]
+    monorepo = [manifest for manifest in manifests if manifest not in standalone]
+    assert [manifest["revision"] for manifest in standalone] == [
         "959cd69a1a8d3b0defbfb8296518adb7d4f17c14",
         "60aab4e5e2839ddb0fe8c80492bd7b76ba2668fd",
         "106076a40e4214cda821dfd0bee5c9c6785d425c",
         "23d9e87039a66e08548ec95826e7201b90988c5a",
     ]
-    assert all(
-        manifest["origin"] == "ditto-assistant/dittobench-starter-kit"
-        for manifest in manifests
-    )
-    assert [len(manifest["files"]) for manifest in manifests] == [38, 38, 42, 42]
-    assert [len(manifest["rust_functions"]) for manifest in manifests] == [
+    assert [len(manifest["files"]) for manifest in standalone] == [38, 38, 42, 42]
+    assert [len(manifest["rust_functions"]) for manifest in standalone] == [
         98,
         103,
         103,
         111,
     ]
-
-
-def test_starter_provenance_generator_ignores_untracked_build_outputs(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "starter"
-    (root / "src").mkdir(parents=True)
-    (root / "src" / "lib.rs").write_text("fn tracked() {}\n")
-    (root / "target" / "debug").mkdir(parents=True)
-    (root / "target" / "debug" / "artifact").write_text("untracked\n")
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    subprocess.run(["git", "add", "src/lib.rs"], cwd=root, check=True)
-
-    assert [path.relative_to(root).as_posix() for path in _tracked_files(root)] == [
-        "src/lib.rs"
-    ]
+    # Monorepo manifests come from scripts/generate_starter_provenance.py;
+    # tests/test_starter_provenance_current.py pins the newest one to the kit.
+    assert monorepo
+    assert all(
+        manifest["origin"]
+        == "ditto-assistant/ditto-subnet/miners/dittobench-starter-kit"
+        and manifest["version"] == 1
+        and "rust_functions" not in manifest
+        and not any(
+            path.startswith((".agents/", ".claude/")) for path in manifest["files"]
+        )
+        for manifest in monorepo
+    )
+    revisions = [manifest["revision"] for manifest in manifests]
+    assert len(set(revisions)) == len(revisions)
 
 
 def test_causal_basis_prefers_reconstructed_generator_over_downstream_effects() -> None:
@@ -2392,6 +2394,44 @@ async def test_inprocess_starter_diff_ignores_non_provenance_json(
     assert isinstance(payload["removed"], list)
 
 
+def _starter_workspace(kit: Path, tmp_path: Path) -> tuple[Path, list[str]]:
+    """Copy the submittable starter files, as `submit` would archive them."""
+    workspace = tmp_path / "starter"
+    files = sorted(tracked_starter_files(kit))
+    for relative in files:
+        target = workspace / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((kit / relative).read_bytes())
+    return workspace, files
+
+
+def _newest_starter_manifest() -> dict[str, Any]:
+    newest = max(
+        L2_STARTER_MANIFESTS, key=lambda path: int(path.stem.rsplit("-v", 1)[1])
+    )
+    return json.loads(newest.read_text())
+
+
+async def test_inprocess_starter_diff_matches_current_starter_kit(
+    tmp_path: Path,
+) -> None:
+    if not STARTER_KIT.is_dir():
+        pytest.skip("the monorepo starter kit is not part of this checkout")
+    workspace, files = _starter_workspace(STARTER_KIT, tmp_path)
+    newest = _newest_starter_manifest()
+
+    diff = json.loads(
+        await InProcessAnalyzerHarness().run(workspace, "starter_diff", {})
+    )
+
+    assert diff["revision"] == newest["revision"]
+    assert diff["candidates"][0]["changed_file_count"] == 0
+    assert diff["unchanged"] == files
+    assert diff["modified"] == []
+    assert diff["added"] == []
+    assert diff["removed"] == []
+
+
 async def test_inprocess_harness_rejects_unknown_command(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-allowlisted"):
         await InProcessAnalyzerHarness().run(tmp_path, "rm_rf", {})
@@ -3527,7 +3567,10 @@ async def test_sol_request_is_provider_locked_cached_and_concurrency_safe(
         record["causal_verification_reason"] == "causal-evidence-not-required"
         for record in records
     )
-    assert all(len(record["starter_revisions"]) == 4 for record in records)
+    assert all(
+        len(record["starter_revisions"]) == len(L2_STARTER_MANIFESTS)
+        for record in records
+    )
     assert all(record["budgets"]["max_cost_usd"] == 1.5 for record in records)
     assert all(record["budgets"]["max_analyzer_calls"] == 24 for record in records)
     assert all(
@@ -6754,12 +6797,14 @@ async def test_real_analyzer_container_isolated_and_canonical_starter_clean(
     output, _ = await build.communicate()
     assert build.returncode == 0, output.decode(errors="replace")[-4_000:]
     harness = IsolatedCodingHarness(docker_bin="docker", image=image)
-    diff = json.loads(await harness.run(starter, "starter_diff", {}))
-    assert diff["revision"] == "106076a40e4214cda821dfd0bee5c9c6785d425c"
+    workspace, _files = _starter_workspace(starter, tmp_path)
+    newest = _newest_starter_manifest()
+    diff = json.loads(await harness.run(workspace, "starter_diff", {}))
+    assert diff["revision"] == newest["revision"]
     assert not diff["modified"]
     assert not diff["added"]
     assert not diff["removed"]
-    assert len(diff["unchanged"]) == 42
+    assert len(diff["unchanged"]) == len(newest["files"])
     surfaces = json.loads(await harness.run(starter, "integrity_surfaces", {}))
     assert not surfaces["truncated"]
     assert surfaces["surfaces"]["service_entry"]["count"] > 0

@@ -64,6 +64,14 @@ when its root `Dockerfile` builds an image that serves the same `/health`,
 contract from a language manifest such as `Cargo.toml`, `package.json`,
 `pyproject.toml`, or `go.mod`.
 
+Source review trusts only exact `path + sha256` matches against the
+`ditto_screener/data/starter-kit-provenance-v*.json` manifests. After any
+`miners/dittobench-starter-kit` change, commit it and add the next manifest
+with `scripts/generate_starter_provenance.py`; keep older manifests so older
+honest derivatives still match. Screener CI runs on kit changes and
+`tests/test_starter_provenance_current.py` fails, printing the exact command,
+until the newest manifest matches the kit.
+
 The only shared application boundary is the dependency-light
 `packages/ditto-screening-protocol` package. It owns request/response models,
 `AgentStatus`, `SCREENING_POLICY_VERSION`, artifact metadata, and the canonical

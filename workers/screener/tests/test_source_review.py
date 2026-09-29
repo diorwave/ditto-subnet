@@ -36,8 +36,17 @@ from ditto_screening_protocol import (
     SourceReviewInvariantDisposition,
 )
 from ditto_screening_protocol.review_ledger import substantiated_concern_count
+from scripts.generate_starter_provenance import tracked_starter_files
 
 _SHA = "ab" * 32
+_STARTER_KIT = Path(__file__).resolve().parents[3] / "miners/dittobench-starter-kit"
+_MANIFESTS = tuple(
+    sorted(
+        (Path(source_review_module.__file__).parent / "data").glob(
+            "starter-kit-provenance-*.json"
+        )
+    )
+)
 
 _PASS_CLAUSES = {
     "i1_model_invocation": "genuine_model_result",
@@ -4052,6 +4061,61 @@ def test_closest_official_provenance_reports_ambiguous_exact_tie(
     assert provenance["candidate_revisions"] == ["newer", "older"]
     assert provenance["selection"] == "ambiguous-closest-supported-revisions"
     assert provenance["matched_exact_files"] == ["README.md"]
+
+
+def _current_starter_archive(tmp_path: Path) -> tuple[Path, list[str]]:
+    """Archive the submittable monorepo starter files, as `submit` would."""
+    if not _STARTER_KIT.is_dir():
+        pytest.skip("the monorepo starter kit is not part of this checkout")
+    files = sorted(tracked_starter_files(_STARTER_KIT))
+    archive = _archive_files(
+        tmp_path, {path: (_STARTER_KIT / path).read_bytes() for path in files}
+    )
+    return archive, files
+
+
+def test_closest_trusted_provenance_matches_current_starter_kit(
+    tmp_path: Path,
+) -> None:
+    archive, files = _current_starter_archive(tmp_path)
+
+    provenance = json.loads(
+        TarSourceRepository(str(archive)).closest_trusted_provenance(
+            tuple(str(path) for path in _MANIFESTS)
+        )
+    )
+
+    assert provenance["selection"] == "unique-closest-supported-revision"
+    assert provenance["origin"] == (
+        "ditto-assistant/ditto-subnet/miners/dittobench-starter-kit"
+    )
+    assert provenance["matched_exact_files"] == files
+    assert provenance["tracked_but_modified_files"] == []
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
+def test_malicious_preflight_trusts_current_starter_kit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    archive, _files = _current_starter_archive(tmp_path)
+    scanned: list[str] = []
+    analyze = source_review_module.analyze_static_candidates_v2
+
+    def recording_analyze(readable, reachability):
+        items = list(readable)
+        scanned.extend(path for path, _text in items)
+        return analyze(items, reachability)
+
+    monkeypatch.setattr(
+        source_review_module, "analyze_static_candidates_v2", recording_analyze
+    )
+
+    observation = TarSourceRepository(str(archive)).malicious_preflight(
+        artifact_sha256="a" * 64, mode=mode
+    )
+
+    assert observation is None
+    assert scanned == []
 
 
 async def test_sanitized_shortcut_fixture_produces_bounded_risk_digest(
