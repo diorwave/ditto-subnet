@@ -45,6 +45,10 @@ PolicyManifestProfile = Literal["core", "l1", "l1_l2"]
 # a revision here never changes the fleet's normal posture; Platform binds it to
 # one claimed attempt at a time.
 INTEGRITY_DOUBLE_CHECK_SCOPE = "integrity-double-check"
+# Report-only L2 canary postures live under scopes with this prefix. No worker
+# heartbeats under them, so a canary experiment can never become a node's or
+# the fleet's production posture; Platform binds one to a scheduled canary.
+L2_REPORT_CANARY_SCOPE_PREFIX = "l2-report-canary"
 
 # Keep these modules identical to worker builtin_policy_manifest. The optional
 # runtime challenge is no longer part of either built-in source-review profile.

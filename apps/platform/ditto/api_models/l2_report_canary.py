@@ -9,7 +9,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ditto_screening_protocol import ScoredRuntimeEvidenceLease
+from ditto_screening_protocol import (
+    ScoredRuntimeEvidenceLease,
+    ScreenerReviewSettingsOverride,
+)
 
 
 class L2CanaryScheduleRequest(BaseModel):
@@ -29,6 +32,9 @@ class L2CanaryScheduleRequest(BaseModel):
     run_mode: Literal["source_only", "full_runtime"] = "source_only"
     historical_ruling_kind: Literal["ath_clear", "screening_reject"] | None = None
     historical_ruling_id: Annotated[UUID | None, Field(strict=False)] = None
+    # An immutable ``l2-report-canary*`` posture to run instead of whatever the
+    # claiming worker's node resolves, so experiments never touch node scopes.
+    review_settings_revision: Annotated[int | None, Field(ge=1)] = None
     confirm_report_only: Literal[True]
 
     @model_validator(mode="after")
@@ -91,6 +97,9 @@ class L2CanaryView(BaseModel):
     review_label: str
     run_mode: Literal["source_only", "full_runtime"]
     source_attestation: dict | None = None
+    review_settings_revision: int | None = None
+    review_settings_scope: str | None = None
+    review_settings_checksum: str | None = None
     status: str
     claimed_instance_id: str | None
     lease_expires_at: datetime | None
@@ -140,6 +149,9 @@ class L2CanaryClaimResponse(BaseModel):
     lease_expires_at: datetime
     download_url: str
     scored_runtime_evidence: ScoredRuntimeEvidenceLease
+    # Set when the canary was scheduled with a pinned review posture; the
+    # worker applies it to the canary gate only, never to production claims.
+    review_settings_override: ScreenerReviewSettingsOverride | None = None
 
 
 class L2CanaryCompleteRequest(BaseModel):

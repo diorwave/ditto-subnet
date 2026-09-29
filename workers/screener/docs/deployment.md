@@ -118,6 +118,16 @@ separate lease with L2 in shadow mode and intentionally skips runtime
 challenges. Its top-level decision follows L1, so judge the paid review from
 the persisted `l2` finding and clearance fields.
 
+Write a canary review posture only to a review-settings scope that starts with
+`l2-report-canary` (for example `l2-report-canary-ctl137`), then schedule with
+`reviewSettingsRevision` set to that revision. No worker heartbeats under such
+a scope, so it can never become production posture. Platform accepts no other
+pinned scope. The claim returns the pin, sizes the lease from its timeouts, and
+the worker applies it to the isolated canary gate only. Never write a node or
+worker scope for a canary experiment: production screening on that node reads
+it too. An unpinned canary still runs under the claiming worker's current
+node-effective revision.
+
 `runMode: full_runtime` additionally builds and serves the exact artifact in an
 isolated Docker namespace and runs the private behavioral checks through the
 same gate. It applies L2 in an isolated `enforce_preview`: the reported decision

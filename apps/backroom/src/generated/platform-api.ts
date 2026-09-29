@@ -21373,6 +21373,7 @@ export interface components {
             miner_hotkey: string;
             /** Policy Version */
             policy_version: number;
+            review_settings_override?: components["schemas"]["ScreenerReviewSettingsOverride"] | null;
             /**
              * Run Mode
              * @default source_only
@@ -21482,6 +21483,8 @@ export interface components {
              * @enum {string}
              */
             review_label: "candidate_clear" | "known_reject";
+            /** Review Settings Revision */
+            review_settings_revision?: number | null;
             /**
              * Run Mode
              * @default source_only
@@ -21537,6 +21540,12 @@ export interface components {
             request_id: string;
             /** Review Label */
             review_label: string;
+            /** Review Settings Checksum */
+            review_settings_checksum?: string | null;
+            /** Review Settings Revision */
+            review_settings_revision?: number | null;
+            /** Review Settings Scope */
+            review_settings_scope?: string | null;
             /**
              * Run Mode
              * @enum {string}

@@ -18,6 +18,7 @@ import {
   fetchScreeningSubmissions,
   fetchScreeningFailureSummary,
   fetchL2ReportCanaryPreflight,
+  scheduleL2ReportCanary,
   fetchOwnerAttestations,
   fetchScreeningDisputes,
   fetchValidatorAssignments,
@@ -713,6 +714,71 @@ describe('screening submission admin service', () => {
       `https://platform-api.heyditto.ai/api/v1/admin/screener-l2-report-canaries/preflight/${agentId}/${sourceAttemptId}`,
       expect.objectContaining({ method: 'GET' }),
     )
+  })
+
+  it('forwards a pinned canary review posture and reads the stamped pin back', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const agentId = '11111111-1111-4111-8111-111111111111'
+    const sourceAttemptId = '22222222-2222-4222-8222-222222222222'
+    const requestId = '33333333-3333-4333-8333-333333333333'
+    const view = {
+      canary_id: '44444444-4444-4444-8444-444444444444',
+      request_id: requestId,
+      agent_id: agentId,
+      source_attempt_id: sourceAttemptId,
+      artifact_sha256: 'a'.repeat(64),
+      target_node_id: 'subnet-screener-1',
+      expected_agent_status: 'rejected',
+      expected_score_count: 0,
+      review_label: 'known_reject',
+      run_mode: 'source_only',
+      review_settings_revision: 141,
+      review_settings_scope: 'l2-report-canary-ctl137',
+      review_settings_checksum: 'c'.repeat(64),
+      status: 'queued',
+      claimed_instance_id: null,
+      report: null,
+      error_code: null,
+      created_at: '2026-09-29T00:00:00Z',
+      completed_at: null,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(view))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(scheduleL2ReportCanary({
+      requestId,
+      agentId,
+      sourceAttemptId,
+      artifactSha256: 'a'.repeat(64),
+      expectedAgentStatus: 'rejected',
+      expectedScoreCount: 0,
+      targetNodeId: 'subnet-screener-1',
+      reviewLabel: 'known_reject',
+      reviewSettingsRevision: 141,
+      confirmation: 'QUEUE REPORT ONLY L2 CANARY',
+    }, 'operator@example.com')).resolves.toMatchObject({
+      review_settings_revision: 141,
+      review_settings_scope: 'l2-report-canary-ctl137',
+    })
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      request_id: requestId,
+      review_settings_revision: 141,
+      confirm_report_only: true,
+    })
+    await expect(scheduleL2ReportCanary({
+      requestId,
+      agentId,
+      sourceAttemptId,
+      artifactSha256: 'a'.repeat(64),
+      expectedAgentStatus: 'rejected',
+      expectedScoreCount: 0,
+      targetNodeId: 'subnet-screener-1',
+      reviewLabel: 'known_reject',
+      reviewSettingsRevision: 0,
+      confirmation: 'QUEUE REPORT ONLY L2 CANARY',
+    }, 'operator@example.com')).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('forwards explicit pagination for screening history and disputes', async () => {

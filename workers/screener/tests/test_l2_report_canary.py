@@ -492,3 +492,170 @@ def test_full_runtime_report_distinguishes_challenge_state(
     )
     assert report["challenge_status"] == expected
     assert report["authority"] == "none"
+
+
+def _pinned_canary_claim(pin: dict) -> dict:
+    agent_id, attempt_id = uuid4(), uuid4()
+    revision = "a" * 40
+    keys = ("SAFE_KEY",)
+    digest = hashlib.sha256(
+        ("scored-runtime-env-v1\n13\n" + revision + "\n" + "\n".join(keys)).encode()
+    ).hexdigest()
+    packet = ScoredRuntimeEvidenceLease(
+        attempt_id=attempt_id,
+        artifact_sha256="b" * 64,
+        policy_version=13,
+        bench_version=13,
+        scorer_source_revision=revision,
+        release_descriptor_digest="sha256:" + "c" * 64,
+        scorer_image_digest="sha256:" + "d" * 64,
+        scorer_env_sha256=digest,
+        injected_keys=keys,
+        validator_count=3,
+        observed_at=int(datetime.now(UTC).timestamp()),
+    )
+    return {
+        "canary_id": str(uuid4()),
+        "agent_id": str(agent_id),
+        "source_attempt_id": str(attempt_id),
+        "artifact_sha256": "b" * 64,
+        "bench_version": 13,
+        "policy_version": 13,
+        "miner_hotkey": "miner",
+        "lease_token": "token",
+        "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=90)).isoformat(),
+        "download_url": "https://example.test/source",
+        "scored_runtime_evidence": packet.model_dump(mode="json"),
+        "review_settings_override": pin,
+    }
+
+
+class _PrimaryGate:
+    _client = object()
+    _journal = object()
+
+    def apply_review_settings(self, _settings) -> None:
+        raise AssertionError("a pinned canary posture reached the primary gate")
+
+
+@pytest.mark.asyncio
+async def test_consume_applies_pinned_revision_to_canary_gate_only(
+    make_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_config()
+    node = bootstrap_review_settings(config)
+    pinned = bootstrap_review_settings(
+        make_config(source_review_timeout_seconds=1234.0, l2_timeout_seconds=567.0)
+    ).model_copy(update={"revision": 41, "scope": "l2-report-canary-ctl"})
+    assert pinned.checksum != node.checksum
+    pin = {"revision": 41, "scope": pinned.scope, "checksum": pinned.checksum}
+    claim = _pinned_canary_claim(pin)
+    completions = []
+    fetched = []
+    manifests = []
+
+    class Platform:
+        async def claim_l2_report_canary(self, **kwargs):
+            # The claim still presents the worker's node-effective posture.
+            assert kwargs["settings_revision"] == node.revision
+            assert kwargs["settings_checksum"] == node.checksum
+            return claim
+
+        async def get_review_settings_revision(self, revision: int):
+            fetched.append(revision)
+            return pinned
+
+        async def complete_l2_report_canary(self, *_args, **kwargs):
+            completions.append(kwargs)
+
+    class Gate:
+        def __init__(self, canary_config, *_args, **_kwargs):
+            assert canary_config.source_review_timeout_seconds == 1234.0
+            assert canary_config.l2_timeout_seconds == 567.0
+
+        async def screen(self, **_kwargs):
+            return core_decision(
+                ScreeningOutcome.INCONCLUSIVE,
+                code="source-review-inconclusive",
+                summary="audit only",
+                detail="audit only",
+                policy_version=13,
+            )
+
+        def pop_shadow_review(self, _attempt_id):
+            return None
+
+        def pop_preview_l1_review(self, _attempt_id):
+            return None
+
+    def load_policy(*_args, **kwargs):
+        manifests.append((kwargs["manifest_profile"], kwargs["rotation_id"]))
+        return object()
+
+    monkeypatch.setattr(l2_report_canary, "BuildGate", Gate)
+    monkeypatch.setattr(l2_report_canary, "load_policy_engine", load_policy)
+    assert await l2_report_canary.consume(
+        config=config,
+        platform=Platform(),
+        primary_gate=_PrimaryGate(),
+        settings=node,
+        instance_id="subnet-screener-1-worker-1",
+    )
+    assert fetched == [41]
+    assert manifests == [
+        (
+            pinned.settings.policy_manifest_profile,
+            pinned.settings.policy_manifest_rotation_id,
+        )
+    ]
+    report = completions[0]["report"]
+    assert report["settings_revision"] == 41
+    assert report["settings_checksum"] == pinned.checksum
+    assert completions[0]["error_code"] == "l2-not-run"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["checksum", "scope", "unavailable"])
+async def test_consume_override_mismatch_completes_incomplete(
+    make_config, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    config = make_config()
+    node = bootstrap_review_settings(config)
+    pinned = bootstrap_review_settings(
+        make_config(source_review_timeout_seconds=1234.0)
+    ).model_copy(update={"revision": 41, "scope": "l2-report-canary-ctl"})
+    pin = {
+        "revision": 41,
+        "scope": "l2-report-canary-other" if fault == "scope" else pinned.scope,
+        "checksum": "e" * 64 if fault == "checksum" else pinned.checksum,
+    }
+    completions = []
+
+    class Platform:
+        async def claim_l2_report_canary(self, **_kwargs):
+            return _pinned_canary_claim(pin)
+
+        async def get_review_settings_revision(self, _revision: int):
+            if fault == "unavailable":
+                raise RuntimeError("platform unavailable")
+            return pinned
+
+        async def complete_l2_report_canary(self, *_args, **kwargs):
+            completions.append(kwargs)
+
+    def no_gate(*_args, **_kwargs):
+        raise AssertionError("a mismatched pin must not run a review")
+
+    monkeypatch.setattr(l2_report_canary, "BuildGate", no_gate)
+    assert await l2_report_canary.consume(
+        config=config,
+        platform=Platform(),
+        primary_gate=_PrimaryGate(),
+        settings=node,
+        instance_id="subnet-screener-1-worker-1",
+    )
+    assert completions[0]["status"] == "incomplete"
+    assert completions[0]["error_code"] == "review-settings-override-mismatch"
+    # Platform validates the report against the pin it stamped on the row.
+    assert completions[0]["report"]["settings_revision"] == 41
+    assert completions[0]["report"]["settings_checksum"] == pin["checksum"]

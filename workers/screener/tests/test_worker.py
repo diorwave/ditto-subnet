@@ -463,6 +463,71 @@ async def test_report_only_canary_emits_active_progress_and_clears_heartbeat(
     assert platform.heartbeats[-1].active_agent_id is None
 
 
+async def test_pinned_canary_leaves_next_production_claim_on_node_settings(
+    make_config: Callable[..., ScreenerConfig], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ditto_screener import l2_report_canary
+    from ditto_screener.review_settings import bootstrap_review_settings
+
+    from .test_l2_report_canary import _pinned_canary_claim
+
+    pinned = bootstrap_review_settings(
+        make_config(source_review_timeout_seconds=1234.0)
+    ).model_copy(update={"revision": 41, "scope": "l2-report-canary-ctl"})
+    claim = _pinned_canary_claim(
+        {"revision": 41, "scope": pinned.scope, "checksum": pinned.checksum}
+    )
+    claimed_with: list[Any] = []
+    completions: list[dict[str, Any]] = []
+
+    class Platform(_FakePlatform):
+        async def claim_next(
+            self, *, policy_version: int, review_settings: Any, instance_id: str
+        ) -> ScreenerQueueResponse:
+            claimed_with.append(review_settings)
+            return await super().claim_next(
+                policy_version=policy_version,
+                review_settings=review_settings,
+                instance_id=instance_id,
+            )
+
+        async def claim_l2_report_canary(self, **_kwargs: Any) -> dict | None:
+            return claim if not completions else None
+
+        async def complete_l2_report_canary(self, *_args: Any, **kwargs: Any) -> None:
+            completions.append(kwargs)
+
+    class CanaryGate:
+        def __init__(self, canary_config: ScreenerConfig, *_a: Any, **_k: Any):
+            assert canary_config.source_review_timeout_seconds == 1234.0
+
+        async def screen(self, **_kwargs: Any) -> ScreeningDecision:
+            return _decision(ScreeningOutcome.PASS)
+
+        def pop_shadow_review(self, _attempt_id: UUID) -> None:
+            return None
+
+        def pop_preview_l1_review(self, _attempt_id: UUID) -> None:
+            return None
+
+    monkeypatch.setattr(l2_report_canary, "BuildGate", CanaryGate)
+    monkeypatch.setattr(
+        l2_report_canary, "load_policy_engine", lambda *_a, **_k: object()
+    )
+    platform = Platform([[], []])
+    platform.review_settings_revisions[41] = pinned
+    gate = _FakeGate(_decision(ScreeningOutcome.PASS))
+    gate._client = object()  # type: ignore[attr-defined]
+    worker = _worker(make_config(), platform, gate)
+    node = platform.review_settings
+
+    assert await worker._sweep(asyncio.Event()) == 1
+    assert completions[0]["report"]["settings_revision"] == 41
+    await worker._sweep(asyncio.Event())
+    assert claimed_with == [node, node]
+    assert gate.applied_review_settings == [node, node]
+
+
 async def test_screen_one_pass_posts_signed_pass_verdict(
     make_config: Callable[..., ScreenerConfig],
 ) -> None:

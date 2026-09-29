@@ -7067,6 +7067,11 @@ class ScreenerL2ReportCanary(Base):
     # A newly verified current object for an older null-SHA attempt. This does
     # not claim what the historical attempt executed and never changes it.
     source_attestation: Mapped[dict | None] = mapped_column(_JSON_VARIANT)
+    # An operator-pinned ``l2-report-canary*`` review posture. Unpinned rows run
+    # under the claiming worker's node-effective settings.
+    review_settings_revision: Mapped[int | None] = mapped_column(Integer)
+    review_settings_scope: Mapped[str | None] = mapped_column(Text)
+    review_settings_checksum: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
     claimed_instance_id: Mapped[str | None] = mapped_column(Text)
     settings_revision: Mapped[int | None] = mapped_column(Integer)
@@ -7089,6 +7094,12 @@ class ScreenerL2ReportCanary(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(["target_node_id"], ["screener_nodes.node_id"]),
+        ForeignKeyConstraint(
+            ["review_settings_revision"],
+            ["screener_review_settings_revisions.revision"],
+            ondelete="RESTRICT",
+            name="screener_l2_canary_review_settings_revision_fkey",
+        ),
         UniqueConstraint("request_id", name="screener_l2_canary_request_key"),
         CheckConstraint(
             "artifact_sha256 ~ '^[0-9a-f]{64}$'", name="screener_l2_canary_sha_check"
@@ -7132,6 +7143,15 @@ class ScreenerL2ReportCanary(Base):
             "runtime_evidence_sha256 IS NULL OR "
             "runtime_evidence_sha256 ~ '^[0-9a-f]{64}$'",
             name="screener_l2_canary_runtime_check",
+        ),
+        CheckConstraint(
+            "(review_settings_revision IS NULL "
+            "AND review_settings_scope IS NULL "
+            "AND review_settings_checksum IS NULL) OR "
+            "(review_settings_revision IS NOT NULL "
+            "AND review_settings_scope IS NOT NULL "
+            "AND review_settings_checksum IS NOT NULL)",
+            name="screener_l2_canary_pin_check",
         ),
         Index("screener_l2_canary_queue_idx", "target_node_id", "status", "created_at"),
         Index(

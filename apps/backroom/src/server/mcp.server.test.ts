@@ -2409,6 +2409,27 @@ describe('Backroom MCP tools', () => {
     }
   })
 
+  it('pins report canary postures only through an l2-report-canary scope', async () => {
+    const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    try {
+      const listed = (await client.listTools()).tools.find(
+        (tool) => tool.name === 'schedule_l2_report_canary',
+      )
+      expect(listed?.inputSchema.properties).toHaveProperty('reviewSettingsRevision')
+      const help = readJsonResult(
+        await client.callTool({
+          name: 'get_backroom_tool_help',
+          arguments: { tool: 'schedule_l2_report_canary' },
+        }),
+      ) as { guidance: string }
+      expect(help.guidance).toContain('l2-report-canary* review-settings scope')
+      expect(help.guidance).toContain('never write node or worker scopes')
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('documents last_provider_success_at as the last GCE fleet read in the capacity tool help', async () => {
     const { client, server } = await connect([BACKROOM_READ_SCOPE])
 

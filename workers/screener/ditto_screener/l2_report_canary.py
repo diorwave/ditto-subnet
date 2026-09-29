@@ -21,7 +21,10 @@ from ditto_screener.heartbeat import ScreenerProgressStage
 from ditto_screener.platform import PlatformClient
 from ditto_screener.policy import ReviewJournal, load_policy_engine
 from ditto_screener.review_settings import EffectiveReviewSettings
-from ditto_screening_protocol import ScoredRuntimeEvidenceLease
+from ditto_screening_protocol import (
+    ScoredRuntimeEvidenceLease,
+    ScreenerReviewSettingsOverride,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,7 @@ class L2CanaryClaim(BaseModel):
     lease_expires_at: datetime
     download_url: str
     scored_runtime_evidence: ScoredRuntimeEvidenceLease
+    review_settings_override: ScreenerReviewSettingsOverride | None = None
 
 
 def _identity_report(
@@ -204,6 +208,40 @@ async def consume(
     )
     if on_claim is not None:
         on_claim(claim)
+    pin = claim.review_settings_override
+    if pin is not None:
+        # Platform bound this canary to an operator-pinned posture. It runs on
+        # the isolated canary gate only; the primary gate and the next
+        # production claim keep the node-effective settings.
+        try:
+            pinned = await platform.get_review_settings_revision(pin.revision)
+        except Exception:
+            logger.warning("pinned canary review settings unavailable", exc_info=True)
+            pinned = None
+        if (
+            pinned is None
+            or pinned.revision != pin.revision
+            or pinned.scope != pin.scope
+            or pinned.checksum != pin.checksum
+        ):
+            logger.error(
+                "report-only L2 claim review settings pin mismatch canary_id=%s",
+                claim.canary_id,
+            )
+            # Platform checks the report against the pin it stamped.
+            report = _identity_report(claim, settings)
+            report["settings_revision"] = pin.revision
+            report["settings_checksum"] = pin.checksum
+            await platform.complete_l2_report_canary(
+                claim.canary_id,
+                lease_token=claim.lease_token,
+                lease_expires_at=claim.lease_expires_at,
+                status="incomplete",
+                report=report,
+                error_code="review-settings-override-mismatch",
+            )
+            return True
+        settings = pinned
     if claim.policy_version != 13 or claim.bench_version != 13:
         logger.error("report-only L2 claim is not v13: %s", claim.canary_id)
         await platform.complete_l2_report_canary(
