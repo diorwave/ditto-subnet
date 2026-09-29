@@ -436,9 +436,23 @@ disarm_fleet_restore() {
 # disables errexit here, so every failure is handled explicitly.
 prune_releases() {
   local previous="$1" keep=' ' target releases indexes index pid link path entry name
+  case "$previous" in
+    none) ;;
+    releases/*)
+      if ! [[ "$previous" =~ ^releases/[0-9a-f]{40}$ ]]; then
+        log "previous release is unknown; not pruning"
+        return 0
+      fi
+      keep+="${previous##*/} "
+      ;;
+    *) log "previous release is unknown; not pruning"; return 0 ;;
+  esac
   target="$(readlink "$CURRENT_LINK")" || { log "current release is unreadable; not pruning"; return 0; }
+  if ! [[ "$target" =~ ^releases/[0-9a-f]{40}$ ]]; then
+    log "current release is invalid; not pruning"
+    return 0
+  fi
   keep+="${target##*/} "
-  [ -z "$previous" ] || keep+="${previous##*/} "
   releases="$(readlink -f "$RELEASES_DIR")" || return 1
   indexes="$(worker_indexes)" || { log "workers could not be listed; not pruning"; return 0; }
   for index in $indexes; do
@@ -478,6 +492,19 @@ prune_releases() {
 prune_analyzer_images() {
   run_rootless_as_service docker image prune --force --filter dangling=true \
     --filter label=ai.heyditto.screener.sha >/dev/null
+}
+
+prune_activated_release() {
+  local previous revision target
+  previous="$(manifest_value "$MANAGED_FILE" PREVIOUS_RELEASE)"
+  revision="$(manifest_value "$MANAGED_FILE" REVISION)"
+  target="$(readlink "$CURRENT_LINK")" || target=''
+  if [[ "$revision" =~ ^[0-9a-f]{40}$ ]] && [ "$target" = "releases/$revision" ]; then
+    prune_releases "$previous" || log "release pruning failed"
+  else
+    log "managed and current releases differ; not pruning releases"
+  fi
+  prune_analyzer_images || log "analyzer image pruning failed"
 }
 
 activate_release() {
@@ -530,14 +557,13 @@ activate_release() {
   fi
   disarm_fleet_restore
   umask 077
-  printf 'DESCRIPTOR=%s\nREVISION=%s\nVERSION=%s\nBUILDER_IMAGE=%s\nUPDATED_AT=%s\n' \
+  printf 'DESCRIPTOR=%s\nREVISION=%s\nVERSION=%s\nBUILDER_IMAGE=%s\nPREVIOUS_RELEASE=%s\nUPDATED_AT=%s\n' \
     "$exact" "$revision" "$(manifest_value "$STATE_DIR/candidate.env" FLEET_VERSION)" \
-    "$builder" "$(date +%s)" >"$MANAGED_FILE"
+    "$builder" "${old_target:-none}" "$(date +%s)" >"$MANAGED_FILE"
   rm -f "$FAILED_CANDIDATE_FILE"
   run_rootless_as_service docker image rm "$l2_candidate" >/dev/null 2>&1 || true
   log "activated $revision from authenticated descriptor $exact"
-  prune_releases "$old_target" || log "release pruning failed"
-  prune_analyzer_images || log "analyzer image pruning failed"
+  prune_activated_release
 }
 
 # Test-only entrypoints: exercise the real drain, start, preparation, and
@@ -572,6 +598,10 @@ case "${SCREENER_FLEET_TEST_ENTRYPOINT:-}" in
     prune_analyzer_images
     exit 0
     ;;
+  prune_activated_release)
+    prune_activated_release
+    exit 0
+    ;;
   *) die "unknown test entrypoint" ;;
 esac
 [ "$(id -u)" -eq 0 ] || die "run as root"
@@ -599,6 +629,7 @@ if [ -f "$FAILED_CANDIDATE_FILE" ] && [ "$(cat "$FAILED_CANDIDATE_FILE")" = "$ex
   die "candidate is suppressed after a failed activation; remove $FAILED_CANDIDATE_FILE to retry"
 fi
 if [ -f "$MANAGED_FILE" ] && [ "$(manifest_value "$MANAGED_FILE" DESCRIPTOR)" = "$exact" ]; then
+  prune_activated_release
   log "already running authenticated descriptor $exact"
   exit 0
 fi

@@ -997,8 +997,72 @@ def test_prune_skips_when_worker_cwd_unreadable(tmp_path: Path) -> None:
     assert (releases / ("f" * 40)).exists()
 
 
+def test_prune_retry_after_held_worker_exits(
+    tmp_path: Path,
+) -> None:
+    env, releases, units = _pruning_fleet(tmp_path)
+    _proc_entry(tmp_path, 102, releases / ("d" * 40) / "src/workers/screener")
+    state = Path(env["SCREENER_FLEET_UPDATE_STATE_DIR"])
+    state.joinpath("managed-release.env").write_text(
+        f"DESCRIPTOR=example@sha256:{'a' * 64}\n"
+        f"REVISION={'c' * 40}\n"
+        f"PREVIOUS_RELEASE=releases/{'b' * 40}\n"
+    )
+
+    first = _run(env, "prune_activated_release")
+    assert first.returncode == 0, first.stderr
+    assert (releases / ("d" * 40)).exists()
+    assert not (releases / ("e" * 40)).exists()
+
+    (units / "ditto-screener-worker@2.service.pid").write_text("0")
+    second = _run(env, "prune_activated_release")
+    assert second.returncode == 0, second.stderr
+    assert sorted(path.name for path in releases.iterdir()) == [
+        "b" * 40,
+        "c" * 40,
+        f"{'e' * 40}.staging.7",
+        "notes",
+    ]
+
+
+def test_already_current_tick_skips_release_deletion_without_previous_identity(
+    tmp_path: Path,
+) -> None:
+    env, releases, _units = _pruning_fleet(tmp_path)
+    _proc_entry(tmp_path, 102, releases / ("d" * 40) / "src/workers/screener")
+    state = Path(env["SCREENER_FLEET_UPDATE_STATE_DIR"])
+    state.joinpath("managed-release.env").write_text(
+        f"DESCRIPTOR=older-release\nREVISION={'c' * 40}\n"
+    )
+
+    result = _run(env, "prune_activated_release")
+
+    assert result.returncode == 0, result.stderr
+    assert "previous release is unknown; not pruning" in result.stderr
+    assert (releases / ("e" * 40)).exists()
+    assert (releases / ("f" * 40)).exists()
+
+
+def test_already_current_tick_skips_release_deletion_after_link_drift(
+    tmp_path: Path,
+) -> None:
+    env, releases, _units = _pruning_fleet(tmp_path)
+    _proc_entry(tmp_path, 102, releases / ("d" * 40) / "src/workers/screener")
+    state = Path(env["SCREENER_FLEET_UPDATE_STATE_DIR"])
+    state.joinpath("managed-release.env").write_text(
+        f"REVISION={'a' * 40}\nPREVIOUS_RELEASE=releases/{'b' * 40}\n"
+    )
+
+    result = _run(env, "prune_activated_release")
+
+    assert result.returncode == 0, result.stderr
+    assert "managed and current releases differ; not pruning releases" in result.stderr
+    assert (releases / ("e" * 40)).exists()
+    assert (releases / ("f" * 40)).exists()
+
+
 def test_rollback_path_does_not_prune() -> None:
-    """Only a successful activation prunes, and pruning never fails it."""
+    """Rollback never prunes; activated releases may retry best-effort cleanup."""
     updater = UPDATER.read_text()
     activation = updater[updater.index("activate_release()") :]
     rollback = activation[
@@ -1008,9 +1072,9 @@ def test_rollback_path_does_not_prune() -> None:
     ]
     assert "prune" not in rollback
     success = activation[activation.index('rm -f "$FAILED_CANDIDATE_FILE"') :]
-    assert 'prune_releases "$old_target" || log' in success
-    assert "prune_analyzer_images || log" in success
-    assert updater.count('prune_releases "$old_target"') == 1
+    assert "prune_activated_release" in success
+    assert "prune_analyzer_images || log" in updater
+    assert updater.count('prune_releases "$previous"') == 1
     restore = updater[
         updater.index("restore_fleet_after_abort()") : updater.index(
             "arm_fleet_restore()"

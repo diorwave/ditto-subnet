@@ -262,10 +262,13 @@ The updater also bounds its own disk use under `/opt/ditto/screener-fleet`. A
 failed preparation removes its `releases/<sha>.staging.<pid>` checkout on exit,
 and each run sweeps any staging checkout an earlier run abandoned. After a
 successful activation, and never after a rollback, it removes superseded
-`releases/<sha>` directories. It keeps the new release, the previous release as
-the rollback target, and every release a live worker process still runs from,
-such as a held review. If a live worker's release cannot be resolved, it skips
-pruning for that run. It then prunes only untagged analyzer images labelled
+`releases/<sha>` directories. It records the previous release in the managed
+release state and keeps that rollback target, the current release, and every
+release a live worker process still runs from, such as a held review. Later
+timer ticks retry pruning after held workers exit or a transient lookup fails.
+If the previous release identity is missing (including older managed state) or
+a live worker's release cannot be resolved, it skips release pruning for that
+run. It then prunes only untagged analyzer images labelled
 `ai.heyditto.screener.sha` on the rootless daemon. Pruning is best-effort and
 never fails an activation. The BuildKit cache has its own timer (see
 [`infra/docs/screener-scaling.md`](../infra/docs/screener-scaling.md)).
