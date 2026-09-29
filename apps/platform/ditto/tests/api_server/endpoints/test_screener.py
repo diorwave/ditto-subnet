@@ -5665,7 +5665,7 @@ class TestClaim:
     async def _bind_settings(
         session_maker: async_sessionmaker[AsyncSession],
         settings: ScreenerReviewSettings,
-    ) -> dict[str, object]:
+    ) -> dict[str, str | int]:
         """Publish ``settings`` globally and return the matching claim binding."""
         checksum = _review_settings_checksum(settings)
         async with session_maker() as session, session.begin():
@@ -5692,7 +5692,7 @@ class TestClaim:
     async def _claim_v13_bound(
         client: httpx.AsyncClient,
         monkeypatch: pytest.MonkeyPatch,
-        binding: dict[str, object],
+        binding: dict[str, str | int],
         *,
         lease_available: bool,
         bench_version: int = 13,
