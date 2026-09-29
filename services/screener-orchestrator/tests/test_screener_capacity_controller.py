@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -654,6 +655,7 @@ class CapacityDecisionTests(unittest.TestCase):
     def test_scale_down_to_zero_leaves_watchdog_disabled(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory))
+            settings.state_file.write_text(json.dumps({"provider_ready": True}))
             routing = ProviderRouting(
                 revision=1,
                 runtime_provider_priority=("hetzner", "gcp"),
@@ -671,11 +673,15 @@ class CapacityDecisionTests(unittest.TestCase):
                         "screening_concurrency": 2,
                     }
                 },
-                node_inventory=lambda: NodeInventory({}, 0),
+                node_inventory=lambda: self._inventory(
+                    self._gcp_row("vm-a", seen=1),
+                    self._gcp_row("vm-b", seen=2),
+                ),
                 renew=lambda snapshot: snapshot,
                 fence=lambda **_kwargs: None,
             )
             gce = _GCE(target=2)
+            gce.instances = {"vm-a", "vm-b"}
 
             with (
                 patch(
@@ -871,6 +877,9 @@ class CapacityDecisionTests(unittest.TestCase):
         first: NodeInventory,
         second: NodeInventory | ControllerError,
         operations: list[str],
+        routing: ProviderRouting | None = None,
+        desired: int = 4,
+        provider_ready: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Run one pass whose post-renew inventory read returns ``second``."""
         renewed: list[dict[str, Any]] = []
@@ -887,8 +896,10 @@ class CapacityDecisionTests(unittest.TestCase):
             return snapshot
 
         platform = SimpleNamespace(
-            demand=lambda **_kwargs: Demand(runnable=runnable, active=0, desired=4),
-            provider_routing=_overflow_routing,
+            demand=lambda **_kwargs: Demand(
+                runnable=runnable, active=0, desired=desired
+            ),
+            provider_routing=(lambda: routing) if routing else _overflow_routing,
             node_states=lambda: first.states,
             node_inventory=node_inventory,
             renew=renew,
@@ -901,7 +912,11 @@ class CapacityDecisionTests(unittest.TestCase):
             ),
             patch("screener_capacity.controller.GCEFleet", return_value=gce),
         ):
-            snapshot = reconcile(_settings(Path(directory)))
+            settings = _settings(Path(directory))
+            settings.state_file.write_text(
+                json.dumps({"provider_ready": provider_ready})
+            )
+            snapshot = reconcile(settings)
         return snapshot, renewed
 
     def test_scale_in_rereads_node_states_after_renew_and_defers_on_new_gce_lease(
@@ -968,6 +983,7 @@ class CapacityDecisionTests(unittest.TestCase):
     def test_scale_in_to_zero_resizes_after_clean_reread(self) -> None:
         operations: list[str] = []
         gce = _GCE(target=2, operations=operations)
+        gce.instances = {"vm-a", "vm-b"}
         idle = self._inventory(
             self._gcp_row("vm-a", seen=1), self._gcp_row("vm-b", seen=2)
         )
@@ -979,7 +995,110 @@ class CapacityDecisionTests(unittest.TestCase):
         self.assertEqual(gce.resize_watchdogs, [False])
         self.assertEqual(snapshot["gce_target"], 0)
 
-    def test_partial_scale_in_deletes_only_idle_instances(self) -> None:
+    def test_scale_in_to_zero_requires_every_managed_instance_to_be_idle(
+        self,
+    ) -> None:
+        cases = (
+            (self._inventory(self._gcp_row("vm-a", seen=1)), {"vm-a", "vm-b"}),
+            (
+                self._inventory(
+                    self._gcp_row("vm-a", seen=1),
+                    self._gcp_row("vm-b", seen=2, busy=True),
+                ),
+                {"vm-a", "vm-b"},
+            ),
+        )
+        for inventory, members in cases:
+            with self.subTest(inventory=inventory):
+                operations: list[str] = []
+                gce = _GCE(target=2, operations=operations)
+                gce.instances = members
+                snapshot, _ = self._scale_in_pass(
+                    gce,
+                    runnable=2,
+                    first=inventory,
+                    second=inventory,
+                    operations=operations,
+                )
+
+                self.assertEqual(gce.resized, [])
+                self.assertEqual(gce.target(), 2)
+                self.assertEqual(
+                    [event["detail"] for event in snapshot["events"]],
+                    ["GCE target 2 -> 0 deferred: instance_inventory_incomplete"],
+                )
+
+    def test_scale_in_to_zero_defers_on_running_attempt_without_heartbeat(self) -> None:
+        for running, reason in (
+            (1, "gce_active_lease"),
+            (None, "attribution_incomplete"),
+        ):
+            with self.subTest(running=running):
+                operations: list[str] = []
+                gce = _GCE(target=2, operations=operations)
+                snapshot, _ = self._scale_in_pass(
+                    gce,
+                    runnable=2,
+                    first=self._inventory(),
+                    second=self._inventory(running=running),
+                    operations=operations,
+                )
+
+                self.assertEqual(gce.resized, [])
+                self.assertEqual(gce.target(), 2)
+                self.assertEqual(snapshot["gce_target"], 0)
+                self.assertEqual(
+                    [event["detail"] for event in snapshot["events"]],
+                    [f"GCE target 2 -> 0 deferred: {reason}"],
+                )
+
+    def test_scale_in_to_zero_defers_without_a_legacy_claim_fence(self) -> None:
+        operations: list[str] = []
+        gce = _GCE(target=2, operations=operations)
+        routing = ProviderRouting(
+            revision=1,
+            runtime_provider_priority=("gcp", "hetzner"),
+            source_review_provider_priority=("gcp", "hetzner"),
+            build_provider_priority=("gcp", "hetzner"),
+        )
+        snapshot, _ = self._scale_in_pass(
+            gce,
+            runnable=0,
+            desired=0,
+            routing=routing,
+            first=self._inventory(),
+            second=self._inventory(),
+            operations=operations,
+        )
+
+        self.assertEqual(gce.resized, [])
+        self.assertEqual(snapshot["gce_target"], 0)
+        self.assertEqual(
+            [event["detail"] for event in snapshot["events"]],
+            ["GCE target 2 -> 0 deferred: legacy_claims_not_fenced"],
+        )
+
+    def test_scale_in_to_zero_defers_while_controller_is_unready(self) -> None:
+        operations: list[str] = []
+        gce = _GCE(target=2, operations=operations)
+        snapshot, renewed = self._scale_in_pass(
+            gce,
+            runnable=2,
+            first=self._inventory(),
+            second=self._inventory(),
+            operations=operations,
+            provider_ready=False,
+        )
+
+        self.assertEqual(gce.resized, [])
+        self.assertFalse(renewed[0]["provider_ready"])
+        self.assertEqual(snapshot["gce_target"], 0)
+        self.assertEqual(
+            [event["detail"] for event in snapshot["events"]],
+            ["GCE target 2 -> 0 deferred: legacy_claims_not_fenced"],
+        )
+
+    def test_partial_scale_in_defers_even_when_instances_are_idle(self) -> None:
         operations: list[str] = []
         gce = _GCE(target=3, operations=operations)
         gce.instances = {"vm-busy", "vm-old", "vm-new", "vm-unready"}
@@ -1002,13 +1121,17 @@ class CapacityDecisionTests(unittest.TestCase):
             gce, runnable=14, first=first, second=second, operations=operations
         )
 
-        self.assertEqual(gce.deleted_instances, [["vm-old", "vm-new"]])
+        self.assertEqual(gce.deleted_instances, [])
         self.assertEqual(gce.resized, [])
-        self.assertEqual(gce.resize_watchdogs, [True])
+        self.assertEqual(gce.resize_watchdogs, [])
         self.assertEqual(snapshot["gce_target"], 1)
         self.assertEqual(
             operations,
-            ["renew", "fence", "inventory", "delete:vm-old,vm-new", "renew"],
+            ["renew", "fence", "inventory", "renew"],
+        )
+        self.assertEqual(
+            [event["detail"] for event in snapshot["events"]],
+            ["GCE target 3 -> 1 deferred: per_instance_claim_fence_unavailable"],
         )
 
     def test_partial_scale_in_defers_on_unattributed_running_attempt(self) -> None:

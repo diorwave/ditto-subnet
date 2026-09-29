@@ -772,15 +772,15 @@ def _plan_gce_scale_in(
     *,
     target: int,
     current_target: int,
+    claims_fenced_at_zero: bool,
 ) -> tuple[list[str], str | None]:
-    """Name the idle instances a scale-in may delete, or why it must wait.
+    """Check whether scale-in is safe, or explain why it must wait.
 
     Runs after the fenced renew. A GCE worker may have claimed since the first
-    inventory read, so leases are read again here. At zero the renew already
-    withdrew overflow claim authorization, so no lease can follow this read. Legacy
-    rows share one hotkey and ``active_lease`` marks all of them while any
-    screens, so a partial scale-in names idle instances by their own
-    heartbeats and defers whenever a running attempt is not yet attributed.
+    inventory read, so leases are read again here. At zero a ready,
+    Hetzner-primary route's renew withdrew overflow claims; a GCP-first route
+    or an unready snapshot cannot safely fence them. Partial scale-in also
+    waits for a per-instance claim fence, since an idle heartbeat is not one.
     """
     try:
         inventory = platform.node_inventory()
@@ -791,13 +791,25 @@ def _plan_gce_scale_in(
         for row in inventory.states.values()
         if row.get("provider") == "gcp"
     }
+    running = inventory.legacy_gcp_running_attempts
     if target == 0:
-        if any(row.get("active_lease") is True for row in rows.values()):
+        if not claims_fenced_at_zero:
+            return [], "legacy_claims_not_fenced"
+        if running is None:
+            return [], "attribution_incomplete"
+        if running > 0 or any(row.get("active_lease") is True for row in rows.values()):
             return [], "gce_active_lease"
+        members = gce_fleet.running_instances()
+        if len(members) != current_target or any(
+            (row := rows.get(member)) is None
+            or row.get("ready") is not True
+            or row.get("instance_busy") is not False
+            for member in members
+        ):
+            return [], "instance_inventory_incomplete"
         return [], None
     legacy = [row for row in rows.values() if row.get("instance_busy") is not None]
     busy = sum(row["instance_busy"] is True for row in legacy)
-    running = inventory.legacy_gcp_running_attempts
     if running is None or running > busy:
         return [], "attribution_incomplete"
     # A heartbeat stays ready for minutes after its VM is deleted, so only
@@ -816,12 +828,9 @@ def _plan_gce_scale_in(
     excess = current_target - target
     if len(idle) < excess:
         return [], "insufficient_idle_instances"
-    # Accepted residual race: claims stay authorized while the target is
-    # nonzero, so a chosen worker can still claim before delete-instances runs.
-    # Its lease then expires into the orphaned-attempt path, whose automatic
-    # infrastructure retry is tracked separately; per-instance claim fencing is
-    # out of scope.
-    return [str(row["node_id"]) for row in idle[:excess]], None
+    # The shared legacy hotkey can claim on any instance while target is
+    # nonzero. Deleting a merely idle instance can orphan a new lease.
+    return [], "per_instance_claim_fence_unavailable"
 
 
 def reconcile(settings: Settings) -> dict[str, Any]:
@@ -985,7 +994,21 @@ def reconcile(settings: Settings) -> dict[str, Any]:
         try:
             platform.fence(epoch=settings.epoch)
             instances, scale_in_deferral = _plan_gce_scale_in(
-                platform, gce_fleet, target=target, current_target=current_target
+                platform,
+                gce_fleet,
+                target=target,
+                current_target=current_target,
+                claims_fenced_at_zero=(
+                    starting_provider_ready
+                    and any(
+                        priority[0] == "hetzner"
+                        for priority in (
+                            provider_routing.build_provider_priority,
+                            provider_routing.runtime_provider_priority,
+                            provider_routing.source_review_provider_priority,
+                        )
+                    )
+                ),
             )
             if scale_in_deferral is None and target == 0:
                 # Every instance is idle, so the group may pick any of them.
