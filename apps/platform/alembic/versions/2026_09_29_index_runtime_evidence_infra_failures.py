@@ -1,15 +1,15 @@
 """cover retryable runtime-evidence failures in the infra-failure index
 
 Revision ID: 5e2a8c4f9d17
-Revises: b6f3d0c7a915
+Revises: e0f28816bca9
 Create Date: 2026-09-29
 
 ``INFRA_AUTO_RETRY_REASON_CODES`` now also retries a worker's
 ``l2-runtime-evidence-unavailable`` failure: Platform attached no signed V13
 scorer-cohort lease to the claim, so the artifact was never judged (#2444). The
 fleet breaker scan under the global claim lock filters on exactly that tuple, so
-the partial ``screening_attempts_infra_failed_idx`` from ``3c9d5e7a1b42`` must
-name both codes or the scan falls back to a sequential walk.
+the partial ``screening_attempts_infra_failed_idx`` from ``e0f28816bca9`` must
+name all three codes or the scan falls back to a sequential walk.
 
 The predicate is duplicated in ``models.py`` and
 ``screening_infra_retry._infra_failure_filters``; keep all three in step.
@@ -33,7 +33,7 @@ from alembic import op
 from ditto.db.migration_lock import MAX_ATTEMPTS, backoff_delay, is_retryable, sqlstate
 
 revision: str = "5e2a8c4f9d17"
-down_revision: str | Sequence[str] | None = "b6f3d0c7a915"
+down_revision: str | Sequence[str] | None = "e0f28816bca9"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -43,9 +43,12 @@ INDEX_NAME = "screening_attempts_infra_failed_idx"
 NEW_CODE = "l2-runtime-evidence-unavailable"
 UPGRADED_PREDICATE = (
     "status = 'failed' AND reason_code IN "
-    f"('docker-build-infrastructure', '{NEW_CODE}')"
+    f"('docker-build-infrastructure', 'worker-claim-not-started', '{NEW_CODE}')"
 )
-PREVIOUS_PREDICATE = "status = 'failed' AND reason_code = 'docker-build-infrastructure'"
+PREVIOUS_PREDICATE = (
+    "status = 'failed' AND reason_code IN "
+    "('docker-build-infrastructure', 'worker-claim-not-started')"
+)
 _INDEX_STATE_SQL = """
 SELECT i.indisvalid, pg_get_expr(i.indpred, i.indrelid)
   FROM pg_index i

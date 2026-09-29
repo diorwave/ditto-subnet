@@ -330,6 +330,14 @@ def test_unknown_container_contract_detail_stays_public_safe() -> None:
             "limited time, then held for an operator retry.",
         ),
         (
+            "screener error: PlatformError: platform changed screening policy "
+            "during claim: expected 12, received 13 SECRET_FROM_WORKER",
+            "worker-claim-not-started",
+            "The screening worker released this submission before starting it. "
+            "This is operator-owned and is retried automatically with backoff for "
+            "a limited time, then held for an operator retry.",
+        ),
+        (
             "build failed: [timeout after 2700s]\nSECRET_FROM_BUILD",
             "docker-build-timeout",
             "Docker image build exceeded the 45-minute build time limit. "
@@ -704,6 +712,8 @@ def _heartbeat_payload(
                     "activated_at",
                 )
             )
+            if protocol_version >= 8:
+                release_token += ",1" if release.get("source_fixture_v1") else ",0"
         message = (
             "ditto-screener-heartbeat:v4:"
             f"{_SCREENER_HOTKEY}:0.4.2:{protocol_version}:"
@@ -3071,6 +3081,38 @@ class TestHeartbeat:
         payload["release"] = {"builtin_policy_version": SCREENING_POLICY_VERSION + 5}
         response = await client.post("/api/v1/screener/heartbeat", json=payload)
         assert response.status_code == 401, response.text
+
+    async def test_v8_fixture_capability_is_signed(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        payload = _heartbeat_payload(
+            protocol_version=8,
+            instance_id="subnet-screener-1-worker-1",
+            review_settings=_V5_REVIEW_SETTINGS,
+            host_specs={
+                "cpu_count": 4,
+                "memory_total_mib": 8000,
+                "disk_total_gib": 80,
+                "architecture": "x86_64",
+            },
+            release={
+                "builtin_policy_version": SCREENING_POLICY_VERSION,
+                "source_fixture_v1": True,
+            },
+        )
+        accepted = await client.post("/api/v1/screener/heartbeat", json=payload)
+        assert accepted.status_code == 200, accepted.text
+        tampered = dict(payload)
+        tampered["release"] = {
+            "builtin_policy_version": SCREENING_POLICY_VERSION,
+            "source_fixture_v1": False,
+        }
+        refused = await client.post("/api/v1/screener/heartbeat", json=tampered)
+        assert refused.status_code == 401, refused.text
 
     async def test_v7_requires_the_release_it_announces(
         self,
@@ -5697,8 +5739,9 @@ class TestClaim:
         lease_available: bool,
         bench_version: int = 13,
         bench_versions: dict[UUID, int] | None = None,
+        limit: int = 1,
     ) -> httpx.Response:
-        """Claim one policy-13 attempt under ``binding`` with a controlled lease."""
+        """Claim policy-13 attempts under ``binding`` with a controlled lease."""
         monkeypatch.setattr(
             "ditto.db.queries.screening.effective_screening_policy_version",
             lambda: 13,
@@ -5749,7 +5792,9 @@ class TestClaim:
             lease_lookup,
         )
         return await client.post(
-            "/api/v1/screener/claim", params=binding, headers=_AUTH_HEADER
+            "/api/v1/screener/claim",
+            params={**binding, "limit": limit},
+            headers=_AUTH_HEADER,
         )
 
     @staticmethod
@@ -5874,6 +5919,50 @@ class TestClaim:
             "scorer_cohort_unavailable" in record.getMessage()
             for record in caplog.records
         )
+
+    async def test_missing_cohort_lease_does_not_roll_back_other_batch_items(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(UTC)
+        v13 = await _seed_agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            name="v13-unavailable",
+            sha256="3" * 64,
+            created_at=now - timedelta(hours=2),
+        )
+        v12 = await _seed_agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            name="v12-behind",
+            sha256="4" * 64,
+            created_at=now - timedelta(hours=1),
+        )
+        _install_db(app, session_maker)
+        _install_chain(app)
+        binding = await self._bind_settings(
+            session_maker, ScreenerReviewSettings(mode="enforce", l3_enabled=False)
+        )
+
+        response = await self._claim_v13_bound(
+            client,
+            monkeypatch,
+            binding,
+            lease_available=False,
+            bench_versions={v12: 12},
+            limit=2,
+        )
+
+        assert response.status_code == 200, response.text
+        assert "X-Ditto-Claim-Empty-Reason" not in response.headers
+        items = response.json()["items"]
+        assert [item["agent_id"] for item in items] == [str(v13), str(v12)]
+        assert all(item["scored_runtime_evidence"] is None for item in items)
+        assert all(item["attempt_id"] for item in items)
 
     @pytest.mark.parametrize(
         "settings",
@@ -13149,11 +13238,27 @@ class TestQuarantineReviewContext:
             assert attempt is not None
             assert attempt.reason_code == "source-review-model-response-invalid"
 
-    async def test_docker_build_infrastructure_promises_only_the_automatic_retry(
+    @pytest.mark.parametrize(
+        ("reason_code", "detail"),
+        [
+            (
+                "docker-build-infrastructure",
+                "screener error: Docker build infrastructure: daemon down",
+            ),
+            (
+                "worker-claim-not-started",
+                "screener error: ClaimResponseInvalid: screening claim response "
+                "invalid: items.0.name: Field required",
+            ),
+        ],
+    )
+    async def test_fleet_owned_infrastructure_promises_only_the_automatic_retry(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
+        reason_code: str,
+        detail: str,
     ) -> None:
         """The miner-facing text must match what the claim path really does."""
         agent_id = await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
@@ -13169,8 +13274,8 @@ class TestQuarantineReviewContext:
                 passed=False,
                 attempt_id=attempt_id,
                 outcome="retryable_infra",
-                reason_code="docker-build-infrastructure",
-                detail="screener error: Docker build infrastructure: daemon down",
+                reason_code=reason_code,
+                detail=detail,
             ),
         )
 
@@ -13184,7 +13289,7 @@ class TestQuarantineReviewContext:
             attempt = await session.get(ScreeningAttempt, attempt_id)
             assert attempt is not None
             assert attempt.status == "failed"
-            assert attempt.reason_code == "docker-build-infrastructure"
+            assert attempt.reason_code == reason_code
             assert attempt.public_reason == refreshed.screening_reason
 
     async def test_withdrawn_agent_is_not_promised_an_automatic_retry(

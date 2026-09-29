@@ -2974,7 +2974,11 @@ def _heartbeat_signing_message(payload: ScreenerHeartbeatRequest) -> bytes:
         if payload.protocol_version >= 6:
             fields.append(host_specs_signing_token(payload.host_specs))
         if payload.protocol_version >= 7:
-            fields.append(fleet_release_signing_token(payload.release))
+            fields.append(
+                fleet_release_signing_token(
+                    payload.release, protocol_version=payload.protocol_version
+                )
+            )
         fields.append(str(payload.timestamp))
         return ("ditto-screener-heartbeat:v4:" + ":".join(fields)).encode()
     if payload.protocol_version >= 3:
@@ -3195,7 +3199,7 @@ async def heartbeat(
                 else None
             ),
             release=(
-                request_body.release.model_dump(mode="json")
+                request_body.release.model_dump(mode="json", exclude_defaults=True)
                 if request_body.release is not None
                 else None
             ),
@@ -3281,6 +3285,7 @@ async def heartbeat(
         accepted=accepted,
         seen_at=seen_at,
         lease_deadline=renewed_lease_deadline,
+        source_fixture_v1_heartbeat_supported=True,
     )
 
 
@@ -3417,10 +3422,10 @@ async def _bind_claim_runtime_leases(
     review that has no exact signed scorer-cohort lease. When a V13 arrival
     under policy 13 gets no lease, the only cause is the pinned cohort: it is
     not fully healthy, or an unpinned V13 ticket is live. That is fleet-wide
-    and transient, so this raises and the caller rolls the whole claim back:
-    the agent stays queued, no attempt row exists, and nothing counts toward
-    its attempt budget or the orphan sweep. Holding the queue is correct there,
-    because no other V13 attempt could get a lease either.
+    and transient. For a one-item claim, this raises and the caller rolls the
+    claim back: the agent stays queued and no attempt budget is spent. A batch
+    containing other items must commit so an unavailable V13 item cannot starve
+    unrelated arrivals; the worker settles that item as retryable infrastructure.
 
     Any other missing lease has a per-agent cause, such as a non-V13 arrival
     during an open rollout. Withholding it would stall every claim behind that
@@ -3429,7 +3434,7 @@ async def _bind_claim_runtime_leases(
     lane, and for a duplicate precheck; none of them run the source review.
     """
     bound: dict[UUID, tuple[int, ScoredRuntimeEvidenceLease | None]] = {}
-    withheld = False
+    unavailable: list[tuple[Agent, ScreeningAttempt, int]] = []
     for agent, attempt, duplicate_of in claimed:
         bench_version = await arrival_bench_version(session, agent=agent)
         lease = await scored_runtime_evidence_for_lease(
@@ -3457,7 +3462,9 @@ async def _bind_claim_runtime_leases(
         settings = ScreenerReviewSettings.model_validate(revision.settings)
         if settings.l3_enabled or settings.mode == "shadow":
             continue
-        withheld = True
+        unavailable.append((agent, attempt, bench_version))
+    if unavailable and len(claimed) == 1:
+        agent, attempt, bench_version = unavailable[0]
         logger.warning(
             "scorer_cohort_unavailable agent_id=%s attempt_id=%s bench_version=%d "
             "reason=no_cohort_packet",
@@ -3465,7 +3472,6 @@ async def _bind_claim_runtime_leases(
             attempt.attempt_id,
             bench_version,
         )
-    if withheld:
         raise _ScorerCohortUnavailableError
     return bound
 
@@ -4456,6 +4462,12 @@ def _public_screening_reason(detail: str, reason_code: str | None = None) -> str
             "before screening completed. This is operator-owned and is retried "
             "automatically with backoff for a limited time, then held for an "
             "operator retry."
+        )
+    if reason_code == "worker-claim-not-started":
+        return (
+            "The screening worker released this submission before starting it. "
+            "This is operator-owned and is retried automatically with backoff for "
+            "a limited time, then held for an operator retry."
         )
     if reason_code == "docker-build" or normalized.startswith("build failed"):
         if (

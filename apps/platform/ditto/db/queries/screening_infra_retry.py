@@ -1,9 +1,11 @@
 """Automatic, bounded retry and a fleet circuit breaker for infrastructure builds.
 
 A screener that reports ``docker-build-infrastructure`` (Docker daemon, BuildKit,
-or the build host failed; the miner's archive was never judged) or a retryable
+or the build host failed; the miner's archive was never judged), a retryable
 ``l2-runtime-evidence-unavailable`` (no signed scorer-cohort lease was available
-at claim) parks the agent as ``screening_failed``. Unlike the provider codes in
+at claim), or
+``worker-claim-not-started`` (the worker settled a durable claim before fetching
+the artifact) parks the agent as ``screening_failed``. Unlike the provider codes in
 ``PROVIDER_BACKOFF_REASON_CODES`` it is retried without an operator, so this
 module owns three things and nothing else:
 
@@ -95,8 +97,13 @@ if TYPE_CHECKING:
 # Every other cause (a present lease failing identity or freshness, or an arrival
 # that can never carry a lease) is an INCONCLUSIVE verdict with an ``expired``
 # attempt, never matched here, so no per-agent cause can loop this retry.
+# ``worker-claim-not-started`` qualifies because the worker emits it only between
+# ``claim_next`` and ``_screen_one`` (stop during a multi-item claim, a policy
+# change during the claim, an out-of-range item policy, an unparseable claim
+# response), before the artifact is fetched, built, or reviewed (#2446).
 INFRA_AUTO_RETRY_REASON_CODES: tuple[str, ...] = (
     "docker-build-infrastructure",
+    "worker-claim-not-started",
     "l2-runtime-evidence-unavailable",
 )
 
