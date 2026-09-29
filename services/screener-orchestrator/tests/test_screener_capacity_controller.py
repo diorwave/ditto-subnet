@@ -988,12 +988,12 @@ class CapacityDecisionTests(unittest.TestCase):
         self,
     ) -> None:
         # After the hold, an unknown primary is still an operator stop that
-        # cannot be ruled out, so GCE scales in rather than up.
+        # cannot be ruled out, so GCE never scales up to the backlog.
         with TemporaryDirectory() as directory:
             settings = replace(
                 _settings(Path(directory)), inventory_failure_hold_passes=2
             )
-            gce = _GCE(target=2)
+            gce = _GCE()
             for _ in range(2):
                 snapshot, renewed = self._inventory_pass(
                     settings,
@@ -1002,8 +1002,9 @@ class CapacityDecisionTests(unittest.TestCase):
                     routing=_overflow_routing(),
                     nodes=None,
                 )
-                self.assertEqual(gce.resized, [])
-                self.assertEqual(snapshot["gce_target"], 2)
+                self.assertEqual(
+                    snapshot["fallback_reason"], "PLATFORM_INVENTORY_UNAVAILABLE"
+                )
 
             snapshot, renewed = self._inventory_pass(
                 settings,
@@ -1013,8 +1014,9 @@ class CapacityDecisionTests(unittest.TestCase):
                 nodes=None,
             )
 
-            self.assertEqual(gce.resized, [0])
-            self.assertEqual(snapshot["fallback_reason"], "HETZNER_PRIMARY_UNKNOWN")
+            self.assertEqual(gce.resized, [])
+            self.assertEqual(renewed[0]["gce_target"], 0)
+            self.assertEqual(renewed[0]["fallback_reason"], "HETZNER_PRIMARY_UNKNOWN")
             self.assertIn(
                 {
                     "event_type": "platform_inventory_hold_expired",
