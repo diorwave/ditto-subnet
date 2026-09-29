@@ -421,6 +421,9 @@ async def test_current_starter_kit_clears_model_binding_audit(
                         "id": "rotating-private-control",
                         "request": {
                             "case_id": "private-control",
+                            # Packs send the request verbatim; the kit rejects
+                            # the serde-default bench_version 0 before /run.
+                            "bench_version": 12,
                             "system_prompt": "Answer the user concisely.",
                             "user_input": "Return a short acknowledgement.",
                             "tools": [],
