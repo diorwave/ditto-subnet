@@ -324,6 +324,7 @@ async def test_node_channel_settings_default_disabled_and_cas_guarded(
         "build_concurrency": 0,
         "runtime_concurrency": 0,
         "source_review_concurrency": 0,
+        "canary_concurrency": 1,
     }
 
     settings = {
@@ -332,6 +333,7 @@ async def test_node_channel_settings_default_disabled_and_cas_guarded(
         "build_concurrency": 3,
         "runtime_concurrency": 3,
         "source_review_concurrency": 6,
+        "canary_concurrency": 2,
     }
     applied = await client.post(
         path,
@@ -345,7 +347,7 @@ async def test_node_channel_settings_default_disabled_and_cas_guarded(
             "confirmation": (
                 "APPLY SCREENER NODE subnet-screener-1 SCREENING=8 "
                 "SANDBOX=3 BUILD=3 "
-                "RUNTIME=3 SOURCE_REVIEW=6"
+                "RUNTIME=3 SOURCE_REVIEW=6 CANARY=2"
             ),
         },
     )
@@ -364,7 +366,7 @@ async def test_node_channel_settings_default_disabled_and_cas_guarded(
             "confirmation": (
                 "APPLY SCREENER NODE subnet-screener-1 SCREENING=8 "
                 "SANDBOX=3 BUILD=3 "
-                "RUNTIME=3 SOURCE_REVIEW=6"
+                "RUNTIME=3 SOURCE_REVIEW=6 CANARY=2"
             ),
         },
     )
@@ -387,7 +389,7 @@ _OPEN_NODE_SETTINGS = dict.fromkeys(
 )
 _CLOSE_CONFIRMATION = (
     "APPLY SCREENER NODE subnet-screener-1 SCREENING=0 SANDBOX=4 BUILD=4 "
-    "RUNTIME=4 SOURCE_REVIEW=4 CLOSE PRODUCTION ADMISSION"
+    "RUNTIME=4 SOURCE_REVIEW=4 CANARY=1 CLOSE PRODUCTION ADMISSION"
 )
 _CLOSE_ADMISSION = {
     "environment": "prod",
@@ -451,9 +453,11 @@ async def test_closing_last_node_with_backlog_needs_only_explicit_confirmation(
     from ditto.tests.api_server.endpoints.test_screener import _seed_agent
 
     open_settings = ScreenerNodeChannelSettings(**_OPEN_NODE_SETTINGS)
+    # Stored revisions from before the canary cap validate with one canary.
+    assert open_settings.canary_concurrency == 1
     assert node_channel_settings_confirmation("subnet-screener-1", open_settings) == (
         "APPLY SCREENER NODE subnet-screener-1 SCREENING=4 SANDBOX=4 BUILD=4 "
-        "RUNTIME=4 SOURCE_REVIEW=4"
+        "RUNTIME=4 SOURCE_REVIEW=4 CANARY=1"
     )
     _install(app, session_maker)
     await _seed_open_primary(session_maker)
@@ -1027,7 +1031,7 @@ async def test_hetzner_job_claim_does_not_preclaim_signed_worker_attempt(
             "actor": "operator@example.com",
             "confirmation": (
                 "APPLY SCREENER NODE subnet-screener-1 SCREENING=1 "
-                "SANDBOX=0 BUILD=0 RUNTIME=0 SOURCE_REVIEW=0"
+                "SANDBOX=0 BUILD=0 RUNTIME=0 SOURCE_REVIEW=0 CANARY=1"
             ),
         },
     )

@@ -30107,6 +30107,8 @@ export interface components {
          *     limits allow operators to reserve or disable a lane, while ``sandbox_slots``
          *     prevents both lanes from consuming twice the physical host capacity.
          *     Source review is CPU-light and has its own independent limit.
+         *     ``canary_concurrency`` caps report-only L2 canaries only while admission
+         *     is open; they always leave ``screening_concurrency`` workers to production.
          */
         ScreenerNodeChannelSettings: {
             /**
@@ -30114,6 +30116,11 @@ export interface components {
              * @default 0
              */
             build_concurrency: number;
+            /**
+             * Canary Concurrency
+             * @default 1
+             */
+            canary_concurrency: number;
             /**
              * Runtime Concurrency
              * @default 0

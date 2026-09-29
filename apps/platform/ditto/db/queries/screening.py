@@ -185,6 +185,28 @@ async def try_acquire_screening_claim_lock(session: AsyncSession) -> bool:
     )
 
 
+async def has_claimable_screening_work(session: AsyncSession) -> bool:
+    """Report whether a fresh upload or authorized retry is waiting.
+
+    This mirrors only the two fresh-work arms of the claim's ``eligible``
+    predicate. It is a lock-free read for report-only lanes that must yield to
+    production, so it takes no claim lock or row locks and runs no sweeps.
+    """
+    return (
+        await session.scalar(
+            select(Agent.agent_id)
+            .where(
+                or_(
+                    Agent.status == AgentStatus.UPLOADED,
+                    (Agent.status == AgentStatus.SCREENING_FAILED)
+                    & failed_screening_retry_authorized(),
+                )
+            )
+            .limit(1)
+        )
+    ) is not None
+
+
 def screening_score_count() -> ScalarSelect[int]:
     """Return the accepted-score count correlated to the current agent."""
     return (

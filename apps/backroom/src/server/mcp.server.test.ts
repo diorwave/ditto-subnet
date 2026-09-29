@@ -2571,11 +2571,12 @@ describe('Backroom MCP tools', () => {
       build_concurrency: 1,
       runtime_concurrency: 1,
       source_review_concurrency: 1,
+      canary_concurrency: 0,
     }
     const reason = 'Start the approved one-slot Hetzner production canary'
     const confirmation =
       'APPLY SCREENER NODE subnet-screener-1 ' +
-      'SCREENING=1 SANDBOX=1 BUILD=1 RUNTIME=1 SOURCE_REVIEW=1'
+      'SCREENING=1 SANDBOX=1 BUILD=1 RUNTIME=1 SOURCE_REVIEW=1 CANARY=0'
     const control = {
       current: {
         environment: 'prod',
@@ -2602,6 +2603,19 @@ describe('Backroom MCP tools', () => {
       .mockResolvedValueOnce(Response.json(control))
     vi.stubGlobal('fetch', fetchMock)
     const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    const { tools } = await client.listTools()
+    const tool = tools.find(({ name }) => name === 'set_screener_node_channel_settings')
+    expect(tool?.inputSchema.properties?.settings).toMatchObject({
+      required: expect.arrayContaining(['canary_concurrency']),
+    })
+    const help = readJsonResult(
+      await client.callTool({
+        name: 'get_backroom_tool_help',
+        arguments: { tool: 'set_screener_node_channel_settings' },
+      }),
+    ) as { guidance: string }
+    expect(help.guidance).toContain('all six limits')
+    expect(help.guidance).toContain('always leave screening_concurrency workers free')
 
     const response = await client.callTool({
       name: 'set_screener_node_channel_settings',
@@ -2655,11 +2669,12 @@ describe('Backroom MCP tools', () => {
           build_concurrency: 1,
           runtime_concurrency: 1,
           source_review_concurrency: 1,
+          canary_concurrency: 0,
         },
         reason: 'Start the approved one-slot Hetzner production canary',
         confirmation:
           'APPLY SCREENER NODE subnet-screener-1 ' +
-          'SCREENING=1 SANDBOX=1 BUILD=1 RUNTIME=1 SOURCE_REVIEW=1',
+          'SCREENING=1 SANDBOX=1 BUILD=1 RUNTIME=1 SOURCE_REVIEW=1 CANARY=0',
       },
     })
 

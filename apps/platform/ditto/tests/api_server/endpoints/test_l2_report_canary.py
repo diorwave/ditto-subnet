@@ -32,7 +32,9 @@ from ditto.db.models import (
     ScreenerHeartbeat,
     ScreenerL2ReportCanary,
     ScreenerNode,
+    ScreenerNodeChannelSettingsRevision,
     ScreeningAttempt,
+    ScreeningRetryOverride,
     ScreeningReviewEvent,
 )
 from ditto.tests.api_server.endpoints.test_screener import _seed_agent, _seed_score
@@ -1132,3 +1134,332 @@ async def test_unready_worker_skips_an_older_full_runtime_row(
     async with session_maker() as session:
         waiting = await endpoints.get_l2_report_canary(full_canary, None, session)
     assert waiting.status == "queued"
+
+
+async def _seed_canary_node(
+    maker: async_sessionmaker[AsyncSession],
+    *,
+    workers: int,
+    canaries: int,
+    admission: dict[str, int] | None,
+) -> tuple[str, str]:
+    """Seed one node, fresh polling workers, and queued source-only canaries."""
+    sha = "c" * 64
+    agent_id = await _seed_agent(maker, status=AgentStatus.REJECTED, sha256=sha)
+    node_id = f"canary-admission-{uuid4().hex[:12]}"
+    hotkey = f"hotkey-{node_id}"
+    now = datetime.now(UTC)
+    async with maker() as session, session.begin():
+        session.add(
+            ScreenerNode(
+                environment="prod",
+                node_id=node_id,
+                provider="hetzner",
+                provider_resource_id=node_id,
+                screener_hotkey=hotkey,
+                token_hash="f" * 64,
+                token_expires_at=now + timedelta(hours=1),
+                status="active",
+                capacity=workers,
+            )
+        )
+        if admission is not None:
+            session.add(
+                ScreenerNodeChannelSettingsRevision(
+                    environment="prod",
+                    node_id=node_id,
+                    parent_revision=0,
+                    settings=admission,
+                    reason="Open production admission on the canary node",
+                    actor="test",
+                )
+            )
+        for worker in range(1, workers + 1):
+            session.add(
+                ScreenerHeartbeat(
+                    screener_hotkey=hotkey,
+                    instance_id=f"{node_id}-worker-{worker}",
+                    software_version="0.330.0",
+                    protocol_version=7,
+                    policy_version=13,
+                    state="polling",
+                    reported_at=now,
+                    seen_at=now,
+                    signature="f" * 128,
+                )
+            )
+        attempt_ids = [uuid4() for _ in range(canaries)]
+        for attempt_id in attempt_ids:
+            session.add(
+                ScreeningAttempt(
+                    attempt_id=attempt_id,
+                    agent_id=agent_id,
+                    artifact_sha256=sha,
+                    screener_hotkey=hotkey,
+                    policy_version=13,
+                    status="rejected",
+                    started_at=now - timedelta(minutes=1),
+                    deadline=now,
+                    finished_at=now,
+                )
+            )
+        await session.flush()
+        for attempt_id in attempt_ids:
+            session.add(
+                ScreenerL2ReportCanary(
+                    canary_id=uuid4(),
+                    request_id=uuid4(),
+                    agent_id=agent_id,
+                    source_attempt_id=attempt_id,
+                    artifact_sha256=sha,
+                    policy_version=13,
+                    bench_version=13,
+                    target_node_id=node_id,
+                    expected_agent_status="rejected",
+                    expected_score_count=0,
+                    review_label="known_reject",
+                    run_mode="source_only",
+                    status="queued",
+                )
+            )
+    return node_id, sha
+
+
+def _canary_claimer(
+    maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    node_id: str,
+    sha: str,
+):
+    monkeypatch.setattr(
+        endpoints,
+        "_resolve_effective_review_settings",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                revision=137,
+                checksum="d" * 64,
+                settings=SimpleNamespace(
+                    source_review_timeout_seconds=3600, timeout_seconds=1800
+                ),
+            )
+        ),
+    )
+
+    async def evidence_lookup(_session: AsyncSession, *, attempt_id, **_kwargs):
+        return _packet(attempt_id, sha)
+
+    monkeypatch.setattr(endpoints, "scored_runtime_evidence_for_lease", evidence_lookup)
+    storage = cast(
+        S3StorageClient,
+        SimpleNamespace(
+            presigned_get_url=AsyncMock(return_value="https://example.test/source")
+        ),
+    )
+    request = cast(
+        Request, SimpleNamespace(state=SimpleNamespace(screener_node_id=node_id))
+    )
+
+    async def claim(worker: int):
+        async with maker() as session:
+            return await endpoints.claim_l2_report_canary(
+                L2CanaryClaimRequest(
+                    instance_id=f"{node_id}-worker-{worker}",
+                    settings_revision=137,
+                    settings_checksum="d" * 64,
+                ),
+                request,
+                Response(),
+                f"hotkey-{node_id}",
+                session,
+                storage,
+            )
+
+    return claim
+
+
+async def _leased_canaries(
+    maker: async_sessionmaker[AsyncSession], node_id: str
+) -> int:
+    async with maker() as session:
+        return len(
+            list(
+                await session.scalars(
+                    select(ScreenerL2ReportCanary.canary_id).where(
+                        ScreenerL2ReportCanary.target_node_id == node_id,
+                        ScreenerL2ReportCanary.status == "leased",
+                    )
+                )
+            )
+        )
+
+
+def _admission(screening: int, canary: int | None = None) -> dict[str, int]:
+    settings = {
+        "screening_concurrency": screening,
+        "sandbox_slots": 4,
+        "build_concurrency": 4,
+        "runtime_concurrency": 4,
+        "source_review_concurrency": 4,
+    }
+    if canary is not None:
+        settings["canary_concurrency"] = canary
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_canary_claim_refused_while_production_work_is_claimable(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    node_id, sha = await _seed_canary_node(
+        session_maker, workers=4, canaries=2, admission=_admission(2, 4)
+    )
+    upload = await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
+    claim = _canary_claimer(session_maker, monkeypatch, node_id=node_id, sha=sha)
+
+    with caplog.at_level("INFO", logger=endpoints.__name__):
+        assert await claim(1) is None
+    assert "reason=production-claimable" in caplog.text
+    assert f"node_id={node_id}" in caplog.text
+    assert await _leased_canaries(session_maker, node_id) == 0
+
+    # Once production has taken the upload, the reserved lane opens again.
+    async with session_maker() as session, session.begin():
+        agent = await session.get(Agent, upload)
+        assert agent is not None
+        agent.status = AgentStatus.SCREENING
+    assert await claim(1) is not None
+
+
+@pytest.mark.asyncio
+async def test_canary_claim_ignores_unauthorized_failed_screening(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_id, sha = await _seed_canary_node(
+        session_maker, workers=4, canaries=2, admission=_admission(2, 4)
+    )
+    failed_sha = "e" * 64
+    failed = await _seed_agent(
+        session_maker, status=AgentStatus.SCREENING_FAILED, sha256=failed_sha
+    )
+    failed_attempt = uuid4()
+    now = datetime.now(UTC)
+    async with session_maker() as session, session.begin():
+        session.add(
+            ScreeningAttempt(
+                attempt_id=failed_attempt,
+                agent_id=failed,
+                artifact_sha256=failed_sha,
+                screener_hotkey="hotkey-production",
+                policy_version=13,
+                status="expired",
+                started_at=now - timedelta(hours=2),
+                deadline=now - timedelta(hours=1),
+                finished_at=now - timedelta(hours=1),
+            )
+        )
+    claim = _canary_claimer(session_maker, monkeypatch, node_id=node_id, sha=sha)
+
+    # A parked failure is not claimable production work until Backroom
+    # authorizes a retry of its exact latest attempt.
+    assert await claim(1) is not None
+    async with session_maker() as session, session.begin():
+        session.add(
+            ScreeningRetryOverride(
+                override_id=uuid4(),
+                agent_id=failed,
+                attempt_id=failed_attempt,
+                artifact_sha256=failed_sha,
+                expected_score_count=0,
+                reason="Retry after a single inconclusive expiry",
+                actor="operator@example.com",
+            )
+        )
+    assert await claim(2) is None
+    assert await _leased_canaries(session_maker, node_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_canary_claim_reserves_production_workers(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    node_id, sha = await _seed_canary_node(
+        session_maker, workers=4, canaries=4, admission=_admission(2, 4)
+    )
+    claim = _canary_claimer(session_maker, monkeypatch, node_id=node_id, sha=sha)
+
+    with caplog.at_level("INFO", logger=endpoints.__name__):
+        claims = await asyncio.gather(*(claim(worker) for worker in (1, 2, 3, 4)))
+    assert len([claimed for claimed in claims if claimed is not None]) == 2
+    assert await _leased_canaries(session_maker, node_id) == 2
+    assert "reason=production-reserved" in caplog.text
+    assert "screening_concurrency=2 canary_concurrency=4" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_canary_claim_respects_canary_concurrency(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Legacy revisions without the field validate with one canary.
+    node_id, sha = await _seed_canary_node(
+        session_maker, workers=4, canaries=2, admission=_admission(1)
+    )
+    claim = _canary_claimer(session_maker, monkeypatch, node_id=node_id, sha=sha)
+    assert await claim(1) is not None
+    assert await claim(2) is None
+    assert await _leased_canaries(session_maker, node_id) == 1
+
+    node_id, sha = await _seed_canary_node(
+        session_maker, workers=4, canaries=1, admission=_admission(1, 0)
+    )
+    claim = _canary_claimer(session_maker, monkeypatch, node_id=node_id, sha=sha)
+    assert await claim(1) is None
+    assert await _leased_canaries(session_maker, node_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_canary_claim_unchanged_when_admission_closed(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    node_id, sha = await _seed_canary_node(
+        session_maker, workers=4, canaries=5, admission=_admission(0, 0)
+    )
+    await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
+    claim = _canary_claimer(session_maker, monkeypatch, node_id=node_id, sha=sha)
+
+    # Production cannot use a closed node, so waiting uploads, the canary
+    # cap, and the first worker's heartbeat do not hold the idle lane back.
+    async with session_maker() as session, session.begin():
+        heartbeat = await session.scalar(
+            select(ScreenerHeartbeat).where(
+                ScreenerHeartbeat.instance_id == f"{node_id}-worker-1"
+            )
+        )
+        assert heartbeat is not None
+        await session.delete(heartbeat)
+    assert await claim(1) is not None
+    async with session_maker() as session, session.begin():
+        session.add(
+            ScreenerHeartbeat(
+                screener_hotkey=f"hotkey-{node_id}",
+                instance_id=f"{node_id}-worker-1",
+                software_version="0.330.0",
+                protocol_version=7,
+                policy_version=13,
+                state="screening",
+                reported_at=datetime.now(UTC),
+                seen_at=datetime.now(UTC),
+                signature="f" * 128,
+            )
+        )
+    for worker in (2, 3, 4):
+        assert await claim(worker) is not None
+    assert await _leased_canaries(session_maker, node_id) == 4
+    assert await claim(5) is None

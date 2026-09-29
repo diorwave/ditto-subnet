@@ -54,6 +54,14 @@ revision that still names the retired Targon provider first honors the same
 closed and unknown stops; its GCE fallback (`RETIRED_PROVIDER_ROUTING`) applies
 only to a primary known to be open.
 
+Report-only L2 canaries never count as production admission. On a node with
+`screening_concurrency=0` they may use the idle workers, up to four source-only
+leases on fresh workers. Once admission is open, a canary claim yields while an
+upload or authorized retry is claimable, never leaves fewer than
+`screening_concurrency` fresh workers for production, and is capped by the
+node's `canary_concurrency` (default 1; 0 disables the lane). The node
+confirmation therefore ends its limits with `CANARY=<n>`.
+
 A Platform deploy or transient 5xx on the routing or node-inventory read must
 not flap the GCE MIG. The controller holds the current GCE target, in both
 directions, for `--inventory-failure-hold-passes` consecutive failing passes

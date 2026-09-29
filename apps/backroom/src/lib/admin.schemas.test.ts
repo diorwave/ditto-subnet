@@ -476,10 +476,11 @@ describe('admin API schemas', () => {
       build_concurrency: 4,
       runtime_concurrency: 4,
       source_review_concurrency: 4,
+      canary_concurrency: 1,
     }
 
     expect(screenerNodeChannelSettingsConfirmation('subnet-screener-1', settings)).toBe(
-      'APPLY SCREENER NODE subnet-screener-1 SCREENING=0 SANDBOX=4 BUILD=4 RUNTIME=4 SOURCE_REVIEW=4 CLOSE PRODUCTION ADMISSION',
+      'APPLY SCREENER NODE subnet-screener-1 SCREENING=0 SANDBOX=4 BUILD=4 RUNTIME=4 SOURCE_REVIEW=4 CANARY=1 CLOSE PRODUCTION ADMISSION',
     )
     expect(
       screenerNodeChannelSettingsConfirmation('subnet-screener-1', {
@@ -487,7 +488,7 @@ describe('admin API schemas', () => {
         screening_concurrency: 4,
       }),
     ).toBe(
-      'APPLY SCREENER NODE subnet-screener-1 SCREENING=4 SANDBOX=4 BUILD=4 RUNTIME=4 SOURCE_REVIEW=4',
+      'APPLY SCREENER NODE subnet-screener-1 SCREENING=4 SANDBOX=4 BUILD=4 RUNTIME=4 SOURCE_REVIEW=4 CANARY=1',
     )
   })
 

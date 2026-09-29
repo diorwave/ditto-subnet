@@ -2369,7 +2369,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Set screener node concurrency',
       description:
-        'Apply one complete append-only concurrency revision to an exact enrolled node. Read get_screener_capacity immediately before writing and supply that node control revision as expectedRevision. screening_concurrency caps full attempts; build and runtime each have a lane cap but share sandbox_slots, and source review has its own cap. Zero disables a lane. Lowering a limit drains active work rather than revoking it. Supply all five limits, an audit reason, and the exact confirmation naming the node and every resulting value. Requires backroom:write.',
+        'Apply one complete append-only concurrency revision to an exact enrolled node. Read get_screener_capacity immediately before writing and supply that node control revision as expectedRevision. screening_concurrency caps full attempts; build and runtime each have a lane cap but share sandbox_slots, and source review has its own cap. canary_concurrency caps report-only L2 canaries only while admission is open; canaries always leave screening_concurrency workers free. Zero disables a lane. Lowering a limit drains active work rather than revoking it. Supply all six limits, an audit reason, and the exact confirmation naming the node and every resulting value. Requires backroom:write.',
       inputSchema: setScreenerNodeChannelSettingsInputSchema,
       annotations: toolAnnotations('write', true),
     },

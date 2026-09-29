@@ -134,6 +134,12 @@ observation; inspect its codes and the source finding before concluding that
 either labeled control passed. Keep adjudicator authority off until the paired
 full-runtime controls and their exact identities are reviewed.
 
+Canaries take only production's spare workers. While the node's
+`screening_concurrency` is above zero, Platform refuses a canary claim when an
+upload or authorized retry is waiting, keeps `screening_concurrency` fresh
+workers free, and caps the lane at the node's `canary_concurrency`. With
+admission closed, the idle workers run canaries as before.
+
 ## Policy v7 rollout
 
 1. Merge and deploy the platform protocol pin first. Existing v6 workers stop

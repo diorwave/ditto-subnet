@@ -400,6 +400,7 @@ function NodeChannelControl({
     { key: 'build_concurrency', label: 'Builds', max: 16 },
     { key: 'runtime_concurrency', label: 'Runtime smoke', max: 16 },
     { key: 'source_review_concurrency', label: 'Source review', max: 32 },
+    { key: 'canary_concurrency', label: 'Report canaries', max: 8 },
   ]
 
   async function submit() {

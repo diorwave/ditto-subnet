@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -60,7 +61,12 @@ from ditto.db.models import (
     ScreeningReviewEvent,
 )
 from ditto.db.queries.benchmark_rollout import arrival_bench_version
+from ditto.db.queries.screener_node_settings import (
+    resolve_screener_node_channel_settings,
+)
+from ditto.db.queries.screening import has_claimable_screening_work
 
+logger = logging.getLogger(__name__)
 admin_router = APIRouter(prefix="/admin/screener-l2-report-canaries", tags=["admin"])
 screener_router = APIRouter(prefix="/screener/l2-report-canaries", tags=["screener"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -283,6 +289,34 @@ async def _fixture_worker_ready(
         if release is not None and release.source_fixture_v1:
             return True
     return False
+
+
+async def _healthy_workers(
+    session: AsyncSession, *, node: ScreenerNode, now: datetime
+) -> set[str]:
+    return set(
+        await session.scalars(
+            select(ScreenerHeartbeat.instance_id).where(
+                ScreenerHeartbeat.screener_hotkey == node.screener_hotkey,
+                ScreenerHeartbeat.instance_id.like(f"{node.node_id}-worker-%"),
+                ScreenerHeartbeat.seen_at >= now - _WORKER_HEARTBEAT_MAX_AGE,
+                ScreenerHeartbeat.state.in_(("polling", "screening")),
+            )
+        )
+    )
+
+
+async def _has_queued_canary(session: AsyncSession, *, node_id: str) -> bool:
+    return (
+        await session.scalar(
+            select(ScreenerL2ReportCanary.canary_id)
+            .where(
+                ScreenerL2ReportCanary.target_node_id == node_id,
+                ScreenerL2ReportCanary.status == "queued",
+            )
+            .limit(1)
+        )
+    ) is not None
 
 
 async def _score_count(session: AsyncSession, agent_id: UUID) -> int:
@@ -854,26 +888,52 @@ async def claim_l2_report_canary(
         )
         if any(row.claimed_instance_id == payload.instance_id for row in active):
             return None
-        # Keep private-challenge runs isolated. Preserve the legacy first lease
-        # without requiring a heartbeat; additional source-only leases require
-        # fresh worker heartbeats and the node lock serializes their count.
+        # Keep private-challenge runs isolated. A closed node preserves the
+        # legacy first lease without requiring a heartbeat; every other lease
+        # requires a fresh worker heartbeat and the node lock serializes them.
         if any(row.run_mode == "full_runtime" for row in active):
             return None
-        if active:
-            healthy_workers = set(
-                await session.scalars(
-                    select(ScreenerHeartbeat.instance_id).where(
-                        ScreenerHeartbeat.screener_hotkey == node.screener_hotkey,
-                        ScreenerHeartbeat.instance_id.like(f"{node_id}-worker-%"),
-                        ScreenerHeartbeat.seen_at >= now - _WORKER_HEARTBEAT_MAX_AGE,
-                        ScreenerHeartbeat.state.in_(("polling", "screening")),
-                    )
+        _, limits = await resolve_screener_node_channel_settings(
+            session, node_id=node_id
+        )
+        # While admission is open, production owns the node first: waiting
+        # work blocks new canaries, and canaries never take the workers that
+        # screening_concurrency reserves. A closed node keeps the idle lane.
+        admission_open = limits.screening_concurrency > 0
+        healthy_workers = (
+            await _healthy_workers(session, node=node, now=now)
+            if active or admission_open
+            else set()
+        )
+        refusal: str | None = None
+        if admission_open and await has_claimable_screening_work(session):
+            refusal = "production-claimable"
+        elif active or admission_open:
+            cap = min(_MAX_PARALLEL_SOURCE_ONLY, len(healthy_workers))
+            if admission_open:
+                cap = min(
+                    cap,
+                    limits.canary_concurrency,
+                    max(0, len(healthy_workers) - limits.screening_concurrency),
                 )
-            )
-            if payload.instance_id not in healthy_workers or len(active) >= min(
-                _MAX_PARALLEL_SOURCE_ONLY, len(healthy_workers)
-            ):
-                return None
+            if payload.instance_id not in healthy_workers or len(active) >= cap:
+                refusal = "production-reserved"
+        if refusal is not None:
+            # Idle workers poll often; only name a refusal that held work back.
+            if admission_open and await _has_queued_canary(session, node_id=node_id):
+                logger.info(
+                    "l2 report canary claim refused node_id=%s instance_id=%s "
+                    "reason=%s screening_concurrency=%d canary_concurrency=%d "
+                    "healthy_workers=%d active=%d",
+                    node_id,
+                    payload.instance_id,
+                    refusal,
+                    limits.screening_concurrency,
+                    limits.canary_concurrency,
+                    len(healthy_workers),
+                    len(active),
+                )
+            return None
         queued = select(ScreenerL2ReportCanary).where(
             ScreenerL2ReportCanary.target_node_id == node_id,
             ScreenerL2ReportCanary.status == "queued",
