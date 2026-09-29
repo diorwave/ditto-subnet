@@ -77,8 +77,15 @@ The tool opens no hold and changes no setting.
 
 `https://backroom.dittobench.ai/mcp` is an OAuth-protected Streamable HTTP MCP
 server exposing the same operations as the console: screening quarantines and
-disputes, validator queue/slot/inference policy, benchmark rollouts, scoring
-policy, scores and leaderboards, and the emission burn.
+disputes, validator queue/slot/inference policy, the scoring lease TTL,
+benchmark rollouts, scoring policy, scores and leaderboards, and the emission
+burn.
+
+`get_scoring_lease_settings` / `set_scoring_lease_settings` (#1156) read and
+revise the deadline stamped on new canonical and score-retest replacement
+tickets (default 180 minutes, bounded 60-240 so it stays inside the validator
+245-minute restart drain). A revision needs `expectedRevision`, a reason, and
+`APPLY SCORING TICKET TTL <n> MINUTES`; live tickets keep their minted deadline.
 
 It was ported from the private `ditto-assistant/backroom` repository, which
 keeps only `backroom.heyditto.ai` and the Ditto app surface. Feature flags and

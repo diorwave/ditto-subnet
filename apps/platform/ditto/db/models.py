@@ -9434,6 +9434,58 @@ class InferenceConcurrencySettingsRevision(Base):
     )
 
 
+class ScoringLeaseSettingsRevision(Base):
+    """Append-only operator policy for scoring lease clocks (#1156).
+
+    Governs the deadline stamped on NEW canonical scoring and score-retest
+    replacement tickets. A live ticket keeps the deadline it was minted with.
+    Each revision stores the whole policy; see
+    ``ditto.api_models.scoring_lease_settings`` for the bounds.
+    """
+
+    __tablename__ = "scoring_lease_settings_revisions"
+
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    settings: Mapped[dict] = mapped_column(_JSON_VARIANT, nullable=False)
+    checksum: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("scope = '*'", name="scoring_lease_settings_scope_check"),
+        CheckConstraint(
+            "length(checksum) = 64", name="scoring_lease_settings_checksum_check"
+        ),
+        CheckConstraint(
+            "parent_revision >= 0",
+            name="scoring_lease_settings_parent_revision_check",
+        ),
+        CheckConstraint(
+            "length(trim(reason)) >= 8", name="scoring_lease_settings_reason_check"
+        ),
+        CheckConstraint(
+            "length(trim(actor)) BETWEEN 1 AND 120",
+            name="scoring_lease_settings_actor_check",
+        ),
+        Index(
+            "scoring_lease_settings_scope_revision_idx",
+            "scope",
+            "revision",
+            unique=True,
+        ),
+        UniqueConstraint(
+            "scope",
+            "parent_revision",
+            name="scoring_lease_settings_scope_parent_key",
+        ),
+    )
+
+
 class ValidatorSlotSettingsRevision(Base):
     """Append-only, operator-audited concurrent-benchmark-slot policy revision.
 

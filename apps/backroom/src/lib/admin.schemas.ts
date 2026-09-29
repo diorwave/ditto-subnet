@@ -4125,6 +4125,86 @@ export type SetValidatorIssuancePauseInput = z.infer<
   typeof setValidatorIssuancePauseInputSchema
 >
 
+// Scoring lease clocks (ditto-subnet #1156). One TTL governs the deadline
+// stamped on NEW canonical scoring tickets and on new score-retest replacement
+// tickets; a live ticket keeps the deadline it was minted with. The bounds
+// mirror ditto-platform's `ScoringLeaseSettings`: the floor stays above the
+// observed 8-wide v11 completion maximum, and the ceiling is the validator
+// Compose stop grace (245 minutes) minus five minutes for the signed report.
+// The platform stays the authority and its 409/422 text is surfaced verbatim.
+export const SCORING_LEASE_SETTINGS_SCOPE = '*'
+export const SCORING_TICKET_TTL_MIN_MINUTES = 60
+export const SCORING_TICKET_TTL_MAX_MINUTES = 240
+export const SCORING_TICKET_TTL_DEFAULT_MINUTES = 180
+
+// Required, never defaulted: a revision stores the whole policy, so a field
+// left out of a write must be refused rather than filled with a default.
+export const scoringLeaseSettingsSchema = z.object({
+  scoring_ticket_ttl_minutes: z
+    .number()
+    .int()
+    .min(SCORING_TICKET_TTL_MIN_MINUTES)
+    .max(SCORING_TICKET_TTL_MAX_MINUTES),
+})
+
+export const scoringLeaseSettingsRevisionSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  parent_revision: z.number().int().nonnegative(),
+  scope: z.string(),
+  settings: scoringLeaseSettingsSchema,
+  reason: z.string(),
+  actor: z.string(),
+  created_at: z.string(),
+  checksum: z.string().regex(/^[0-9a-f]{64}$/),
+})
+
+export const scoringLeaseSettingsControlSchema = z.object({
+  current: z.array(scoringLeaseSettingsRevisionSchema),
+  history: z.array(scoringLeaseSettingsRevisionSchema),
+  default: scoringLeaseSettingsSchema,
+  effective: z.object({
+    revision: z.number().int().nonnegative(),
+    scope: z.string(),
+    settings: scoringLeaseSettingsSchema,
+    // Revision 0 is the shipped default and carries no checksum.
+    checksum: z.string().regex(/^(?:[0-9a-f]{64})?$/),
+    source: z.enum(['revision', 'default']),
+    min_scoring_ticket_ttl_minutes: z.number().int().positive(),
+    max_scoring_ticket_ttl_minutes: z.number().int().positive(),
+    // Upper bound in seconds on how long a write takes to reach issuance.
+    max_age_seconds: z.number().nonnegative(),
+  }),
+})
+
+// Names the RESULTING TTL so the number is stated twice in one request. The
+// caller supplies both halves; this only checks that they agree.
+export function scoringLeaseConfirmation(scoringTicketTtlMinutes: number) {
+  return `APPLY SCORING TICKET TTL ${scoringTicketTtlMinutes} MINUTES`
+}
+
+export const setScoringLeaseSettingsInputSchema = z
+  .object({
+    scope: z.literal(SCORING_LEASE_SETTINGS_SCOPE).default(SCORING_LEASE_SETTINGS_SCOPE),
+    expectedRevision: z.number().int().nonnegative(),
+    settings: scoringLeaseSettingsSchema,
+    reason: auditReasonSchema(8),
+    confirmation: z.string(),
+  })
+  .superRefine((input, context) => {
+    const expected = scoringLeaseConfirmation(input.settings.scoring_ticket_ttl_minutes)
+    if (input.confirmation !== expected) {
+      context.addIssue({
+        code: 'custom',
+        message: `confirmation must be exactly ${expected}, naming the TTL this revision applies`,
+        path: ['confirmation'],
+      })
+    }
+  })
+
+export type ScoringLeaseSettings = z.infer<typeof scoringLeaseSettingsSchema>
+export type ScoringLeaseSettingsControl = z.infer<typeof scoringLeaseSettingsControlSchema>
+export type SetScoringLeaseSettingsInput = z.infer<typeof setScoringLeaseSettingsInputSchema>
+
 // What the operator screen needs from the fleet to choose a cap, read from the
 // platform's existing public validator heartbeat view. It is decoration, not
 // policy: the cap is a subnet-global number and the platform resolves it without

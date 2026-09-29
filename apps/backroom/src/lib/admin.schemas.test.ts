@@ -5,6 +5,9 @@ import type { input as ZodInput, output as ZodOutput } from 'zod'
 import type { components as PlatformComponents } from '../generated/platform-api'
 import {
   SCREENING_SUBMISSION_AGENT_STATUSES,
+  scoringLeaseConfirmation,
+  scoringLeaseSettingsControlSchema,
+  setScoringLeaseSettingsInputSchema,
   emissionEligibilityControlSchema,
   auditReasonSchema,
   baselineDiffManifestSchema,
@@ -4951,5 +4954,48 @@ describe('emission eligibility policy schema', () => {
       fleet_protocol_ready: false,
       required_protocol: 28,
     })
+  })
+})
+
+describe('scoring lease settings (#1156)', () => {
+  it('mirrors the generated Platform response shape', () => {
+    expectTypeOf<keyof ZodOutput<typeof scoringLeaseSettingsControlSchema>>().toEqualTypeOf<
+      keyof PlatformComponents['schemas']['AdminScoringLeaseSettingsResponse']
+    >()
+    expectTypeOf<
+      keyof ZodOutput<typeof scoringLeaseSettingsControlSchema>['effective']
+    >().toEqualTypeOf<keyof PlatformComponents['schemas']['EffectiveScoringLeaseSettings']>()
+  })
+
+  it('requires the whole policy, the 60-240 bound, and a confirmation naming the TTL', () => {
+    const base = {
+      expectedRevision: 0,
+      settings: { scoring_ticket_ttl_minutes: 150 },
+      reason: 'v11 completions fit well inside 150 minutes',
+      confirmation: scoringLeaseConfirmation(150),
+    }
+    expect(setScoringLeaseSettingsInputSchema.parse(base)).toMatchObject({
+      scope: '*',
+      settings: { scoring_ticket_ttl_minutes: 150 },
+    })
+    expect(scoringLeaseConfirmation(150)).toBe('APPLY SCORING TICKET TTL 150 MINUTES')
+    expect(() =>
+      setScoringLeaseSettingsInputSchema.parse({ ...base, settings: {} }),
+    ).toThrow()
+    for (const minutes of [59, 241]) {
+      expect(() =>
+        setScoringLeaseSettingsInputSchema.parse({
+          ...base,
+          settings: { scoring_ticket_ttl_minutes: minutes },
+          confirmation: scoringLeaseConfirmation(minutes),
+        }),
+      ).toThrow()
+    }
+    expect(() =>
+      setScoringLeaseSettingsInputSchema.parse({
+        ...base,
+        confirmation: scoringLeaseConfirmation(180),
+      }),
+    ).toThrow(/APPLY SCORING TICKET TTL 150 MINUTES/)
   })
 })

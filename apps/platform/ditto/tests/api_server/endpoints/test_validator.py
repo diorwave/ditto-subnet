@@ -67,6 +67,7 @@ from ditto.api_models.queue_policy_settings import (
     PrevGenCarryoverSettings,
     QueuePolicySettings,
 )
+from ditto.api_models.scoring_lease_settings import ScoringLeaseSettings
 from ditto.api_models.screener import SCREENING_POLICY_VERSION
 from ditto.api_models.stack_health import (
     ValidatorStackHealth,
@@ -182,6 +183,10 @@ from ditto.db.queries.retry_budget import (
     MAX_INFRA_RETRY_GRANTS,
 )
 from ditto.db.queries.rollout_dispatch import ROLLOUT_DISPATCH_LOCK_KEY
+from ditto.db.queries.scoring_lease_settings import (
+    insert_scoring_lease_settings_revision,
+    latest_scoring_lease_settings_revision,
+)
 from ditto.db.queries.tickets import issue_confirmation_ticket
 from ditto.tests.legacy_era import retired_era_writes_allowed
 
@@ -857,6 +862,30 @@ def _install_db(app: FastAPI, maker: async_sessionmaker[AsyncSession]) -> None:
             yield s
 
     app.dependency_overrides[get_session] = _session
+
+
+async def _write_scoring_ttl(
+    app: FastAPI, maker: async_sessionmaker[AsyncSession], *, minutes: int
+) -> None:
+    """Append one operator scoring lease revision and make issuance see it."""
+    settings = ScoringLeaseSettings(scoring_ticket_ttl_minutes=minutes)
+    payload = settings.model_dump(mode="json")
+    async with maker() as session, session.begin():
+        latest = await latest_scoring_lease_settings_revision(session)
+        await insert_scoring_lease_settings_revision(
+            session,
+            parent_revision=latest.revision if latest is not None else 0,
+            scope="*",
+            settings=payload,
+            checksum=hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            reason=f"test: scoring lease TTL {minutes} minutes",
+            actor="test",
+        )
+    # The resolver reads through app.state, not the request session override.
+    app.state.session_maker = maker
+    app.state.scoring_lease_settings.invalidate()
 
 
 async def _widest_carryover_policy(
@@ -6564,6 +6593,76 @@ class TestRequestJob:
         deadline = datetime.fromisoformat(body["deadline"].replace("Z", "+00:00"))
         assert before + timedelta(minutes=180) <= deadline
         assert deadline <= after + timedelta(minutes=180)
+
+    async def test_new_ticket_takes_the_operator_scoring_ttl_revision(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """#1156: a Backroom revision, not a constant, sets the next lease."""
+        agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
+        await _seed_capable_pool(session_maker)
+        await _write_scoring_ttl(app, session_maker, minutes=120)
+        _install_db(app, session_maker)
+        _install_chain(app)
+        before = datetime.now(UTC)
+        resp = await client.post(
+            "/api/v1/validator/job",
+            headers=_AUTH_HEADER,
+            json=_job_payload(slot_id=_SLOT_ID),
+        )
+        after = datetime.now(UTC)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["agent_id"] == str(agent_id)
+        deadline = datetime.fromisoformat(body["deadline"].replace("Z", "+00:00"))
+        assert before + timedelta(minutes=120) <= deadline
+        assert deadline <= after + timedelta(minutes=120)
+
+    async def test_lowering_the_scoring_ttl_never_rewrites_a_live_deadline(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """#1156: in-flight tickets keep their stamped deadline."""
+        agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
+        await _seed_capable_pool(session_maker)
+        _install_db(app, session_maker)
+        _install_chain(app)
+        app.state.session_maker = session_maker
+        first = await client.post(
+            "/api/v1/validator/job",
+            headers=_AUTH_HEADER,
+            json=_job_payload(slot_id=_SLOT_ID),
+        )
+        assert first.status_code == 200, first.text
+        async with session_maker() as session:
+            ticket = await session.get(
+                ValidatorTicket, (agent_id, _BENCH_VERSION, _VALIDATOR_HOTKEY)
+            )
+            assert ticket is not None
+            minted_deadline = ticket.deadline
+        assert minted_deadline - ticket.issued_at == timedelta(minutes=180)
+
+        await _write_scoring_ttl(app, session_maker, minutes=60)
+        resumed = await client.post(
+            "/api/v1/validator/job",
+            headers=_AUTH_HEADER,
+            json=_job_payload(slot_id=_SLOT_ID),
+        )
+
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["agent_id"] == str(agent_id)
+        assert resumed.json()["deadline"] == first.json()["deadline"]
+        async with session_maker() as session:
+            ticket = await session.get(
+                ValidatorTicket, (agent_id, _BENCH_VERSION, _VALIDATOR_HOTKEY)
+            )
+            assert ticket is not None
+            assert ticket.status == TicketStatus.ISSUED
+            assert ticket.deadline == minted_deadline
 
     async def test_canonical_candidate_preempts_runnable_score_retest(
         self,

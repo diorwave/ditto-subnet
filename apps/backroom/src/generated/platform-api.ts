@@ -1857,6 +1857,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/scoring-lease-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Settings
+         * @description Current policy, append-only history, the default, and what is in force.
+         */
+        get: operations["get_settings_api_v1_admin_scoring_lease_settings_get"];
+        put?: never;
+        /**
+         * Create Settings Revision
+         * @description Append one optimistic, confirmation-gated revision.
+         *
+         *     Reaches ticket issuance within the resolver TTL, fleet-wide, with no
+         *     restart. Live tickets keep the deadline they were minted with.
+         */
+        post: operations["create_settings_revision_api_v1_admin_scoring_lease_settings_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/screener-bootstrap-grants": {
         parameters: {
             query?: never;
@@ -11435,6 +11462,35 @@ export interface components {
             /** Validator Hotkey */
             validator_hotkey: string;
         };
+        /** AdminScoringLeaseSettingsRequest */
+        AdminScoringLeaseSettingsRequest: {
+            /**
+             * Actor
+             * @default admin_api
+             */
+            actor: string;
+            /** Confirmation */
+            confirmation: string;
+            /** Expected Revision */
+            expected_revision: number;
+            /** Reason */
+            reason: string;
+            /**
+             * Scope
+             * @default *
+             */
+            scope: string;
+            settings: components["schemas"]["ScoringLeaseSettings"];
+        };
+        /** AdminScoringLeaseSettingsResponse */
+        AdminScoringLeaseSettingsResponse: {
+            /** Current */
+            current: components["schemas"]["ScoringLeaseSettingsRevision"][];
+            default: components["schemas"]["ScoringLeaseSettings"];
+            effective: components["schemas"]["EffectiveScoringLeaseSettings"];
+            /** History */
+            history: components["schemas"]["ScoringLeaseSettingsRevision"][];
+        };
         /**
          * AdminScreenedImageRebuildDetail
          * @description Current guarded inputs for a build-only screened-image repair.
@@ -19489,6 +19545,36 @@ export interface components {
             /** Scope */
             scope: string;
             settings: components["schemas"]["QueuePolicySettings"];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "revision" | "default";
+        };
+        /**
+         * EffectiveScoringLeaseSettings
+         * @description What the next minted lease will use, and where it came from.
+         */
+        EffectiveScoringLeaseSettings: {
+            /** Checksum */
+            checksum: string;
+            /** Max Age Seconds */
+            max_age_seconds: number;
+            /**
+             * Max Scoring Ticket Ttl Minutes
+             * @default 240
+             */
+            max_scoring_ticket_ttl_minutes: number;
+            /**
+             * Min Scoring Ticket Ttl Minutes
+             * @default 60
+             */
+            min_scoring_ticket_ttl_minutes: number;
+            /** Revision */
+            revision: number;
+            /** Scope */
+            scope: string;
+            settings: components["schemas"]["ScoringLeaseSettings"];
             /**
              * Source
              * @enum {string}
@@ -29294,6 +29380,38 @@ export interface components {
             reason?: ("invalid_json" | "malformed_capabilities" | "unsupported_bench_version" | "calibration_unreadable" | "identity_mismatch") | null;
         };
         /**
+         * ScoringLeaseSettings
+         * @description The complete scoring-lease clock policy.
+         */
+        ScoringLeaseSettings: {
+            /**
+             * Scoring Ticket Ttl Minutes
+             * @default 180
+             */
+            scoring_ticket_ttl_minutes: number;
+        };
+        /** ScoringLeaseSettingsRevision */
+        ScoringLeaseSettingsRevision: {
+            /** Actor */
+            actor: string;
+            /** Checksum */
+            checksum: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Parent Revision */
+            parent_revision: number;
+            /** Reason */
+            reason: string;
+            /** Revision */
+            revision: number;
+            /** Scope */
+            scope: string;
+            settings: components["schemas"]["ScoringLeaseSettings"];
+        };
+        /**
          * ScreenEvidenceItem
          * @description One bounded, public-safe policy evidence summary carried on a verdict.
          *
@@ -38814,6 +38932,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminScoreOutlierList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_settings_api_v1_admin_scoring_lease_settings_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminScoringLeaseSettingsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_settings_revision_api_v1_admin_scoring_lease_settings_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminScoringLeaseSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScoringLeaseSettingsRevision"];
                 };
             };
             /** @description Validation Error */

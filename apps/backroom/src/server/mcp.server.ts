@@ -111,6 +111,7 @@ import {
   setEfficiencyBonusSettingsInputSchema,
   setContinualRetestSettingsInputSchema,
   setInferenceConcurrencySettingsInputSchema,
+  setScoringLeaseSettingsInputSchema,
   runtimeProfileCaptureInputSchema,
   runtimeProfileLookupInputSchema,
   listInferenceTracesInputSchema,
@@ -256,6 +257,7 @@ import {
   fetchContinualRetestSettings,
   setContinualRetestSettings,
   fetchInferenceConcurrencySettings,
+  fetchScoringLeaseSettings,
   fetchInferenceRuntimeMetrics,
   fetchSourceReviewQueueSlo,
   fetchOutlierEscalation,
@@ -301,6 +303,7 @@ import {
   fetchScreenerPolicyManifestControl,
   rotateScreenerPolicyManifest,
   setInferenceConcurrencySettings,
+  setScoringLeaseSettings,
   setQueuePolicySettings,
   fetchValidatorSlotSettings,
   fetchValidatorFleetObservability,
@@ -447,6 +450,7 @@ export const WRITE_TOOL_NAMES = new Set([
   'restore_scored_screening_snapshot',
   'set_validator_slot_settings',
   'set_validator_issuance_pause',
+  'set_scoring_lease_settings',
   'activate_v13_scorer_cohort',
   'rotate_v13_scorer_cohort',
   'apply_copy_court_settings',
@@ -842,6 +846,10 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read effective validator slot and disk policy plus optional newest-first revision history. A validator advertising more slots than the cap is not an underutilized host. historyLimit defaults to 0.',
   get_validator_fleet:
     'Read validator heartbeats, stack identity, and version histogram.',
+  get_scoring_lease_settings:
+    'Read the scoring ticket TTL for new leases, bounds, and history.',
+  set_scoring_lease_settings:
+    'Set the scoring TTL for NEW leases only; live deadlines never change.',
   list_validator_assignments:
     'Active validator leases.',
   get_validator_capacity:
@@ -3114,6 +3122,38 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       annotations: toolAnnotations('write', true),
     },
     async (input) => write(() => setValidatorSlotSettings(input, props.session.email)),
+  )
+
+  registerTool(
+    'get_scoring_lease_settings',
+    {
+      title: 'Get scoring lease settings',
+      description:
+        'Read the platform-owned SN118 scoring lease clock (ditto-subnet #1156): scoring_ticket_ttl_minutes, the deadline stamped on every NEW canonical, rollout, backfill, carryover, continual-retest and benchmark-canary scoring ticket and on every new score-retest replacement ticket. Returns the policy in force, its revision (0 means the shipped 180-minute default still governs), whether it came from a stored revision or the default, the accepted min/max minutes, max_age_seconds (how long a write takes to reach issuance), and optional newest-first revision history with actor and reason. ' +
+        'The validator run budget is min(harness cap, lease minus the report margin), so this TTL binds the fleet without a validator release. Requires backroom:read and changes nothing.',
+      inputSchema: MCP_SETTINGS_HISTORY_INPUT,
+      annotations: toolAnnotations('read'),
+    },
+    async ({ historyLimit, historyOffset }) =>
+      result(
+        compacted(
+          pageRevisionHistory(await fetchScoringLeaseSettings(), historyLimit, historyOffset),
+          REVISION_LISTS,
+        ),
+      ),
+  )
+
+  registerTool(
+    'set_scoring_lease_settings',
+    {
+      title: 'Set scoring lease settings',
+      description:
+        'Apply one append-only revision of the SN118 scoring lease clock with no platform restart. Supply the COMPLETE policy (settings.scoring_ticket_ttl_minutes, 60-240), expectedRevision exactly as get_scoring_lease_settings reports it, an auditable reason of at least 8 characters, and the confirmation "APPLY SCORING TICKET TTL <n> MINUTES" naming the TTL this revision applies. A partial write is rejected and extra JSON is ignored. ' +
+        'The TTL is stamped only on NEW canonical and replacement tickets: a live ticket keeps its minted deadline, so lowering it never shortens running work and raising it never extends it. The ceiling is the validator stop grace (245 minutes) minus five minutes for the signed report, so a raise can never outlast a validator restart drain. Requires backroom:write.',
+      inputSchema: setScoringLeaseSettingsInputSchema,
+      annotations: toolAnnotations('write', true),
+    },
+    async (input) => write(() => setScoringLeaseSettings(input, props.session.email)),
   )
 
   registerTool(
