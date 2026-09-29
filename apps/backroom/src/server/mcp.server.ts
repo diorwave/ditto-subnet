@@ -730,7 +730,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_l2_report_canary:
     'Read one exact-attempt non-authoritative L2 canary report and lease outcome.',
   get_l2_report_canary_preflight:
-    'Read current exact-source canary guards; scheduling rechecks them.',
+    'Evaluate each exact-source canary guard; scheduling rechecks them.',
   get_v13_scorer_cohort:
     'Read the immutable three-validator V13 scorer pin, including exact signed runtime packet.',
   get_v13_scorer_cohort_preflight:
@@ -2476,7 +2476,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_l2_report_canary_preflight',
     {
       title: 'Get L2 canary preflight',
-      description: 'Read agent/attempt SHA, status, policy/bench version and raw Score count. Advisory snapshot; scheduling rechecks. Requires backroom:read.',
+      description: 'Run the scheduler\'s exact-source guards read-only. Pass the planned SHA/status/raw score count/ruling for per-guard results and the exact 409 detail (omitted: passed=null). Shows legacy null attempt SHA, active canary and packet availability. Requires backroom:read.',
       inputSchema: l2ReportCanaryPreflightInputSchema,
       annotations: toolAnnotations('read'),
     },
