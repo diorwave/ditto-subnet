@@ -1,7 +1,7 @@
 """cover worker-claim-not-started in the infra-failed attempts index
 
 Revision ID: e0f28816bca9
-Revises: b6f3d0c7a915
+Revises: 4c917e2a6b0d
 Create Date: 2026-09-29
 
 ``worker-claim-not-started`` joins ``INFRA_AUTO_RETRY_REASON_CODES`` (#2446), so
@@ -31,7 +31,7 @@ from alembic import op
 from ditto.db.migration_lock import MAX_ATTEMPTS, backoff_delay, is_retryable, sqlstate
 
 revision: str = "e0f28816bca9"
-down_revision: str | Sequence[str] | None = "b6f3d0c7a915"
+down_revision: str | Sequence[str] | None = "4c917e2a6b0d"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
