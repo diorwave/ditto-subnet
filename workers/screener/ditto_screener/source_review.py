@@ -461,10 +461,55 @@ def _body_signature(payload: object) -> str:
     elif error:
         error_class = str(error)[:60]
     choices = payload.get("choices")
-    return (
+    signature = (
         f"keys=[{keys}] error_class={error_class!r} "
         f"choices={type(choices).__name__ if choices is not None else 'absent'}"
     )
+    provider_message = _provider_error_message(payload)
+    if provider_message:
+        signature += f" provider_message={provider_message!r}"
+    return signature
+
+
+# Long enough for OpenRouter's rate-limit texts, which name the limit that
+# tripped (key RPM, per-model upstream capacity, credits); short enough to stay
+# one log line.
+_PROVIDER_MESSAGE_MAX_CHARS = 200
+
+
+def _provider_error_message(payload: object) -> str:
+    """Return the provider's own ``error.message``, bounded to one log line.
+
+    A 429's class alone cannot say WHICH limit throttled the court; the message
+    can, and it is the one string that settles key-level RPM vs per-model
+    capacity vs shared-key contention. Only a pure error envelope qualifies: a
+    body that also carries ``choices`` or ``output`` may hold model text about
+    miner source, so nothing is read from it. Control characters and newlines
+    collapse to single spaces so the value cannot forge extra log lines.
+    """
+    if not isinstance(payload, Mapping) or "choices" in payload or "output" in payload:
+        return ""
+    error = payload.get("error")
+    if not isinstance(error, Mapping):
+        return ""
+    message = error.get("message")
+    if not isinstance(message, str):
+        return ""
+    printable = "".join(char if char.isprintable() else " " for char in message)
+    return " ".join(printable.split())[:_PROVIDER_MESSAGE_MAX_CHARS]
+
+
+def _http_error_signature(response: httpx.Response) -> str:
+    """Describe a rejected HTTP status with the provider's bounded message."""
+    signature = f"http-status={response.status_code}"
+    try:
+        payload: object = response.json()
+    except ValueError:
+        return signature
+    provider_message = _provider_error_message(payload)
+    if provider_message:
+        signature += f" provider_message={provider_message!r}"
+    return signature
 
 
 class SourceReviewBudgetExhausted(ValueError):
@@ -3902,7 +3947,7 @@ class OpenRouterSourceReviewAgent:
             except httpx.HTTPStatusError as error:
                 status = error.response.status_code
                 fault = str(status) if status == 429 or status >= 500 else None
-                signature = f"http-status={status}"
+                signature = _http_error_signature(error.response)
                 caught: BaseException = error
             except (TimeoutError, httpx.TimeoutException) as error:
                 # ``asyncio.timeout`` raises the built-in TimeoutError, which

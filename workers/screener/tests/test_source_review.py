@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import os
 import sqlite3
 import struct
@@ -5586,6 +5587,41 @@ def test_body_signature_never_reproduces_content() -> None:
     assert source_review_module._body_signature(None) == "non-json"
 
 
+def test_body_signature_keeps_the_bounded_provider_rate_limit_message() -> None:
+    """The throttle's own text names which limit tripped; keep one bounded line."""
+    signature = source_review_module._body_signature(
+        {
+            "error": {
+                "code": 429,
+                "message": "Rate limit exceeded:\nlimit_rpm/openai/gpt-6-luna\x1b[31m"
+                + " per key" * 60,
+            }
+        }
+    )
+
+    assert "error_class='429'" in signature
+    assert "provider_message='Rate limit exceeded: limit_rpm/openai/gpt-6-luna" in (
+        signature
+    )
+    # Collapsed before repr, so neither an escaped newline nor ESC survives.
+    assert "\\n" not in signature and "\\x1b" not in signature
+    message = signature.split("provider_message=", 1)[1]
+    assert len(message) <= 202  # 200 characters plus the repr quotes
+
+
+def test_body_signature_never_reads_a_message_beside_model_output() -> None:
+    """A body with ``choices`` or ``output`` can quote miner source; skip it."""
+    for body_key in ("choices", "output"):
+        signature = source_review_module._body_signature(
+            {
+                body_key: [],
+                "error": {"code": 429, "message": "miner source text here"},
+            }
+        )
+        assert "miner source text" not in signature
+        assert "provider_message" not in signature
+
+
 async def test_non_json_body_parks_after_one_post(tmp_path: Path) -> None:
     """A non-JSON response is failure evidence, not retry authority."""
     key = tmp_path / "key"
@@ -5611,6 +5647,45 @@ async def test_non_json_body_parks_after_one_post(tmp_path: Path) -> None:
     assert observation.error_code == "source-review-jsondecodeerror"
     assert observation.failure_disposition == "retryable_infra"
     assert calls == 1
+
+
+async def test_http_429_logs_the_provider_limit_without_publishing_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A real HTTP 429 names its limit in the logs, never in the public code."""
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    os.chmod(key, 0o600)
+    limit = "Rate limit exceeded: limit_rpm/openai/gpt-6-luna per key"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            request=request,
+            json={"error": {"code": 429, "message": limit}},
+        )
+
+    with caplog.at_level(logging.WARNING, logger=source_review_module.__name__):
+        observation = await _agent(key, httpx.MockTransport(handler)).review(
+            str(_archive(tmp_path, "fn main() { call_model(); }")),
+            artifact_sha256=_SHA,
+        )
+
+    assert observation.error_code == "source-review-http-429"
+    assert limit not in repr(observation)
+    retry_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "retrying same turn" in record.getMessage()
+    ]
+    park_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "parking attempt" in record.getMessage()
+    ]
+    assert retry_lines and park_lines
+    for line in retry_lines + park_lines:
+        assert f"http-status=429 provider_message={limit!r}" in line
 
 
 async def test_http_429_parks_after_three_bounded_posts(tmp_path: Path) -> None:

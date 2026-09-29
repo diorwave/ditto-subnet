@@ -89,7 +89,16 @@ Correlate worker journal evidence with Backroom `get_screener_capacity` and the
 exact screening attempt. A RUNNING VM or successful startup script is not a
 healthy worker: require a current Platform heartbeat, a stable GCE target, and
 an actual lease claim or polling loop. Keep reads bounded to 1-1440 minutes and
-1-2000 lines. Do not run arbitrary SSH commands, restart services, edit the VM,
+1-2000 lines.
+
+A throttled review model turn logs `signature=http-status=429` from L1
+(`retrying same turn` / `parking attempt`) and L2/L3 (`L2/L3 model request
+failed`). When the gateway returned an error envelope, the line also carries
+`provider_message='…'`: the gateway's own `error.message`, collapsed to one
+line and capped at 200 characters. That text says which limit tripped: key
+RPM, per-model upstream capacity, or credits. Take the provenance from it, not
+from the numeric class. It is never read from a body that also carries model
+output, and it never reaches the public failure code. Do not run arbitrary SSH commands, restart services, edit the VM,
 or read environment/credential files from this skill.
 
 ## Cloud Run screening job logs
