@@ -396,6 +396,21 @@ def test_capped_lease_deadline_follows_renewal_up_to_its_cap() -> None:
     assert float(capped) == 250
 
 
+def test_capped_view_renewal_does_not_extend_shared_lease_past_cap() -> None:
+    parent = LeaseDeadline(100.0)
+    capped = parent.cap(250.0)
+
+    capped.renew(600.0)
+
+    assert parent.expires_at == 250.0
+    assert capped.expires_at == 250.0
+
+    offset_capped = parent.offset(30.0).cap(300.0)
+    offset_capped.renew(600.0)
+    assert parent.expires_at == 330.0
+    assert offset_capped.expires_at == 300.0
+
+
 async def test_held_image_deadline_follows_renewal(
     make_config: Callable[..., ScreenerConfig], tmp_path: Path
 ) -> None:

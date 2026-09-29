@@ -324,7 +324,7 @@ class LeaseDeadline(float):
 
     def renew(self, expires_at: float) -> None:
         if self._parent is not None:
-            self._parent.renew(expires_at + self._offset)
+            self._parent.renew(min(expires_at, self._not_after) + self._offset)
         else:
             self._expires_at = max(self._expires_at, expires_at)
 
