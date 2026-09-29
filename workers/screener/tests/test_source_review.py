@@ -4363,7 +4363,9 @@ async def test_provider_timeout_with_open_lease_stays_retryable(
     observation = await _agent(key, httpx.MockTransport(handler)).review(
         str(_archive(tmp_path, "fn main() {}")),
         artifact_sha256=_SHA,
-        deadline=asyncio.get_running_loop().time() + 30,
+        # The request cap fires with <1 s left on the lease. It remains a
+        # provider timeout because the lease did not bound this model turn.
+        deadline=asyncio.get_running_loop().time() + 0.5,
     )
 
     assert not observation.ok

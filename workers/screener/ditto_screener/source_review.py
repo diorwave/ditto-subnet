@@ -3661,10 +3661,14 @@ class OpenRouterSourceReviewAgent:
                 # aggregate bound, max_steps slow turns could each run the full
                 # per-request timeout and outlive the screening lease.
                 request_timeout = self._timeout_seconds
+                lease_bounded_turn = False
                 if deadline is not None:
                     remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         raise lease_exhausted(_step)
+                    lease_bounded_turn = remaining <= min(
+                        self._timeout_seconds, self._max_completion_request_seconds
+                    )
                     request_timeout = min(request_timeout, remaining)
                 assessment_phase = (
                     _coverage_complete(notes)
@@ -3704,12 +3708,12 @@ class OpenRouterSourceReviewAgent:
                         tool_choice="required" if final_turn else "auto",
                     )
                 except (TimeoutError, httpx.TimeoutException) as error:
-                    # The turn is capped at the remaining lease, so the lease
-                    # normally ends mid-request rather than at a turn boundary.
-                    # Decide from the clock, never the message: only a timeout
-                    # that left the lease open is a genuine provider fault.
+                    # Only a turn whose effective timeout was shortened by
+                    # the lease can exhaust that budget. A provider request
+                    # cap can expire with less than a second left on the lease.
                     if (
-                        deadline is not None
+                        lease_bounded_turn
+                        and deadline is not None
                         and deadline - asyncio.get_running_loop().time()
                         < _LEASE_EXPIRY_SLACK_SECONDS
                     ):
