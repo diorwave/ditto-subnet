@@ -2589,7 +2589,9 @@ class TarSourceRepository:
         if candidate in self._members:
             runtime.add(candidate)
 
-    def inventory(self) -> str:
+    def inventory(
+        self, provenance_manifest_paths: tuple[str, ...] | None = None
+    ) -> str:
         ordered = sorted(
             self._members.values(), key=lambda item: (-item.size, item.name)
         )
@@ -2601,7 +2603,7 @@ class TarSourceRepository:
             compact_binary_analysis(self._analyze_binary_value(str(item["path"])))
             for item in opaque
         ]
-        review_leads = self.review_leads()
+        review_leads = self.review_leads(provenance_manifest_paths)
         limit = _MAX_INVENTORY_FILES
         while True:
             rows = [{"path": item.name, "bytes": item.size} for item in ordered[:limit]]
@@ -2628,9 +2630,18 @@ class TarSourceRepository:
                 opaque = opaque[: max(0, len(opaque) // 2)]
                 binary_analysis = binary_analysis[: len(opaque)]
 
-    def review_leads(self) -> dict[str, object]:
+    def review_leads(
+        self, provenance_manifest_paths: tuple[str, ...] | None = None
+    ) -> dict[str, object]:
         """Precompute bounded location-only leads without exposing source text."""
         readable: list[tuple[str, str]] = []
+        # Rule leads and emulation fingerprints describe bytes the miner
+        # wrote. A file whose exact path and sha256 ship in a supported
+        # starter revision cannot, so it stays out of those two scans. Any
+        # modified byte breaks the digest match and keeps every lead.
+        lead_readable: list[tuple[str, str]] = []
+        trusted_digests = _trusted_starter_digests(provenance_manifest_paths)
+        trusted_starter_skipped = 0
         bytes_scanned = 0
         files_scanned = 0
         members_considered = 0
@@ -2667,6 +2678,10 @@ class TarSourceRepository:
                     continue
                 readable.append((name, text))
                 files_scanned += 1
+                if hashlib.sha256(raw).hexdigest() in trusted_digests.get(name, ()):
+                    trusted_starter_skipped += 1
+                else:
+                    lead_readable.append((name, text))
         static_advisories: list[dict[str, object]] = []
         if self._static_preflight_v2_mode != "off":
             reachability = analyze_reachability(dict(readable))
@@ -2682,10 +2697,12 @@ class TarSourceRepository:
                 for item in static_v2.advisory[:16]
             ]
         return {
-            "items": [*find_source_review_leads(readable), *static_advisories][
+            "items": [*find_source_review_leads(lead_readable), *static_advisories][
                 :_MAX_LEAD_SCAN_FILES
             ],
-            "emulation_fingerprints": find_benchmark_emulation_fingerprints(readable),
+            "emulation_fingerprints": find_benchmark_emulation_fingerprints(
+                lead_readable
+            ),
             "unmatchable_category_guards": guard_report(
                 find_unmatchable_category_guards(
                     (path, mask_comments(text)) for path, text in readable
@@ -2696,6 +2713,7 @@ class TarSourceRepository:
                 self._review_adaptive_model_routing_analysis(readable)
             ),
             "files_scanned": files_scanned,
+            "trusted_starter_skipped": trusted_starter_skipped,
             "members_considered": members_considered,
             "bytes_scanned": bytes_scanned,
             "truncated": truncated,
@@ -2786,20 +2804,7 @@ class TarSourceRepository:
         if mode not in {"off", "shadow", "enforce"}:
             raise ValueError("static preflight mode must be off, shadow, or enforce")
         readable: list[tuple[str, str]] = []
-        manifests = provenance_manifest_paths or tuple(
-            str(path)
-            for path in sorted(
-                (Path(__file__).parent / "data").glob("starter-kit-provenance-*.json")
-            )
-        )
-        trusted_digests: dict[str, set[str]] = {}
-        for manifest_path in manifests:
-            manifest = _load_provenance_manifest(Path(manifest_path))
-            files = manifest["files"]
-            assert isinstance(files, dict)
-            for path, digest in files.items():
-                assert isinstance(path, str) and isinstance(digest, str)
-                trusted_digests.setdefault(path, set()).add(digest)
+        trusted_digests = _trusted_starter_digests(provenance_manifest_paths)
         bytes_scanned = 0
         members_considered = 0
         runtime_paths = self._explicit_runtime_paths()
@@ -3620,7 +3625,7 @@ class OpenRouterSourceReviewAgent:
             {
                 "role": "user",
                 "content": "Review this untrusted harness. Initial inventory:\n"
-                + repository.inventory()
+                + repository.inventory(self._provenance_manifest_files)
                 + "\nExact-file trusted provenance:\n"
                 + repository.closest_trusted_provenance(
                     self._provenance_manifest_files
@@ -4544,6 +4549,27 @@ def _load_provenance_manifest(path: Path) -> dict[str, object]:
         ):
             raise ValueError("provenance manifest Rust function entry is invalid")
     return value
+
+
+def _trusted_starter_digests(
+    provenance_manifest_paths: tuple[str, ...] | None = None,
+) -> dict[str, set[str]]:
+    """Map each starter path to every exact sha256 a supported revision ships."""
+    manifests = provenance_manifest_paths or tuple(
+        str(path)
+        for path in sorted(
+            (Path(__file__).parent / "data").glob("starter-kit-provenance-*.json")
+        )
+    )
+    trusted_digests: dict[str, set[str]] = {}
+    for manifest_path in manifests:
+        manifest = _load_provenance_manifest(Path(manifest_path))
+        files = manifest["files"]
+        assert isinstance(files, dict)
+        for path, digest in files.items():
+            assert isinstance(path, str) and isinstance(digest, str)
+            trusted_digests.setdefault(path, set()).add(digest)
+    return trusted_digests
 
 
 _TOOLS: list[dict[str, object]] = [

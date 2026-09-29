@@ -70,10 +70,11 @@ class _Fingerprint:
     to source files whose tell is language-specific (e.g. the sync/async answer
     distinction only exists where model calls are awaited). ``scan`` selects the
     comment-masked code view (``"code"``) or the raw view that also sees comments
-    and strings (``"raw"``). ``skip_test_items`` blanks Rust items that an
-    attribute affirmatively restricts to the test build (``#[test]``,
-    ``#[cfg(test)]``) before matching, for tells whose honest look-alike is the
-    same text parked in a test-only helper that ``/run`` never reaches.
+    and strings (``"raw"``). ``skip_test_items`` (on by default) blanks Rust
+    items that an attribute affirmatively restricts to the test build
+    (``#[test]``, ``#[cfg(test)]``) before matching: ``/run`` never reaches a
+    test-only item, so a tell parked there is not served-path source. Set it to
+    ``False`` only for a tell that is meaningful inside test code.
     """
 
     kind: str
@@ -84,7 +85,7 @@ class _Fingerprint:
     scan: str = "code"
     languages: frozenset[str] = frozenset()
     min_hits: int = 1
-    skip_test_items: bool = False
+    skip_test_items: bool = True
 
 
 def _words(value: str) -> re.Pattern[str]:
@@ -1641,7 +1642,7 @@ _EMULATION_FINGERPRINTS = (
         # transition"). The classifier alone is shared verbatim with a cleared
         # fork whose acknowledgement prompt is test-only, so the served effect
         # anchors the lead: a preference/keep/no-change gate immediately
-        # selecting that no-change prose. Test-only Rust items are skipped.
+        # selecting that no-change prose.
         kind="declarative-preference-turn-directive",
         severity="high",
         roles=(
@@ -1671,7 +1672,6 @@ _EMULATION_FINGERPRINTS = (
         ),
         window=6,
         scan="code",
-        skip_test_items=True,
     ),
     _Fingerprint(
         # keep-continuity-capability-rekey (aceron_v21, 2026-09-16): the same
@@ -1715,7 +1715,6 @@ _EMULATION_FINGERPRINTS = (
         ),
         window=40,
         scan="code",
-        skip_test_items=True,
     ),
 )
 
@@ -1725,7 +1724,7 @@ def find_source_review_leads(
 ) -> list[dict[str, object]]:
     """Return bounded location-only review leads from readable source files."""
     leads: list[dict[str, object]] = []
-    for path, text in sorted(files, key=lambda item: _path_priority(item[0])):
+    for path, text in sorted(files, key=lambda item: _lead_path_priority(item[0])):
         lines = text.splitlines()
         if not lines:
             continue
@@ -1915,7 +1914,7 @@ def find_benchmark_emulation_fingerprints(
     """
     findings: list[dict[str, object]] = []
     for path, text in sorted(files, key=lambda item: _path_priority(item[0])):
-        if not _is_executable_source_path(path):
+        if not _is_executable_source_path(path) or _is_script_test_path(path):
             continue
         language = _fingerprint_language(path)
         if language is None:
@@ -2353,6 +2352,35 @@ def _is_executable_source_path(path: str) -> bool:
             )
         )
     )
+
+
+def _is_script_test_path(path: str) -> bool:
+    """Return whether a path is a test module under the top-level ``scripts/``.
+
+    Fingerprinting skips these and review leads rank them after executable
+    source. The decisive malicious preflight still treats them as executable,
+    because a miner Dockerfile may copy and run ``scripts/``.
+    """
+    normalized = path.casefold().removeprefix("./")
+    directory, _, name = normalized.rpartition("/")
+    return (
+        directory.split("/", 1)[0] == "scripts"
+        and name.endswith(".py")
+        and (name.startswith("test_") or name.endswith("_test.py"))
+    )
+
+
+def _lead_path_priority(path: str) -> tuple[bool, int, str]:
+    """Order executable/build files before docs, data, and test modules.
+
+    Non-source files keep their leads, because a fixture can still be compiled
+    in or read as an answer table. They only spend lead capacity that the
+    executable surface left unused.
+    """
+    executable = (
+        _is_executable_source_path(path) and not _is_script_test_path(path)
+    ) or _is_build_file(path)
+    return (not executable, *_path_priority(path))
 
 
 def _path_priority(path: str) -> tuple[int, str]:

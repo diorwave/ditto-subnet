@@ -139,7 +139,12 @@ the answer contract, model/tool authority, service routes, user scope,
 benchmark/score signals, a separately sampled generator-construction queue,
 mutations, and host/secret access. The separate queue prevents scorer-heavy
 files from hiding template, seeded-expansion, distribution, or expected-output
-definitions behind the per-surface sample cap. The attention map
+definitions behind the per-surface sample cap. The bounded source leads and
+emulation fingerprints skip every file whose exact path and sha256 ship in a
+supported starter manifest (`trusted_starter_skipped` counts them), so one
+modified byte keeps a file's leads. Executable and build files claim the lead
+cap before docs, fixtures, and test modules. Fingerprints skip Rust test-only
+items and `scripts/` test modules. The attention map
 is never evidence; it keeps a wrong L1 diagnosis from narrowing the review and
 points the agent to locations it must read and causally trace. It then invokes
 only the targeted repository-owned, allowlisted analyzers it needs: workspace

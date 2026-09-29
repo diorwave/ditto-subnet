@@ -19,6 +19,7 @@ import pytest
 
 from ditto_screener import binary_analysis as binary_analysis_module
 from ditto_screener import source_review as source_review_module
+from ditto_screener import source_signals as source_signals_module
 from ditto_screener.binary_analysis import BinarySample
 from ditto_screener.source_review import (
     OpenRouterSourceReviewAgent,
@@ -3109,6 +3110,97 @@ fn answer(req: Request) {
     assert inventory["review_leads"]["items"]
     assert inventory["review_leads"]["truncated"] is False
     assert "TEMPORAL_COUNT_TEMPLATE" not in json.dumps(inventory["review_leads"])
+
+
+_STARTER_KIT = Path(__file__).resolve().parents[3] / "miners/dittobench-starter-kit"
+
+
+def _starter_kit_files() -> dict[str, bytes]:
+    return {
+        path.relative_to(_STARTER_KIT).as_posix(): path.read_bytes()
+        for path in sorted(_STARTER_KIT.rglob("*"))
+        if path.is_file() and path.relative_to(_STARTER_KIT).parts[0] != "target"
+    }
+
+
+def _starter_manifest(tmp_path: Path, files: dict[str, bytes]) -> tuple[str, ...]:
+    manifest = tmp_path / "starter-provenance.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "origin": "ditto-assistant/ditto-subnet",
+                "revision": "current-kit",
+                "files": {
+                    path: hashlib.sha256(raw).hexdigest() for path, raw in files.items()
+                },
+            }
+        )
+    )
+    return (str(manifest),)
+
+
+def test_review_leads_ignore_trusted_starter_kit(tmp_path: Path) -> None:
+    kit = _starter_kit_files()
+    manifests = _starter_manifest(tmp_path, kit)
+    repo = TarSourceRepository(str(_archive_files(tmp_path, kit)))
+
+    # L1 and L2 see these leads through the bounded inventory.
+    leads = json.loads(repo.inventory(manifests))["review_leads"]
+
+    assert leads["items"] == []
+    assert leads["emulation_fingerprints"] == []
+    assert leads["trusted_starter_skipped"] == leads["files_scanned"] > 0
+
+
+def test_review_leads_keep_modified_starter_fixture_lead(tmp_path: Path) -> None:
+    kit = _starter_kit_files()
+    manifests = _starter_manifest(tmp_path, kit)
+    fixture = "fixtures/seed-user/pairs.json"
+    kit[fixture] += b" "
+
+    leads = TarSourceRepository(str(_archive_files(tmp_path, kit))).review_leads(
+        manifests
+    )
+
+    assert leads["items"]
+    assert {
+        location["path"] for lead in leads["items"] for location in lead["locations"]
+    } == {fixture}
+    assert leads["trusted_starter_skipped"] == leads["files_scanned"] - 1
+
+
+def test_review_leads_not_starved_by_starter_kit_noise() -> None:
+    # Without a digest filter the kit's own leads fill the cap. Docs and
+    # fixtures must not claim it before miner source. The kit's scripts are
+    # executable Python that legitimately competes with miner source, so they
+    # are left out of this scenario.
+    files = []
+    for path, raw in _starter_kit_files().items():
+        if path.startswith("scripts/"):
+            continue
+        try:
+            files.append((path, raw.decode("utf-8")))
+        except UnicodeDecodeError:
+            continue
+    files.append(
+        (
+            "server/answer.py",
+            "def answer(req):\n"
+            "    if TEMPORAL_COUNT_TEMPLATE.is_match(req.text):\n"
+            "        return resolve_as_of_count(req.text)\n"
+            "    return general_agent(req)\n",
+        )
+    )
+
+    leads = find_source_review_leads(files)
+
+    assert len(leads) == source_signals_module._MAX_LEADS
+    assert any(
+        location["path"] == "server/answer.py"
+        for lead in leads
+        for location in lead["locations"]
+    )
 
 
 async def test_agent_can_analyze_binary_before_submitting_review(

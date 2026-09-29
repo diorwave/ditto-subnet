@@ -13,7 +13,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ditto_screener.source_signals import find_benchmark_emulation_fingerprints
+from ditto_screener import rust_test_items
+from ditto_screener.source_signals import (
+    find_benchmark_emulation_fingerprints,
+    mask_comments,
+)
 
 _RUST_EMULATOR = """\
 // Ported from universe/world.go and the conversational.go generator so we
@@ -1348,3 +1352,44 @@ def test_keep_preference_findings_never_leak_matched_source_text() -> None:
         assert finding["category"] == "benchmark_emulation"
         for location in finding["locations"]:
             assert set(location) == {"path", "line", "role"}
+
+
+def test_cfg_test_module_is_not_fingerprinted() -> None:
+    wrapped = "#[cfg(test)]\nmod tests {\n" + _RUST_EMULATOR + "}\n"
+    assert find_benchmark_emulation_fingerprints([("src/agent.rs", wrapped)]) == []
+
+    served = wrapped.replace("#[cfg(test)]\n", "")
+    assert "zero-token-answer-constructor" in _kinds(
+        find_benchmark_emulation_fingerprints([("src/agent.rs", served)])
+    )
+
+
+def test_scripts_test_files_not_fingerprinted() -> None:
+    for path in ("scripts/test_agent.py", "scripts/agent_test.py"):
+        assert find_benchmark_emulation_fingerprints([(path, _PYTHON_EMULATOR)]) == []
+    for path in ("scripts/agent.py", "server/scripts/test_agent.py"):
+        assert find_benchmark_emulation_fingerprints([(path, _PYTHON_EMULATOR)])
+
+
+def test_starter_kit_fingerprints_skip_test_code() -> None:
+    kit = Path(__file__).resolve().parents[3] / "miners" / "dittobench-starter-kit"
+    files: dict[str, str] = {}
+    for path in sorted(kit.rglob("*")):
+        if path.is_file() and path.relative_to(kit).parts[0] != "target":
+            try:
+                files[path.relative_to(kit).as_posix()] = path.read_text("utf-8")
+            except UnicodeDecodeError:
+                continue
+    assert "src/protocol.rs" in files
+
+    for finding in find_benchmark_emulation_fingerprints(files.items()):
+        locations = finding["locations"]
+        assert isinstance(locations, list)
+        for location in locations:
+            member = str(location["path"])
+            assert not member.startswith("scripts/test_"), finding
+            if member.endswith(".rs"):
+                test_lines = rust_test_items.test_only_item_lines(
+                    mask_comments(files[member]).splitlines()
+                )
+                assert location["line"] not in test_lines, finding
