@@ -492,9 +492,7 @@ async def test_held_image_deadline_follows_renewal(
         outcome=ScreeningOutcome.QUARANTINE,
         detail="source review incomplete",
         manifest_digest="ab" * 32,
-        evidence=(
-            PolicyEvidence("adjudication", "source-review-adjudicated", "held"),
-        ),
+        evidence=(PolicyEvidence("adjudication", "source-review-adjudicated", "held"),),
         adjudication={"decision": "reject"},
         policy_version=13,
     )
