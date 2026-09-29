@@ -329,6 +329,14 @@ def test_unknown_container_contract_detail_stays_public_safe() -> None:
             "limited time, then held for an operator retry.",
         ),
         (
+            "screener error: PlatformError: platform changed screening policy "
+            "during claim: expected 12, received 13 SECRET_FROM_WORKER",
+            "worker-claim-not-started",
+            "The screening worker released this submission before starting it. "
+            "This is operator-owned and is retried automatically with backoff for "
+            "a limited time, then held for an operator retry.",
+        ),
+        (
             "build failed: [timeout after 2700s]\nSECRET_FROM_BUILD",
             "docker-build-timeout",
             "Docker image build exceeded the 45-minute build time limit. "
@@ -12901,11 +12909,27 @@ class TestQuarantineReviewContext:
             assert attempt is not None
             assert attempt.reason_code == "source-review-model-response-invalid"
 
-    async def test_docker_build_infrastructure_promises_only_the_automatic_retry(
+    @pytest.mark.parametrize(
+        ("reason_code", "detail"),
+        [
+            (
+                "docker-build-infrastructure",
+                "screener error: Docker build infrastructure: daemon down",
+            ),
+            (
+                "worker-claim-not-started",
+                "screener error: ClaimResponseInvalid: screening claim response "
+                "invalid: items.0.name: Field required",
+            ),
+        ],
+    )
+    async def test_fleet_owned_infrastructure_promises_only_the_automatic_retry(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
+        reason_code: str,
+        detail: str,
     ) -> None:
         """The miner-facing text must match what the claim path really does."""
         agent_id = await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
@@ -12921,8 +12945,8 @@ class TestQuarantineReviewContext:
                 passed=False,
                 attempt_id=attempt_id,
                 outcome="retryable_infra",
-                reason_code="docker-build-infrastructure",
-                detail="screener error: Docker build infrastructure: daemon down",
+                reason_code=reason_code,
+                detail=detail,
             ),
         )
 
@@ -12936,7 +12960,7 @@ class TestQuarantineReviewContext:
             attempt = await session.get(ScreeningAttempt, attempt_id)
             assert attempt is not None
             assert attempt.status == "failed"
-            assert attempt.reason_code == "docker-build-infrastructure"
+            assert attempt.reason_code == reason_code
             assert attempt.public_reason == refreshed.screening_reason
 
     async def test_withdrawn_agent_is_not_promised_an_automatic_retry(
