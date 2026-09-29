@@ -8,7 +8,9 @@ never leave the archive through this module.
 
 from __future__ import annotations
 
+import io
 import re
+import tokenize
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -1734,7 +1736,7 @@ def find_source_review_leads(
         # guard that fires too readily costs a missed lead, while a role that
         # fires on prose costs a wrongly quarantined miner. The brief's
         # asymmetry (prefer false negatives) picks the direction.
-        code_lines = _mask_comments(text).splitlines()
+        code_lines = _mask_comments(text, path).splitlines()
         code_lines.extend([""] * (len(lines) - len(code_lines)))
         for rule in _RULES:
             if rule.build_files_only and not _is_build_file(path):
@@ -1815,7 +1817,9 @@ def find_decisive_malicious_source(
         # line positions for the location-only finding and leave adjacent
         # production items visible.
         if not include_test_only and path.casefold().endswith(".rs"):
-            test_item_lines = _rust_test_item_lines(_mask_comments(text).splitlines())
+            test_item_lines = _rust_test_item_lines(
+                _mask_comments(text, path).splitlines()
+            )
             if test_item_lines:
                 text = "\n".join(_blank_lines(lines, test_item_lines))
         # Three views of the same file, each with a different job:
@@ -1824,9 +1828,11 @@ def find_decisive_malicious_source(
         #   ``executable_lines`` — comments and strings gone. Effect roles must
         #     be real operations, not words inside a prompt literal.
         #   ``lines`` — raw, used only to report the location back.
-        comment_masked = _mask_comments(text).splitlines()
+        comment_masked = _mask_comments(text, path).splitlines()
         comment_masked.extend([""] * (len(lines) - len(comment_masked)))
-        executable_lines = _mask_string_literals("\n".join(comment_masked)).splitlines()
+        executable_lines = _mask_string_literals(
+            "\n".join(comment_masked), path
+        ).splitlines()
         executable_lines.extend([""] * (len(lines) - len(executable_lines)))
         for rule in _STATIC_MALICIOUS_RULES:
             role_hits = {
@@ -1923,7 +1929,7 @@ def find_benchmark_emulation_fingerprints(
         raw_lines = text.splitlines()
         if not raw_lines:
             continue
-        code_lines = _mask_comments(text).splitlines()
+        code_lines = _mask_comments(text, path).splitlines()
         code_lines.extend([""] * (len(raw_lines) - len(code_lines)))
         test_item_lines: frozenset[int] | None = None
         for fingerprint in _EMULATION_FINGERPRINTS:
@@ -2088,13 +2094,199 @@ def _static_role_search_text(
     return executable_line
 
 
-def _mask_comments(text: str) -> str:
-    """Blank comment content while preserving layout, strings, and line count.
+# A Go rune or Rust char literal: one character or one escape (``\n``,
+# ``\xHH``, ``\u{...}``, Go ``\uXXXX`` / ``\UXXXXXXXX`` / octal). Any other
+# apostrophe is a Rust lifetime or loop label (``&'a str``, ``'outer:``) and
+# opens nothing.
+CHAR_LITERAL = re.compile(
+    r"'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F]{1,6}\}|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}"
+    r"|U[0-9a-fA-F]{8}|[0-7]{3}|[^\n]))'"
+)
 
-    Prose is not behavior. A lead that fires on a comment cites something the
-    compiler never sees, which is how a submission whose *code* refuses to
-    write the graded slot can still be quarantined by three stale sentences
-    describing a design it no longer has.
+# Comment and quote syntax is chosen from the member path. ``c``: ``//`` and
+# ``/* */`` comments, ``'`` opens only a char literal. ``js``: the same comments,
+# but ``'`` delimits strings (PHP ``#`` comments stay visible). ``python``:
+# tokenized. ``hash``: ``#`` comments.
+# Anything else is returned unmasked: a masker that guesses the language can
+# erase executable code or keep prose, and unmasked text errs toward review.
+_C_SUFFIXES = frozenset(
+    {
+        ".rs",
+        ".go",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hh",
+        ".hpp",
+        ".hxx",
+        ".java",
+        ".kt",
+        ".kts",
+        ".swift",
+        ".scala",
+        ".cs",
+        ".zig",
+    }
+)
+_C_NAMES = frozenset({"go.mod", "go.work"})
+_JS_SUFFIXES = frozenset(
+    {
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".mts",
+        ".cts",
+        ".gradle",
+        ".groovy",
+        ".dart",
+        ".php",
+    }
+)
+_PYTHON_SUFFIXES = frozenset({".py", ".pyi", ".pyx"})
+_HASH_SUFFIXES = frozenset(
+    {
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".cfg",
+        ".ini",
+        ".rb",
+        ".pl",
+        ".r",
+        ".ex",
+        ".exs",
+        ".mk",
+        ".cmake",
+        ".dockerfile",
+    }
+)
+_HASH_NAMES = frozenset(
+    {"makefile", "gnumakefile", "cmakelists.txt", "pipfile", "gemfile"}
+)
+_HASH_PREFIXES = ("dockerfile", "containerfile", ".env")
+_PYTHON_COMMENT_TOKENS = frozenset({tokenize.COMMENT})
+_PYTHON_STRING_TOKENS = frozenset(
+    {
+        tokenize.STRING,
+        tokenize.FSTRING_START,
+        tokenize.FSTRING_MIDDLE,
+        tokenize.FSTRING_END,
+    }
+)
+# ``str.splitlines`` boundaries. Masking never blanks one, so every masked view
+# keeps the raw file's line numbering.
+_LINE_BREAKS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _comment_syntax(path: str | None) -> str | None:
+    """Name the comment/quote syntax of ``path``, or ``None`` when unknown."""
+    if path is None:
+        return None
+    name = path.casefold().rsplit("/", 1)[-1]
+    suffix = name[name.rfind(".") :] if "." in name else ""
+    if suffix in _C_SUFFIXES or name in _C_NAMES:
+        return "c"
+    if suffix in _JS_SUFFIXES:
+        return "js"
+    if suffix in _PYTHON_SUFFIXES:
+        return "python"
+    if (
+        suffix in _HASH_SUFFIXES
+        or name in _HASH_NAMES
+        or name.startswith(_HASH_PREFIXES)
+        or (name.startswith("requirements") and suffix == ".txt")
+    ):
+        return "hash"
+    return None
+
+
+def _blank(chars: list[str], start: int, end: int) -> None:
+    for offset in range(start, min(end, len(chars))):
+        if chars[offset] not in _LINE_BREAKS:
+            chars[offset] = " "
+
+
+def _mask_python_tokens(text: str, kinds: frozenset[int]) -> str | None:
+    """Blank Python tokens of ``kinds``, or ``None`` when ``text`` won't tokenize.
+
+    Tokenizing reads syntax only; nothing submitted is imported or executed.
+    Expressions inside an f-string stay visible because they are code. A line-1
+    ``#!`` stays visible because the kernel executes it.
+    """
+    chars = list(text)
+    line_starts = [0, *(index + 1 for index, char in enumerate(text) if char == "\n")]
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type not in kinds:
+                continue
+            (start_row, start_col), (end_row, end_col) = token.start, token.end
+            if start_row > len(line_starts) or end_row > len(line_starts):
+                continue
+            if token.start == (1, 0) and token.string.startswith("#!"):
+                continue
+            _blank(
+                chars,
+                line_starts[start_row - 1] + start_col,
+                line_starts[end_row - 1] + end_col,
+            )
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    return "".join(chars)
+
+
+def _mask_hash_comments(text: str) -> str:
+    """Blank ``#`` comments that start a line or follow whitespace.
+
+    Used for shell, Dockerfile, Makefile, TOML, YAML and similar files, and for
+    Python that does not tokenize. A ``#`` inside ``'``/``"`` quotes, or glued
+    to a word (``$#``, ``${#x}``, ``url#frag``), is not a comment. A
+    single-quoted run ends at its line, so one stray apostrophe (``don't`` in a
+    heredoc) cannot invert quoting for the rest of the file; triple quotes may
+    span lines. A line-1 ``#!`` stays visible because the kernel executes it.
+    """
+    chars = list(text)
+    length = len(text)
+    quote = ""
+    index = 0
+    while index < length:
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if quote:
+            if text.startswith(quote, index):
+                index += len(quote)
+                quote = ""
+                continue
+            if char == "\n" and len(quote) == 1:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char * 3 if text.startswith(char * 3, index) else char
+            index += len(quote)
+            continue
+        if char == "#" and (index == 0 or text[index - 1].isspace()):
+            end = text.find("\n", index)
+            end = length if end < 0 else end
+            if index or not text.startswith("#!"):
+                _blank(chars, index, end)
+            index = end
+            continue
+        index += 1
+    return "".join(chars)
+
+
+def _mask_c_comments(text: str, *, quoted_apostrophe: bool) -> str:
+    """Blank ``//`` and ``/* */`` comments in C-family source.
 
     The scanner is string-aware in both directions, because the cheap ways to
     fool a line-prefix heuristic run both ways:
@@ -2104,10 +2296,11 @@ def _mask_comments(text: str) -> str:
     - ``let x = r#"*/"#;`` must not be able to terminate a block comment that
       was never open, desynchronizing the mask for the rest of the file.
 
-    Rust raw strings (``r"..."``, ``r#"..."#``) and byte strings are handled
-    explicitly. A ``'`` is treated as a character literal only when it closes
-    within the three characters a character literal can span; otherwise it is
-    a lifetime (``&'a str``) and is left alone.
+    Rust raw strings (``r"..."``, ``r#"..."#``), byte strings, and backtick
+    strings (Go raw strings, JS templates) are skipped. With
+    ``quoted_apostrophe`` (JS/TS, Groovy, Dart, PHP) a ``'`` opens a string.
+    Otherwise it opens only a char literal, and a lifetime (``&'a str``) is
+    left alone.
     """
     chars = list(text)
     length = len(text)
@@ -2118,28 +2311,23 @@ def _mask_comments(text: str) -> str:
         if text.startswith("//", index):
             end = text.find("\n", index)
             end = length if end < 0 else end
-            for offset in range(index, end):
-                chars[offset] = " "
+            _blank(chars, index, end)
             index = end
             continue
         # Block comment: Rust nests them, so track depth. Newlines preserved.
         if text.startswith("/*", index):
             depth = 1
-            chars[index] = chars[index + 1] = " "
             cursor = index + 2
             while cursor < length and depth:
                 if text.startswith("/*", cursor):
                     depth += 1
-                    chars[cursor] = chars[cursor + 1] = " "
                     cursor += 2
                 elif text.startswith("*/", cursor):
                     depth -= 1
-                    chars[cursor] = chars[cursor + 1] = " "
                     cursor += 2
                 else:
-                    if text[cursor] != "\n":
-                        chars[cursor] = " "
                     cursor += 1
+            _blank(chars, index, cursor)
             index = cursor
             continue
         # Raw string: no escapes, terminated by the matching hash run.
@@ -2154,14 +2342,19 @@ def _mask_comments(text: str) -> str:
                 end = text.find(terminator, cursor + 1)
                 index = length if end < 0 else end + len(terminator)
                 continue
+        # Backtick string: no escapes.
+        if char == "`":
+            end = text.find("`", index + 1)
+            index = length if end < 0 else end + 1
+            continue
         # Ordinary string literal: skip past it untouched, honoring escapes.
-        if char == '"':
+        if char == '"' or (char == "'" and quoted_apostrophe):
             cursor = index + 1
             while cursor < length:
                 if text[cursor] == "\\":
                     cursor += 2
                     continue
-                if text[cursor] == '"':
+                if text[cursor] == char or (char == "'" and text[cursor] == "\n"):
                     cursor += 1
                     break
                 cursor += 1
@@ -2169,19 +2362,44 @@ def _mask_comments(text: str) -> str:
             continue
         # Character literal vs lifetime.
         if char == "'":
-            for span in (3, 4):
-                if text[index + span - 1 : index + span] == "'":
-                    index += span
-                    break
-            else:
-                index += 1
+            literal = CHAR_LITERAL.match(text, index)
+            index = index + 1 if literal is None else literal.end()
             continue
         index += 1
     return "".join(chars)
 
 
-def _mask_string_literals(text: str) -> str:
-    """Replace quoted source text with spaces while preserving source layout."""
+def _mask_comments(text: str, path: str | None = None) -> str:
+    """Blank comment content while preserving layout, strings, and line count.
+
+    Prose is not behavior. A lead that fires on a comment cites something the
+    compiler never sees, which is how a submission whose *code* refuses to
+    write the graded slot can still be quarantined by three stale sentences
+    describing a design it no longer has.
+
+    Comment syntax follows ``path`` (see ``_comment_syntax``). Applying one
+    language's syntax to another fails both ways: C rules read Python floor
+    division ``a // 2`` and a ``'data/*.json'`` glob as comments that erase the
+    code after them, and never see a ``#`` comment. An unknown or missing path
+    is returned unchanged, because unmasked text only errs toward review.
+    """
+    syntax = _comment_syntax(path)
+    if syntax == "python":
+        masked = _mask_python_tokens(text, _PYTHON_COMMENT_TOKENS)
+        return _mask_hash_comments(text) if masked is None else masked
+    if syntax == "hash":
+        return _mask_hash_comments(text)
+    if syntax in {"c", "js"}:
+        return _mask_c_comments(text, quoted_apostrophe=syntax == "js")
+    return text
+
+
+def _mask_quoted(text: str, *, quotes: str, char_literals: bool) -> str:
+    """Replace ``quotes``-delimited text with spaces, preserving layout.
+
+    With ``char_literals`` (Rust, Go, C, Java...), a ``'`` masks only a whole
+    char literal; any other apostrophe is a lifetime or label and opens nothing.
+    """
     chars = list(text)
     index = 0
     quote: str | None = None
@@ -2190,7 +2408,15 @@ def _mask_string_literals(text: str) -> str:
     while index < len(chars):
         char = chars[index]
         if quote is None:
-            if char in {'"', "'", "`"}:
+            if char == "'" and char_literals:
+                literal = CHAR_LITERAL.match(text, index)
+                if literal is None:
+                    index += 1
+                else:
+                    _blank(chars, index, literal.end())
+                    index = literal.end()
+                continue
+            if char in quotes:
                 quote = char
                 quote_width = (
                     3 if char != "`" and text[index : index + 3] == char * 3 else 1
@@ -2209,7 +2435,7 @@ def _mask_string_literals(text: str) -> str:
             escaped = False
             index += 3
             continue
-        if char not in {"\r", "\n"}:
+        if char not in _LINE_BREAKS:
             chars[index] = " "
         if escaped:
             escaped = False
@@ -2220,6 +2446,24 @@ def _mask_string_literals(text: str) -> str:
             quote_width = 0
         index += 1
     return "".join(chars)
+
+
+def _mask_string_literals(text: str, path: str | None = None) -> str:
+    """Replace quoted source text with spaces while preserving source layout.
+
+    Quote syntax follows ``path`` as in ``_mask_comments``; an unknown or
+    missing path is returned unchanged. Shell-like files keep backticks
+    visible, because there they are command substitution, not text.
+    """
+    syntax = _comment_syntax(path)
+    if syntax is None:
+        return text
+    if syntax == "python":
+        masked = _mask_python_tokens(text, _PYTHON_STRING_TOKENS)
+        if masked is not None:
+            return masked
+    quotes = {"c": '"`', "js": "'\"`"}.get(syntax, "'\"")
+    return _mask_quoted(text, quotes=quotes, char_literals=syntax == "c")
 
 
 def _is_build_file(path: str) -> bool:
@@ -2376,9 +2620,14 @@ def source_path_priority(path: str) -> tuple[int, str]:
     return _path_priority(path)
 
 
-def mask_comments(text: str) -> str:
-    """Blank comment content, preserving layout, strings, and line count."""
-    return _mask_comments(text)
+def mask_comments(text: str, path: str | None = None) -> str:
+    """Blank ``path``'s comment content, preserving layout and line count."""
+    return _mask_comments(text, path)
+
+
+def mask_string_literals(text: str, path: str | None = None) -> str:
+    """Blank ``path``'s string literal content, preserving layout."""
+    return _mask_string_literals(text, path)
 
 
 __all__ = [
@@ -2388,5 +2637,6 @@ __all__ = [
     "is_executable_source_path",
     "mask_comments",
     "mask_remote_urls",
+    "mask_string_literals",
     "source_path_priority",
 ]

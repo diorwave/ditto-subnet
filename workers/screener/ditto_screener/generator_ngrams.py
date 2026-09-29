@@ -28,6 +28,8 @@ from collections.abc import Iterable, Iterator, Sequence
 from functools import lru_cache
 from importlib import resources
 
+from ditto_screener.source_signals import CHAR_LITERAL
+
 NGRAM_SIZE = 5
 HASH_HEX_CHARS = 16
 CORPUS_RESOURCE = "data/generator_ngram_corpus.json"
@@ -44,13 +46,6 @@ _PLACEHOLDER = re.compile(
 )
 _TOKEN = re.compile(r"[a-z0-9]+")
 _APOSTROPHE = re.compile(r"[’']")
-# A Go rune or Rust char literal: one character or one escape (``\n``,
-# ``\xHH``, ``\u{...}``, Go ``\uXXXX`` / ``\UXXXXXXXX`` / octal); anything
-# else after an apostrophe is a Rust lifetime marker and is stepped over.
-_CHAR_LITERAL = re.compile(
-    r"'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F]{1,6}\}|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}"
-    r"|U[0-9a-fA-F]{8}|[0-7]{3}|[^\n]))'"
-)
 
 _STOPWORDS = frozenset(
     {
@@ -225,7 +220,7 @@ def go_string_literals(source: str) -> list[str]:
             # is consumed as a span. A Rust lifetime (``&'static str``, ``<'a>``)
             # has no closing quote nearby; treating it as a literal would swallow
             # every ``"..."`` template up to the next apostrophe.
-            literal = _CHAR_LITERAL.match(source, index)
+            literal = CHAR_LITERAL.match(source, index)
             index = literal.end() if literal is not None else index + 1
             continue
         index += 1

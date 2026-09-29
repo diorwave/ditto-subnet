@@ -16,7 +16,7 @@ from contextlib import suppress
 from pathlib import PurePosixPath
 
 from ditto_screener.source_review import TarSourceRepository
-from ditto_screener.source_signals import _mask_string_literals, mask_comments
+from ditto_screener.source_signals import mask_comments, mask_string_literals
 
 REVISION = "shadow-semantic-discovery-v2"
 _GUIDANCE = (
@@ -109,7 +109,7 @@ def _answer_mutation_score(lines: list[str], index: int) -> int:
 
 def _code(path: str, text: str) -> str | None:
     if not path.casefold().endswith(".py"):
-        return _mask_string_literals(mask_comments(text))
+        return mask_string_literals(mask_comments(text, path), path)
     # Tokenization avoids apostrophes in Python comments desynchronizing the
     # string masker. It reads syntax only; no submitted imports or execution.
     lines = text.splitlines(keepends=True)

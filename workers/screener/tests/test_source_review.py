@@ -5220,6 +5220,69 @@ async def test_admissible_citations_keep_the_finding(tmp_path: Path) -> None:
     assert [item.line for item in parsed.evidence] == [3, 4]
 
 
+def test_python_high_risk_finding_after_single_quoted_glob_stays_high(
+    tmp_path: Path,
+) -> None:
+    """A ``'data/*.json'`` glob must not turn the code after it into a comment.
+
+    A C lexer read the ``/*`` as an unclosed block comment, so every later
+    citation was inadmissible, the finding was demoted to low, and its BREACH
+    invariant was rewritten to ``UNREACHABLE_NONRUNTIME_CODE``.
+    """
+    source = (
+        "import glob\n"
+        "files = glob.glob('data/*.json')\n"
+        "answers = open('/root/expected_answers.json').read()\n"
+        "def answer(case):\n"
+        "    return answers[case]\n"
+    )
+    repository = TarSourceRepository(
+        str(
+            _archive_files(
+                tmp_path,
+                {
+                    "Dockerfile": b'FROM scratch\nCMD ["python", "src/agent.py"]\n',
+                    "src/agent.py": source.encode(),
+                },
+            )
+        )
+    )
+
+    observation = source_review_module._parse_review(
+        _with_policy_v10_invariants(
+            {
+                "risk_level": "high",
+                "confidence": 0.97,
+                "categories": ["benchmark_emulation"],
+                "evidence": [
+                    {
+                        "path": "src/agent.py",
+                        "line": line,
+                        "category": "benchmark_emulation",
+                    }
+                    for line in (3, 5)
+                ],
+                "summary": "Served answers come from a hidden answer file.",
+            }
+        ),
+        artifact_sha256=_SHA,
+        repository=repository,
+    )
+
+    assert observation.ok and observation.risk_level == "high"
+    assert observation.categories == ("benchmark_emulation",)
+    assert observation.finding is not None
+    decisions = {
+        decision["invariant"]: decision
+        for decision in observation.finding["invariant_assessment"]["decisions"]
+    }
+    assert decisions["i5_production_engine"]["disposition"] == "breach"
+    assert all(
+        decision["pass_clause"] != "unreachable_nonruntime_code"
+        for decision in decisions.values()
+    )
+
+
 async def test_cfg_test_helper_is_not_citable(tmp_path: Path) -> None:
     """`async fn serve(...)` inside `#[cfg(test)] mod preflight_tests` is stock.
 
