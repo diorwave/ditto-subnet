@@ -652,7 +652,7 @@ class CapacityDecisionTests(unittest.TestCase):
             self.assertEqual(gce.watchdogs, [False])
             self.assertEqual(gce.resized, [])
 
-    def test_scale_down_to_zero_leaves_watchdog_disabled(self) -> None:
+    def test_scale_down_to_zero_defers_even_with_idle_members(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory))
             settings.state_file.write_text(json.dumps({"provider_ready": True}))
@@ -692,8 +692,8 @@ class CapacityDecisionTests(unittest.TestCase):
             ):
                 reconcile(settings)
 
-            self.assertEqual(gce.resized, [0])
-            self.assertEqual(gce.resize_watchdogs, [False])
+            self.assertEqual(gce.resized, [])
+            self.assertEqual(gce.target(), 2)
 
     def test_zero_idle_capacity_is_valid(self) -> None:
         self.assertEqual(desired_slots(runnable=0, active=0, jobs_per_slot=6, cap=6), 0)
@@ -727,7 +727,7 @@ class CapacityDecisionTests(unittest.TestCase):
             command,
         )
 
-    def test_targon_first_lanes_still_scale_gce_workers(self) -> None:
+    def test_targon_first_lanes_scale_out_but_defer_scale_in(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory))
             platform = SimpleNamespace(
@@ -774,7 +774,8 @@ class CapacityDecisionTests(unittest.TestCase):
             ):
                 snapshot = reconcile(settings)
             self.assertEqual(snapshot["gce_target"], 0)
-            self.assertEqual(resized, [3, 0])
+            self.assertEqual(resized, [3])
+            self.assertEqual(snapshot["fallback_reason"], "GCE_SCALE_IN_DEFERRED")
 
     def test_targon_first_lanes_never_bypass_the_primary_stop(self) -> None:
         # A stale routing revision that still names the retired provider must not
@@ -980,7 +981,9 @@ class CapacityDecisionTests(unittest.TestCase):
             ["GCE target 2 -> 0 deferred: inventory_unavailable"],
         )
 
-    def test_scale_in_to_zero_resizes_after_clean_reread(self) -> None:
+    def test_scale_in_to_zero_defers_after_clean_reread_without_durable_fence(
+        self,
+    ) -> None:
         operations: list[str] = []
         gce = _GCE(target=2, operations=operations)
         gce.instances = {"vm-a", "vm-b"}
@@ -991,9 +994,14 @@ class CapacityDecisionTests(unittest.TestCase):
             gce, runnable=2, first=idle, second=idle, operations=operations
         )
 
-        self.assertEqual(operations, ["renew", "fence", "inventory", "gce:0", "renew"])
-        self.assertEqual(gce.resize_watchdogs, [False])
+        self.assertEqual(operations, ["renew", "fence", "inventory", "renew"])
+        self.assertEqual(gce.resized, [])
+        self.assertEqual(gce.target(), 2)
         self.assertEqual(snapshot["gce_target"], 0)
+        self.assertEqual(
+            [event["detail"] for event in snapshot["events"]],
+            ["GCE target 2 -> 0 deferred: durable_claim_fence_unavailable"],
+        )
 
     def test_scale_in_to_zero_requires_every_managed_instance_to_be_idle(
         self,
