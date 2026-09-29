@@ -29802,6 +29802,8 @@ export interface components {
             heartbeat_seen_at?: string | null;
             /** Image Reference */
             image_reference?: string | null;
+            /** Instance Busy */
+            instance_busy?: boolean | null;
             /** Node Id */
             node_id: string;
             /**
@@ -29826,6 +29828,8 @@ export interface components {
         };
         /** ScreenerControllerNodesResponse */
         ScreenerControllerNodesResponse: {
+            /** Legacy Gcp Running Attempts */
+            legacy_gcp_running_attempts: number;
             /** Nodes */
             nodes: components["schemas"]["ScreenerControllerNodeState"][];
         };

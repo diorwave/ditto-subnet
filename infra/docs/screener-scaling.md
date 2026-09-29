@@ -22,6 +22,21 @@ controller:
    capacity when the primary is not ready;
 6. scales GCE down only after GCE-owned leases finish.
 
+Scale-in re-reads the node inventory after the fenced renew and immediately
+before any GCE mutation, because a GCE worker may claim after the first read.
+Scaling to zero resizes only when no GCE row holds a lease. The renew has
+already published target zero, so no new legacy claim can follow that read. A
+partial scale-in names idle instances with `delete-instances`, oldest heartbeat
+first. It uses each legacy row's own `instance_busy`, because the shared legacy
+hotkey marks every row `active_lease`. It deletes only current managed-group
+members. It defers when `legacy_gcp_running_attempts` exceeds the busy rows,
+meaning a claim has not yet been heartbeated. A deferral leaves the managed
+group unchanged but keeps publishing the lower target, so it never reopens
+claims that the renew withdrew. It records a `gce_scale_in_deferred` event with
+`GCE_SCALE_IN_DEFERRED` and is not a provider failure; the next pass retries.
+An idle instance chosen for a partial scale-in can still claim before it is
+deleted; that residual race is accepted.
+
 `SCREENING=0` (`screening_concurrency=0`) on the primary is an operator closure,
 not an outage: it is a global full stop recorded as
 `HETZNER_PRIMARY_ADMISSION_CLOSED`, and GCE does not overflow it regardless of

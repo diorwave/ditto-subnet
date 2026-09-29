@@ -13,6 +13,7 @@ from screener_capacity.controller import (
     Demand,
     GCEFleet,
     GCPBootstrapTokenMinter,
+    NodeInventory,
     OverflowPolicy,
     ProviderCounts,
     ProviderRouting,
@@ -65,7 +66,6 @@ class _Platform:
         self._demand = demand
         self._nodes = nodes or {}
         self.renewed: list[dict[str, object]] = []
-        self.drained: list[str] = []
         self.fences = 0
         self._screening_priority = screening_priority
         self._build_priority = build_priority
@@ -91,20 +91,16 @@ class _Platform:
     def node_states(self) -> dict[str, dict[str, object]]:
         return self._nodes
 
-    def drain_node(
-        self, *, node_id: str, epoch: str, reason: str = "capacity scale-down"
-    ) -> None:
-        del epoch, reason
-        self.drained.append(node_id)
-
 
 class _GCE:
     def __init__(self, target: int = 0, operations: list[str] | None = None) -> None:
         self._target = target
         self.resized: list[int] = []
         self.resize_watchdogs: list[bool] = []
+        self.deleted_instances: list[list[str]] = []
         self.watchdogs: list[bool] = []
         self.operations = operations
+        self.instances: set[str] = set()
 
     def target(self) -> int:
         return self._target
@@ -121,6 +117,16 @@ class _GCE:
         if self.operations is not None:
             self.operations.append(f"gce:{target}")
         self._target = target
+
+    def running_instances(self) -> set[str]:
+        return self.instances
+
+    def delete_instances(self, names: list[str], *, watchdog_enabled: bool) -> None:
+        self.deleted_instances.append(names)
+        self.resize_watchdogs.append(watchdog_enabled)
+        if self.operations is not None:
+            self.operations.append(f"delete:{','.join(names)}")
+        self._target -= len(names)
 
 
 def _targon_routing() -> ProviderRouting:
@@ -523,6 +529,42 @@ class CapacityDecisionTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)  # type: ignore[attr-defined]
 
     @patch("screener_capacity.controller.subprocess.run")
+    def test_delete_instances_restores_watchdog_on_failure(self, run: object) -> None:
+        from subprocess import CalledProcessError
+
+        run.side_effect = [
+            SimpleNamespace(stdout=""),
+            CalledProcessError(1, ["gcloud", "delete-instances"]),
+            SimpleNamespace(stdout=""),
+        ]
+        fleet = GCEFleet(project="test", region="region", mig="fleet")
+
+        with self.assertRaisesRegex(ControllerError, "managed-group operation"):
+            fleet.delete_instances(["vm-a", "vm-b"], watchdog_enabled=True)
+
+        commands = [call.args[0] for call in run.call_args_list]  # type: ignore[attr-defined]
+        self.assertIn("off", commands[0])
+        self.assertIn("delete-instances", commands[1])
+        self.assertIn("--instances=vm-a,vm-b", commands[1])
+        self.assertIn("only-scale-out", commands[2])
+
+    @patch("screener_capacity.controller.subprocess.run")
+    def test_running_instances_excludes_changing_members(self, run: object) -> None:
+        run.return_value = SimpleNamespace(  # type: ignore[attr-defined]
+            stdout="""[
+              {"instance": "https://compute/zones/z/instances/vm-idle",
+               "instanceStatus": "RUNNING", "currentAction": "NONE"},
+              {"instance": "https://compute/zones/z/instances/vm-going",
+               "instanceStatus": "RUNNING", "currentAction": "DELETING"},
+              {"instance": "https://compute/zones/z/instances/vm-booting",
+               "instanceStatus": "STAGING", "currentAction": "CREATING"}
+            ]"""
+        )
+        fleet = GCEFleet(project="test", region="region", mig="fleet")
+
+        self.assertEqual(fleet.running_instances(), {"vm-idle"})
+
+    @patch("screener_capacity.controller.subprocess.run")
     def test_gce_watchdog_recovery_is_idempotent(self, run: object) -> None:
         run.side_effect = [SimpleNamespace(stdout="OFF\n"), SimpleNamespace(stdout="")]
         fleet = GCEFleet(project="test", region="region", mig="fleet")
@@ -629,6 +671,7 @@ class CapacityDecisionTests(unittest.TestCase):
                         "screening_concurrency": 2,
                     }
                 },
+                node_inventory=lambda: NodeInventory({}, 0),
                 renew=lambda snapshot: snapshot,
                 fence=lambda **_kwargs: None,
             )
@@ -692,6 +735,7 @@ class CapacityDecisionTests(unittest.TestCase):
                         "screening_concurrency": 4,
                     }
                 },
+                node_inventory=lambda: NodeInventory({}, 0),
                 renew=lambda snapshot: snapshot,
                 fence=lambda **_kwargs: None,
             )
@@ -785,6 +829,221 @@ class CapacityDecisionTests(unittest.TestCase):
 
             self.assertEqual(snapshot["gce_target"], 2)
             self.assertEqual(gce.resized, [])
+
+    @staticmethod
+    def _gcp_row(
+        name: str,
+        *,
+        seen: int,
+        busy: bool = False,
+        lease: bool = False,
+        ready: bool = True,
+    ) -> dict[str, object]:
+        return {
+            "node_id": name,
+            "provider_resource_id": name,
+            "provider": "gcp",
+            "status": "active",
+            "ready": ready,
+            "active_lease": lease,
+            "instance_busy": busy,
+            "heartbeat_seen_at": f"2026-09-29T00:00:{seen:02d}Z",
+        }
+
+    @staticmethod
+    def _inventory(*rows: dict[str, object], running: int | None = 0) -> NodeInventory:
+        states: dict[str, dict[str, Any]] = {
+            "subnet-screener-1": {
+                "status": "active",
+                "ready": True,
+                "admission_open": True,
+                "screening_concurrency": 4,
+            }
+        }
+        states.update({str(row["node_id"]): row for row in rows})
+        return NodeInventory(states, running)
+
+    def _scale_in_pass(
+        self,
+        gce: _GCE,
+        *,
+        runnable: int,
+        first: NodeInventory,
+        second: NodeInventory | ControllerError,
+        operations: list[str],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Run one pass whose post-renew inventory read returns ``second``."""
+        renewed: list[dict[str, Any]] = []
+
+        def node_inventory() -> NodeInventory:
+            operations.append("inventory")
+            if isinstance(second, ControllerError):
+                raise second
+            return second
+
+        def renew(snapshot: dict[str, Any]) -> dict[str, Any]:
+            operations.append("renew")
+            renewed.append(snapshot)
+            return snapshot
+
+        platform = SimpleNamespace(
+            demand=lambda **_kwargs: Demand(runnable=runnable, active=0, desired=4),
+            provider_routing=_overflow_routing,
+            node_states=lambda: first.states,
+            node_inventory=node_inventory,
+            renew=renew,
+            fence=lambda **_kwargs: operations.append("fence"),
+        )
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "screener_capacity.controller.PlatformControl", return_value=platform
+            ),
+            patch("screener_capacity.controller.GCEFleet", return_value=gce),
+        ):
+            snapshot = reconcile(_settings(Path(directory)))
+        return snapshot, renewed
+
+    def test_scale_in_rereads_node_states_after_renew_and_defers_on_new_gce_lease(
+        self,
+    ) -> None:
+        operations: list[str] = []
+        gce = _GCE(target=2, operations=operations)
+        snapshot, renewed = self._scale_in_pass(
+            gce,
+            runnable=2,
+            first=self._inventory(
+                self._gcp_row("vm-a", seen=1), self._gcp_row("vm-b", seen=2)
+            ),
+            # vm-a claimed between the first read and the fenced renew.
+            second=self._inventory(
+                self._gcp_row("vm-a", seen=3, busy=True, lease=True),
+                self._gcp_row("vm-b", seen=2, lease=True),
+                running=1,
+            ),
+            operations=operations,
+        )
+
+        self.assertEqual(operations, ["renew", "fence", "inventory", "renew"])
+        self.assertEqual(gce.resized, [])
+        self.assertEqual(gce.deleted_instances, [])
+        # The fenced renew stopped new claims before the re-read, and the
+        # deferral must not reopen them.
+        self.assertEqual(renewed[0]["gce_target"], 0)
+        self.assertEqual(snapshot["gce_target"], 0)
+        self.assertEqual(snapshot["fallback_reason"], "GCE_SCALE_IN_DEFERRED")
+        self.assertTrue(snapshot["provider_ready"])
+        self.assertEqual(
+            snapshot["events"],
+            [
+                {
+                    "event_type": "gce_scale_in_deferred",
+                    "provider": "gcp",
+                    "detail": "GCE target 2 -> 0 deferred: gce_active_lease",
+                }
+            ],
+        )
+
+    def test_scale_in_defers_when_post_renew_inventory_unavailable(self) -> None:
+        operations: list[str] = []
+        gce = _GCE(target=2, operations=operations)
+        snapshot, _ = self._scale_in_pass(
+            gce,
+            runnable=2,
+            first=self._inventory(self._gcp_row("vm-a", seen=1)),
+            second=ControllerError("Platform GET failed with HTTP 502"),
+            operations=operations,
+        )
+
+        self.assertEqual(gce.resized, [])
+        self.assertEqual(gce.target(), 2)
+        self.assertEqual(snapshot["gce_target"], 0)
+        self.assertTrue(snapshot["provider_ready"])
+        self.assertIsNone(snapshot["last_provider_error_code"])
+        self.assertEqual(
+            [event["detail"] for event in snapshot["events"]],
+            ["GCE target 2 -> 0 deferred: inventory_unavailable"],
+        )
+
+    def test_scale_in_to_zero_resizes_after_clean_reread(self) -> None:
+        operations: list[str] = []
+        gce = _GCE(target=2, operations=operations)
+        idle = self._inventory(
+            self._gcp_row("vm-a", seen=1), self._gcp_row("vm-b", seen=2)
+        )
+        snapshot, _ = self._scale_in_pass(
+            gce, runnable=2, first=idle, second=idle, operations=operations
+        )
+
+        self.assertEqual(operations, ["renew", "fence", "inventory", "gce:0", "renew"])
+        self.assertEqual(gce.resize_watchdogs, [False])
+        self.assertEqual(snapshot["gce_target"], 0)
+
+    def test_partial_scale_in_deletes_only_idle_instances(self) -> None:
+        operations: list[str] = []
+        gce = _GCE(target=3, operations=operations)
+        gce.instances = {"vm-busy", "vm-old", "vm-new", "vm-unready"}
+        first = self._inventory(
+            self._gcp_row("vm-busy", seen=1),
+            self._gcp_row("vm-old", seen=2),
+            self._gcp_row("vm-new", seen=5),
+        )
+        second = self._inventory(
+            self._gcp_row("vm-busy", seen=1, busy=True, lease=True),
+            self._gcp_row("vm-old", seen=2, lease=True),
+            self._gcp_row("vm-new", seen=5, lease=True),
+            # Already deleted: its heartbeat is still fresh for minutes.
+            self._gcp_row("vm-gone", seen=0, lease=True),
+            self._gcp_row("vm-unready", seen=0, lease=True, ready=False),
+            running=1,
+        )
+        # threshold = max(12, 4 * 3); (14 - 12) / 2 jobs per slot -> 1 slot.
+        snapshot, _ = self._scale_in_pass(
+            gce, runnable=14, first=first, second=second, operations=operations
+        )
+
+        self.assertEqual(gce.deleted_instances, [["vm-old", "vm-new"]])
+        self.assertEqual(gce.resized, [])
+        self.assertEqual(gce.resize_watchdogs, [True])
+        self.assertEqual(snapshot["gce_target"], 1)
+        self.assertEqual(
+            operations,
+            ["renew", "fence", "inventory", "delete:vm-old,vm-new", "renew"],
+        )
+
+    def test_partial_scale_in_defers_on_unattributed_running_attempt(self) -> None:
+        idle = (
+            self._gcp_row("vm-a", seen=1),
+            self._gcp_row("vm-b", seen=2),
+            self._gcp_row("vm-c", seen=3),
+        )
+        for label, second, members in (
+            # A worker claimed but has not heartbeated "screening" yet.
+            ("attribution_incomplete", self._inventory(*idle, running=1), None),
+            # A Platform without the attribution count cannot vouch for idleness.
+            ("attribution_incomplete", self._inventory(*idle, running=None), None),
+            ("insufficient_idle_instances", self._inventory(*idle), {"vm-a"}),
+        ):
+            with self.subTest(label=label, second=second):
+                operations: list[str] = []
+                gce = _GCE(target=3, operations=operations)
+                gce.instances = members or {"vm-a", "vm-b", "vm-c"}
+                snapshot, _ = self._scale_in_pass(
+                    gce,
+                    runnable=14,
+                    first=self._inventory(*idle),
+                    second=second,
+                    operations=operations,
+                )
+
+                self.assertEqual(gce.deleted_instances, [])
+                self.assertEqual(gce.resized, [])
+                self.assertEqual(gce.target(), 3)
+                self.assertEqual(snapshot["fallback_reason"], "GCE_SCALE_IN_DEFERRED")
+                self.assertEqual(
+                    [event["detail"] for event in snapshot["events"]],
+                    [f"GCE target 3 -> 1 deferred: {label}"],
+                )
 
     def test_gcp_first_policy_scales_gce_workers(self) -> None:
         with TemporaryDirectory() as directory:
