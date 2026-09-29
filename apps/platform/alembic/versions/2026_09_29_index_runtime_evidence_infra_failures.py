@@ -14,11 +14,9 @@ name all three codes or the scan falls back to a sequential walk.
 The predicate is duplicated in ``models.py`` and
 ``screening_infra_retry._infra_failure_filters``; keep all three in step.
 
-Rebuilt ``CONCURRENTLY`` (an ``autocommit_block``) so it never holds a ``SHARE``
-lock against attempt inserts and verdict updates. Re-runnable from any point: an
-index that is ``INVALID`` or carries the other predicate is dropped first. The
-index is briefly absent between the drop and the rebuild; the rows it covers are
-a tiny fraction of the table, so that window costs one slower breaker scan.
+Build the replacement ``CONCURRENTLY`` under a temporary name before dropping
+the old index, so the claim-lock breaker scan retains an index throughout.
+Re-runnable from an invalid temporary build or an interrupted rename.
 """
 
 from __future__ import annotations
@@ -40,6 +38,7 @@ depends_on: str | Sequence[str] | None = None
 log = logging.getLogger("alembic.lock")
 
 INDEX_NAME = "screening_attempts_infra_failed_idx"
+BUILD_NAME = "screening_attempts_infra_failed_swap_idx"
 NEW_CODE = "l2-runtime-evidence-unavailable"
 UPGRADED_PREDICATE = (
     "status = 'failed' AND reason_code IN "
@@ -59,9 +58,9 @@ SELECT i.indisvalid, pg_get_expr(i.indpred, i.indrelid)
 """
 
 
-def _index_state(bind) -> tuple[bool, str] | None:  # noqa: ANN001 -- alembic bind
+def _index_state(bind, name: str) -> tuple[bool, str] | None:  # noqa: ANN001
     """``(valid, predicate)`` for the index, or ``None`` when it is absent."""
-    row = bind.execute(text(_INDEX_STATE_SQL), {"name": INDEX_NAME}).first()
+    row = bind.execute(text(_INDEX_STATE_SQL), {"name": name}).first()
     return None if row is None else (bool(row[0]), str(row[1] or ""))
 
 
@@ -90,32 +89,53 @@ def _rebuild(predicate: str, *, covers_new_code: bool) -> None:
     with op.get_context().autocommit_block():
         bind = op.get_bind()
 
-        def current() -> bool:
-            state = _index_state(bind)
+        def matches(name: str) -> bool:
+            state = _index_state(bind, name)
             return (
                 state is not None
                 and state[0]
+                and "docker-build-infrastructure" in state[1]
+                and "worker-claim-not-started" in state[1]
                 and (NEW_CODE in state[1]) is covers_new_code
             )
 
-        if not current():
-            if _index_state(bind) is not None:
-                log.warning("%s is invalid or stale; rebuilding", INDEX_NAME)
+        if matches(INDEX_NAME):
+            if _index_state(bind, BUILD_NAME) is not None:
                 _run_concurrently(
                     bind,
-                    f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX_NAME}",
-                    f"drop {INDEX_NAME}",
+                    f"DROP INDEX CONCURRENTLY IF EXISTS {BUILD_NAME}",
+                    f"drop leftover {BUILD_NAME}",
+                )
+            return
+
+        if not matches(BUILD_NAME):
+            if _index_state(bind, BUILD_NAME) is not None:
+                log.warning("%s is invalid or stale; rebuilding", BUILD_NAME)
+                _run_concurrently(
+                    bind,
+                    f"DROP INDEX CONCURRENTLY IF EXISTS {BUILD_NAME}",
+                    f"drop {BUILD_NAME}",
                 )
             _run_concurrently(
                 bind,
-                f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {INDEX_NAME} "
+                f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {BUILD_NAME} "
                 f"ON screening_attempts (finished_at) WHERE {predicate}",
-                f"create {INDEX_NAME}",
+                f"create {BUILD_NAME}",
             )
-        if not current():
-            raise RuntimeError(
-                f"{INDEX_NAME} did not come up valid; re-run the migration"
-            )
+        if not matches(BUILD_NAME):
+            raise RuntimeError(f"{BUILD_NAME} did not come up valid")
+        _run_concurrently(
+            bind,
+            f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX_NAME}",
+            f"drop {INDEX_NAME}",
+        )
+        _run_concurrently(
+            bind,
+            f"ALTER INDEX {BUILD_NAME} RENAME TO {INDEX_NAME}",
+            f"rename {BUILD_NAME}",
+        )
+        if not matches(INDEX_NAME):
+            raise RuntimeError(f"{INDEX_NAME} did not come up valid")
 
 
 def upgrade() -> None:
