@@ -11,7 +11,10 @@ private capacity VM. It reads the current provider-routing revision and node
 health, calculates the GCE target, acquires a fenced controller lease, and
 changes only that target. If a stored routing revision still selects the
 retired provider, it routes demand through GCE until an operator updates the
-revision. New routing writes cannot select that provider.
+revision. New routing writes cannot select that provider. A failed routing or
+node read holds the current target for a bounded number of passes instead of
+flapping the MIG; see
+[`infra/docs/screener-scaling.md`](../../infra/docs/screener-scaling.md).
 
 Release images are built on the trusted GitHub runner from the exact release
 commit, pushed under a SHA tag, and registered with Platform by digest. The
