@@ -42,7 +42,7 @@ function ScreeningHistoryPage() {
         view="history"
         initialItems={[]}
         initialSubmissions={submissions.items}
-        quarantineCount={quarantines.count}
+        quarantineCount={quarantines.actionable_count ?? quarantines.count}
         disputeCount={disputes.count}
         submissionCount={submissions.count}
         page={page}

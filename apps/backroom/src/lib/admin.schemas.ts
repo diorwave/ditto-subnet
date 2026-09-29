@@ -4734,6 +4734,12 @@ export const screeningQuarantineSchema = z.object({
   // string rather than an enum: a platform that learns a new resolution value
   // must not blank the panel here.
   resolution_reason_code: z.string().nullish().default(null),
+  // The exact agent's live status, and whether this active row sits behind an
+  // already banned/rejected agent (ditto-subnet#2038): historical
+  // reconciliation work, never actionable review. Nullish/defaulted for a
+  // platform that predates the fields.
+  agent_status: z.string().nullish().default(null),
+  terminal_ghost: z.boolean().nullish().default(false),
 }).transform(({ reason_code, ...rest }) => ({
   ...rest,
   screening_reason_code: screeningOriginCode(rest.screening_reason_code, reason_code),
@@ -4742,6 +4748,11 @@ export const screeningQuarantineSchema = z.object({
 export const screeningQuarantineListSchema = z.object({
   items: z.array(screeningQuarantineSchema),
   count: z.number().int().nonnegative(),
+  // `count` is the pagination total. Terminal ghosts are counted separately
+  // and kept out of the actionable count and oldest actionable age.
+  terminal_ghost_count: z.number().int().nonnegative().nullish().default(0),
+  actionable_count: z.number().int().nonnegative().nullish().default(null),
+  oldest_actionable_created_at: z.string().nullish().default(null),
 })
 
 const screeningReviewEventSchema = z.object({
@@ -5482,6 +5493,9 @@ export const screeningQuarantineBatchPreviewItemSchema = z.object({
   resulting_agent_status: z.string().nullable().default(null),
   public_reason_code: z.string().nullable().default(null),
   public_record_hash: z.string().nullable().default(null),
+  // A reject that closes an orphaned quarantine behind an already-terminal
+  // agent without changing that agent's ruling (ditto-subnet#2038).
+  terminal_reconciliation: z.boolean().nullish().default(false),
   message: z.string(),
 })
 
@@ -5506,6 +5520,7 @@ export const screeningQuarantineBatchExecuteItemSchema = z.object({
   quarantine_id: z.string().uuid(),
   status: z.enum(['applied', 'already_applied', 'failed']),
   agent_status: z.string().nullable().default(null),
+  terminal_reconciliation: z.boolean().nullish().default(false),
   message: z.string(),
 })
 
@@ -7650,6 +7665,9 @@ export const resolveCopyReviewResponseSchema = z.object({
   review: copyReviewItemSchema,
   agent_status: z.string(),
   idempotent: z.boolean(),
+  // Active screening quarantines a terminal reject closed in the same
+  // transaction (ditto-subnet#2038).
+  reconciled_quarantine_ids: z.array(z.string().uuid()).nullish().default([]),
 })
 
 export const getAthReviewInputSchema = z.object({
@@ -7713,6 +7731,7 @@ export const athReviewAuditSchema = z.object({
     previous_status: z.string().nullable(),
     artifact_sha256: z.string().nullable(),
     score_count: z.number().int().nonnegative().nullable(),
+    reconciled_quarantine_ids: z.array(z.string().uuid()).nullish().default([]),
   })).default([]),
 })
 
@@ -9260,6 +9279,8 @@ export const sourceReviewQueueSloSchema = z.object({
   throughput_per_hour: z.number().nonnegative(),
   stale_running_ghost_count: z.number().int().nonnegative(),
   resolved_quarantine_ghost_count: z.number().int().nonnegative(),
+  // Active quarantines behind an already banned/rejected agent (#2038).
+  terminal_quarantine_ghost_count: z.number().int().nonnegative().nullish().default(0),
   attempt_status_drift_ghost_count: z.number().int().nonnegative(),
   ghost_count: z.number().int().nonnegative(),
   max_actionable_age_threshold_seconds: z.number().int().positive().nullable(),

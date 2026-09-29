@@ -56,7 +56,7 @@ function ScreeningQueuePage() {
         view="queue"
         initialItems={quarantines.items}
         initialSubmissions={[]}
-        quarantineCount={quarantines.count}
+        quarantineCount={quarantines.actionable_count ?? quarantines.count}
         disputeCount={disputes.count}
         submissionCount={submissions.count}
         readOnly={user.accessLevel === 'read'}

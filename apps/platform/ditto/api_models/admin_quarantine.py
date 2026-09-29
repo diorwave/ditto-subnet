@@ -198,11 +198,25 @@ class AdminQuarantineItem(BaseModel):
     resolution_history: list[AdminQuarantineResolutionEvent] = Field(
         default_factory=list
     )
+    agent_status: str | None = None
+    """The exact agent's current status. Null only from an older Platform."""
+    terminal_ghost: bool = False
+    """True for an active row whose exact agent is already ``banned`` or
+    ``rejected``: historical, not an actionable review (ditto-subnet#2038)."""
 
 
 class AdminQuarantineList(BaseModel):
     items: list[AdminQuarantineItem]
     count: int
+    """Every row matching the status filter; the pagination total."""
+    terminal_ghost_count: int = 0
+    """Active rows in ``count`` whose exact agent is already terminal. They are
+    reconciliation work, never actionable review backlog or queue age."""
+    actionable_count: int | None = None
+    """Active rows that still need a screening ruling (``status=active`` or
+    ``all``); null for ``status=resolved``."""
+    oldest_actionable_created_at: datetime | None = None
+    """``created_at`` of the oldest actionable active row; ghosts excluded."""
 
 
 class AdminScreeningReviewEvent(BaseModel):
@@ -1079,6 +1093,10 @@ class AdminQuarantineBatchPreviewItem(BaseModel):
     resulting_agent_status: str | None = None
     public_reason_code: str | None = None
     public_record_hash: str | None = None
+    terminal_reconciliation: bool = False
+    """True for an active quarantine whose exact agent is already ``banned`` or
+    ``rejected`` (ditto-subnet#2038). Only ``reject`` is ready: it closes the
+    orphan and leaves the terminal agent ruling and public record unchanged."""
     message: str
 
 
@@ -1100,6 +1118,9 @@ class AdminQuarantineBatchExecuteItem(BaseModel):
     quarantine_id: UUID
     status: Literal["applied", "already_applied", "failed"]
     agent_status: str | None = None
+    terminal_reconciliation: bool = False
+    """True when ``reject`` closed an orphaned quarantine behind an
+    already-terminal agent without changing that agent's ruling."""
     message: str
 
 

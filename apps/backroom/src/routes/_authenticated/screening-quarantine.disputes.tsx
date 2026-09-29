@@ -43,7 +43,7 @@ function ScreeningDisputesPage() {
         initialItems={[]}
         initialDisputes={disputes.items}
         initialSubmissions={[]}
-        quarantineCount={quarantines.count}
+        quarantineCount={quarantines.actionable_count ?? quarantines.count}
         disputeCount={disputes.count}
         submissionCount={submissions.count}
         page={page}

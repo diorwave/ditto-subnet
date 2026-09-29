@@ -9357,6 +9357,8 @@ export interface components {
             previous_status?: string | null;
             /** Reason */
             reason: string;
+            /** Reconciled Quarantine Ids */
+            reconciled_quarantine_ids?: string[];
             /** Score Count */
             score_count?: number | null;
         };
@@ -9676,6 +9678,8 @@ export interface components {
             agent_status: string;
             /** Idempotent */
             idempotent: boolean;
+            /** Reconciled Quarantine Ids */
+            reconciled_quarantine_ids?: string[];
             review: components["schemas"]["AdminCopyReviewItem"];
         };
         /** AdminCopySimilarityEvidence */
@@ -10775,6 +10779,11 @@ export interface components {
              * @enum {string}
              */
             status: "applied" | "already_applied" | "failed";
+            /**
+             * Terminal Reconciliation
+             * @default false
+             */
+            terminal_reconciliation: boolean;
         };
         /** AdminQuarantineBatchExecuteRequest */
         AdminQuarantineBatchExecuteRequest: {
@@ -10832,6 +10841,11 @@ export interface components {
             resolution: "release" | "rescreen" | "reject";
             /** Resulting Agent Status */
             resulting_agent_status?: string | null;
+            /**
+             * Terminal Reconciliation
+             * @default false
+             */
+            terminal_reconciliation: boolean;
         };
         /** AdminQuarantineBatchPreviewRequest */
         AdminQuarantineBatchPreviewRequest: {
@@ -10880,6 +10894,8 @@ export interface components {
             agent_id: string;
             /** Agent Name */
             agent_name: string;
+            /** Agent Status */
+            agent_status?: string | null;
             /** Agent Version */
             agent_version?: number | null;
             /** Artifact Sha256 */
@@ -10952,13 +10968,27 @@ export interface components {
              * @enum {string}
              */
             status: "active" | "resolved";
+            /**
+             * Terminal Ghost
+             * @default false
+             */
+            terminal_ghost: boolean;
         };
         /** AdminQuarantineList */
         AdminQuarantineList: {
+            /** Actionable Count */
+            actionable_count?: number | null;
             /** Count */
             count: number;
             /** Items */
             items: components["schemas"]["AdminQuarantineItem"][];
+            /** Oldest Actionable Created At */
+            oldest_actionable_created_at?: string | null;
+            /**
+             * Terminal Ghost Count
+             * @default 0
+             */
+            terminal_ghost_count: number;
         };
         /** AdminQuarantineResolutionEvent */
         AdminQuarantineResolutionEvent: {
@@ -31622,7 +31652,7 @@ export interface components {
             active_work_count: number;
             /**
              * Attempt Status Drift Ghost Count
-             * @description Agents whose latest screening attempt reports a status this endpoint's reason classification does not cover (e.g. a terminal passed/rejected verdict on an agent whose own status never advanced past screening) -- the same kind of attempts/agents drift as the two counts above, never folded into backlog_count.
+             * @description Agents whose latest screening attempt reports a status this endpoint's reason classification does not cover (e.g. a terminal passed/rejected verdict on an agent whose own status never advanced past screening) -- the same kind of attempts/agents drift as the stale-running and resolved-quarantine counts, never folded into backlog_count.
              */
             attempt_status_drift_ghost_count: number;
             /**
@@ -31641,7 +31671,7 @@ export interface components {
             generated_at: string;
             /**
              * Ghost Count
-             * @description Sum of the three reconciliation counts above.
+             * @description Sum of the four reconciliation counts above.
              */
             ghost_count: number;
             /** Infrastructure Backoff Count */
@@ -31682,9 +31712,14 @@ export interface components {
             resolved_quarantine_ghost_count: number;
             /**
              * Stale Running Ghost Count
-             * @description Agents whose latest screening attempt still looks 'running' although the agent already reached a terminal or progressed-past-screening status. Visible for reconciliation; never folded into the counts above. See ditto-subnet#2038.
+             * @description Agents whose latest screening attempt still looks 'running' although the agent already reached a terminal or progressed-past-screening status. Visible for reconciliation; never folded into the counts above.
              */
             stale_running_ghost_count: number;
+            /**
+             * Terminal Quarantine Ghost Count
+             * @description Active screening quarantines whose exact agent is already banned or rejected. Historical, never escalation backlog or oldest age; close each with a fenced batch reject. See ditto-subnet#2038.
+             */
+            terminal_quarantine_ghost_count: number;
             /**
              * Throughput Completed Count
              * @description Full (non-build-only) screening attempts reaching a passed or rejected verdict within the throughput window.
