@@ -47,9 +47,11 @@ cached in the controller state file, so running GCE workers still match the
 Platform claim check. Without a cached revision, the controller publishes an
 unready revision 0 (`PROVIDER_ROUTING_UNAVAILABLE`) and preserves the current
 MIG size until an authoritative routing read succeeds; it neither adds
-capacity nor deletes workers on an unknown route. Once the hold expires, the
-normal rules above apply when a cached route exists: an unknown primary fails
-closed. The first successfully fenced failing pass records a
+capacity nor deletes workers on an unknown route. A cached revision also
+preserves the current MIG size for the full routing outage, including after
+the transient hold expires. Node-inventory failures still follow the normal
+rules after the hold: an unknown primary fails closed. The first successfully
+fenced failing pass records a
 `platform_inventory_unavailable` event and the expiry records
 `platform_inventory_hold_expired`. A failed pre-event read or first fenced
 renew leaves the transition pending for the next pass.

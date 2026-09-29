@@ -987,6 +987,7 @@ class CapacityDecisionTests(unittest.TestCase):
             self.assertEqual(snapshot["provider_settings_revision"], 7)
             self.assertTrue(snapshot["provider_ready"])
             self.assertIsNone(snapshot["last_provider_error_code"])
+
             self.assertEqual(
                 snapshot["fallback_reason"], "PLATFORM_INVENTORY_UNAVAILABLE"
             )
@@ -1033,7 +1034,7 @@ class CapacityDecisionTests(unittest.TestCase):
                 renewed[0]["events"],
             )
 
-    def test_persistent_routing_failure_scales_after_threshold_with_cached_revision_and_ready(  # noqa: E501
+    def test_persistent_routing_failure_keeps_target_with_cached_revision_and_ready(  # noqa: E501
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
@@ -1065,12 +1066,24 @@ class CapacityDecisionTests(unittest.TestCase):
                 nodes=self._OPEN_PRIMARY,
             )
 
-            # threshold = max(12, 4 * 3); (24 - 12) / 2 jobs per slot, cap 6.
-            self.assertEqual(gce.resized, [6])
-            self.assertEqual(snapshot["fallback_reason"], "HETZNER_BACKLOG_OVERFLOW")
+            self.assertEqual(gce.resized, [])
+            self.assertEqual(snapshot["fallback_reason"], "PROVIDER_ROUTING_UNAVAILABLE")
             self.assertEqual(snapshot["provider_settings_revision"], 7)
             self.assertTrue(snapshot["provider_ready"])
             self.assertIsNone(snapshot["last_provider_error_code"])
+
+            # A preexisting positive target is held after the read hold
+            # expires; a stale route cannot add or delete physical capacity.
+            gce._target = 2
+            snapshot, _ = self._inventory_pass(
+                settings,
+                gce,
+                demand=Demand(runnable=24, active=0, desired=4),
+                routing=None,
+                nodes=self._OPEN_PRIMARY,
+            )
+            self.assertEqual(gce.resized, [])
+            self.assertEqual(snapshot["gce_target"], 2)
 
     def test_routing_failure_without_cache_fails_closed_after_threshold(
         self,

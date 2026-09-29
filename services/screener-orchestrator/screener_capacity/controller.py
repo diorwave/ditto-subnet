@@ -849,10 +849,10 @@ def reconcile(settings: Settings) -> dict[str, Any]:
         jobs_per_slot=settings.jobs_per_slot,
         global_cap=settings.global_cap,
     )
-    if provider_error_code is not None:
-        # Without an authoritative routing revision, preserve the current MIG
-        # size without adding capacity. The unready snapshot blocks new claims
-        # until Platform can provide current policy again.
+    if not provider_routing_available:
+        # A cached revision can retain claim compatibility while Platform is
+        # temporarily unavailable, but cannot authorize new physical GCE
+        # capacity. Preserve the current MIG size until a fresh policy read.
         target = current_target
         reason = "PROVIDER_ROUTING_UNAVAILABLE"
     gce_has_active_lease = any(
