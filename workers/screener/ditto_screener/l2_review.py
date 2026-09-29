@@ -2685,6 +2685,20 @@ def _signed_runtime_lease_rejection(
     return None
 
 
+def _missing_lease_is_fleet_owned(
+    clause: str | None, *, policy_version: int, bench_version: int | None
+) -> bool:
+    """Whether an absent lease can only mean the scorer cohort was unavailable.
+
+    Platform issues a lease for every V13 arrival under policy 13 while the
+    pinned cohort is healthy, so its absence there is fleet infrastructure and
+    is retried automatically. Any other arrival lacks a lease for a reason of
+    its own; retrying it would only loop, so it keeps the inconclusive hold. A
+    present lease that fails identity or freshness is always that hold too.
+    """
+    return clause == "missing" and policy_version == 13 and bench_version == 13
+
+
 def _log_runtime_lease_hold(
     lease: ScoredRuntimeEvidenceLease | None,
     *,
@@ -2827,6 +2841,7 @@ class TerraSolSourceReviewAgent:
         on_l3_start: Callable[[], None] | None = None,
         scored_runtime_evidence: ScoredRuntimeEvidenceLease | None = None,
         scored_runtime_evidence_received_at: int | None = None,
+        bench_version: int | None = None,
     ) -> L2RunResult:
         started = time.monotonic()
         local_deadline = asyncio.get_running_loop().time() + self._timeout_seconds
@@ -2853,13 +2868,14 @@ class TerraSolSourceReviewAgent:
                 received_at=scored_runtime_evidence_received_at,
             )
             result = L2RunResult(
-                # Platform attached no lease: the cohort was unavailable at
-                # claim, which says nothing about the artifact. A present lease
-                # that fails identity or freshness stays an inconclusive hold.
                 observation=_failure(
                     "l2-runtime-evidence-unavailable",
                     "retryable_infra"
-                    if lease_rejection == "missing"
+                    if _missing_lease_is_fleet_owned(
+                        lease_rejection,
+                        policy_version=policy_version,
+                        bench_version=bench_version,
+                    )
                     else "pass_inconclusive",
                 ),
                 analyzed_files=(),
@@ -5558,6 +5574,7 @@ class LayeredSourceReviewAgent:
         artifact_sha256: str,
         policy_version: int,
         received_at: int | None,
+        bench_version: int | None,
     ) -> SourceReviewObservation | None:
         """Hold a V13 review before either paid stage starts, or return None."""
         requires_lease = self._requires_signed_runtime_lease(policy_version)
@@ -5589,11 +5606,12 @@ class LayeredSourceReviewAgent:
             max_age_seconds=max_age_seconds,
             received_at=received_at,
         )
-        if clause == "missing":
-            # Platform attached no lease because the pinned scorer cohort was
-            # unavailable at claim. Nothing reviewed the artifact and no paid
-            # stage ran, so retry it as fleet infrastructure instead of
-            # parking the submission as inconclusive.
+        if _missing_lease_is_fleet_owned(
+            clause, policy_version=policy_version, bench_version=bench_version
+        ):
+            # The pinned scorer cohort was unavailable at claim. Nothing
+            # reviewed the artifact and no paid stage ran, so retry it as fleet
+            # infrastructure instead of parking the submission as inconclusive.
             return _failure("l2-runtime-evidence-unavailable", "retryable_infra")
         audit = ScreenReviewAudit(
             stage="l2",
@@ -5762,6 +5780,7 @@ class LayeredSourceReviewAgent:
         policy_version: int = SCREENING_POLICY_VERSION,
         scored_runtime_evidence: ScoredRuntimeEvidenceLease | None = None,
         scored_runtime_evidence_received_at: int | None = None,
+        bench_version: int | None = None,
     ) -> SourceReviewObservation:
         hold = self._runtime_evidence_hold(
             scored_runtime_evidence,
@@ -5769,6 +5788,7 @@ class LayeredSourceReviewAgent:
             artifact_sha256=artifact_sha256,
             policy_version=policy_version,
             received_at=scored_runtime_evidence_received_at,
+            bench_version=bench_version,
         )
         if hold is not None:
             return hold
@@ -5812,6 +5832,7 @@ class LayeredSourceReviewAgent:
             policy_version=policy_version,
             scored_runtime_evidence=scored_runtime_evidence,
             scored_runtime_evidence_received_at=scored_runtime_evidence_received_at,
+            bench_version=bench_version,
         )
 
     async def resolve_lead(
@@ -5827,6 +5848,7 @@ class LayeredSourceReviewAgent:
         policy_version: int = SCREENING_POLICY_VERSION,
         scored_runtime_evidence: ScoredRuntimeEvidenceLease | None = None,
         scored_runtime_evidence_received_at: int | None = None,
+        bench_version: int | None = None,
     ) -> SourceReviewObservation:
         """Resolve a precomputed, artifact-bound L1 lead without rerunning L1."""
         requires_lease = self._requires_signed_runtime_lease(policy_version)
@@ -5836,6 +5858,7 @@ class LayeredSourceReviewAgent:
             artifact_sha256=artifact_sha256,
             policy_version=policy_version,
             received_at=scored_runtime_evidence_received_at,
+            bench_version=bench_version,
         )
         if hold is not None:
             return hold
@@ -5895,6 +5918,7 @@ class LayeredSourceReviewAgent:
             on_l3_start=lambda: report(8),
             scored_runtime_evidence=scored_runtime_evidence,
             scored_runtime_evidence_received_at=scored_runtime_evidence_received_at,
+            bench_version=bench_version,
         )
         report(9)
         if self._capture_enforce_result:

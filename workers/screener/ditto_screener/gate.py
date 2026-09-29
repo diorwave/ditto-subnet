@@ -1388,6 +1388,7 @@ class BuildGate:
                         scored_runtime_evidence_received_at=(
                             scored_runtime_evidence_received_at
                         ),
+                        bench_version=bench_version,
                     )
                     if source_review_low_clearance_allowed(
                         resolved_preflight, policy_version=policy_version
@@ -1458,6 +1459,7 @@ class BuildGate:
                             scored_runtime_evidence_received_at=(
                                 scored_runtime_evidence_received_at
                             ),
+                            bench_version=bench_version,
                         )
 
                     review_factory = review_locally

@@ -5696,15 +5696,19 @@ class TestClaim:
         *,
         lease_available: bool,
         bench_version: int = 13,
+        bench_versions: dict[UUID, int] | None = None,
     ) -> httpx.Response:
         """Claim one policy-13 attempt under ``binding`` with a controlled lease."""
         monkeypatch.setattr(
             "ditto.db.queries.screening.effective_screening_policy_version",
             lambda: 13,
         )
+
+        async def arrival(_session: AsyncSession, *, agent: Agent) -> int:
+            return (bench_versions or {}).get(agent.agent_id, bench_version)
+
         monkeypatch.setattr(
-            "ditto.api_server.endpoints.screener.arrival_bench_version",
-            AsyncMock(return_value=bench_version),
+            "ditto.api_server.endpoints.screener.arrival_bench_version", arrival
         )
 
         async def lease_lookup(
@@ -5808,7 +5812,7 @@ class TestClaim:
         assert item["policy_version"] == 13
         assert item["scored_runtime_evidence"]["attempt_id"] == item["attempt_id"]
 
-    async def test_claim_withholds_non_v13_arrival_when_lease_required(
+    async def test_non_v13_arrival_at_the_head_does_not_stall_the_queue(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
@@ -5816,34 +5820,60 @@ class TestClaim:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        agent_id = await _seed_agent(session_maker, status=AgentStatus.UPLOADED)
+        """A per-agent missing lease is leased as before, never withheld.
+
+        Withholding it would roll back every claim while that agent stays at
+        the head of the queue, starving the V13 arrivals behind it.
+        """
+        now = datetime.now(UTC)
+        head = await _seed_agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            name="non-v13-head",
+            sha256="1" * 64,
+            created_at=now - timedelta(hours=2),
+        )
+        behind = await _seed_agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            name="v13-behind",
+            sha256="2" * 64,
+            created_at=now - timedelta(hours=1),
+        )
         _install_db(app, session_maker)
         _install_chain(app)
-
-        with caplog.at_level(logging.WARNING, logger="ditto.api_server.endpoints"):
-            response = await self._claim_v13_bound(
-                client,
-                monkeypatch,
-                await self._bind_settings(
-                    session_maker,
-                    ScreenerReviewSettings(mode="enforce", l3_enabled=False),
-                ),
-                lease_available=True,
-                bench_version=12,
-            )
-
-        assert response.status_code == 200, response.text
-        assert response.json()["items"] == []
-        assert response.headers["X-Ditto-Claim-Empty-Reason"] == (
-            "scorer_cohort_unavailable"
+        binding = await self._bind_settings(
+            session_maker, ScreenerReviewSettings(mode="enforce", l3_enabled=False)
         )
-        assert any(
+
+        claimed = []
+        with caplog.at_level(logging.WARNING, logger="ditto.api_server.endpoints"):
+            for _ in range(2):
+                response = await self._claim_v13_bound(
+                    client,
+                    monkeypatch,
+                    binding,
+                    lease_available=True,
+                    bench_versions={head: 12},
+                )
+                assert response.status_code == 200, response.text
+                assert "X-Ditto-Claim-Empty-Reason" not in response.headers
+                claimed.extend(response.json()["items"])
+
+        assert [item["agent_id"] for item in claimed] == [str(head), str(behind)]
+        # The head keeps main's behaviour: leased without a lease, so the
+        # worker holds it inconclusive instead of retrying a per-agent cause.
+        assert claimed[0]["bench_version"] == 12
+        assert claimed[0]["scored_runtime_evidence"] is None
+        assert claimed[1]["bench_version"] == 13
+        assert (
+            claimed[1]["scored_runtime_evidence"]["attempt_id"]
+            == (claimed[1]["attempt_id"])
+        )
+        assert not any(
             "scorer_cohort_unavailable" in record.getMessage()
-            and "bench_version=12" in record.getMessage()
-            and "reason=not_v13" in record.getMessage()
             for record in caplog.records
         )
-        await self._assert_still_queued(session_maker, agent_id)
 
     @pytest.mark.parametrize(
         "settings",

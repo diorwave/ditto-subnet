@@ -212,10 +212,12 @@ Required values are supplied through the production host's protected
   against claim receipt, not against each later use, so a long build or L1
   pass cannot age out a lease Platform just certified. A present lease that is
   stale at receipt or bound to another attempt, artifact, or policy is held
-  inconclusive. A lease Platform could not attach (no healthy pinned scorer
-  cohort) is retryable infrastructure, `l2-runtime-evidence-unavailable`, and
-  Platform retries it automatically; Platform also withholds such a claim
-  while the lease is required.
+  inconclusive. A V13 arrival under policy 13 with no lease means the pinned
+  scorer cohort was unavailable: that is retryable infrastructure,
+  `l2-runtime-evidence-unavailable`, which Platform retries automatically, and
+  Platform withholds such claims while the cohort is down. Any other arrival
+  without a lease (for example a non-V13 arrival during an open rollout) keeps
+  the inconclusive hold, so a per-agent cause never loops through that retry.
 - `SCREENER_SIGNED_RUNTIME_LEASE_MAX_AGE_SECONDS` (default `300`, 1-3600):
   oldest signed cohort observation accepted at claim receipt. The report-only
   L2 canary uses the same receipt-anchored rule.

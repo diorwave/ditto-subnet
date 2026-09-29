@@ -91,8 +91,10 @@ if TYPE_CHECKING:
 #
 # ``l2-runtime-evidence-unavailable`` reaches here only as a retryable failure,
 # which the worker emits only when Platform attached no signed scorer-cohort lease
-# to the claim (#2444). A present lease that fails its identity or freshness check
-# is an INCONCLUSIVE verdict with an ``expired`` attempt, never matched here.
+# to a V13 arrival under policy 13: the pinned cohort was unavailable (#2444).
+# Every other cause (a present lease failing identity or freshness, or an arrival
+# that can never carry a lease) is an INCONCLUSIVE verdict with an ``expired``
+# attempt, never matched here, so no per-agent cause can loop this retry.
 INFRA_AUTO_RETRY_REASON_CODES: tuple[str, ...] = (
     "docker-build-infrastructure",
     "l2-runtime-evidence-unavailable",

@@ -1014,7 +1014,7 @@ async def test_required_lease_shadow_records_hold_without_applying_it(
     shadow = layered.pop_shadow_result(ATTEMPT)
     assert shadow is not None
     assert shadow.observation.error_code == "l2-runtime-evidence-unavailable"
-    assert shadow.observation.failure_disposition == "retryable_infra"
+    assert shadow.observation.failure_disposition == "pass_inconclusive"
 
 
 async def test_shadow_mode_tolerates_missing_lease() -> None:
@@ -1146,6 +1146,7 @@ async def test_missing_lease_is_retryable_infra(
             attempt_id=ATTEMPT,
             policy_version=13,
             scored_runtime_evidence=None,
+            bench_version=13,
         )
     resolved = await layered.resolve_lead(
         "unused",
@@ -1154,6 +1155,7 @@ async def test_missing_lease_is_retryable_infra(
         l1_observation=_l1("high"),
         policy_version=13,
         scored_runtime_evidence=None,
+        bench_version=13,
     )
 
     for observation in (reviewed, resolved):
@@ -1183,9 +1185,55 @@ async def test_missing_lease_is_retryable_infra(
         deadline=None,
         policy_version=13,
         scored_runtime_evidence=None,
+        bench_version=13,
     )
     assert direct.observation.error_code == "l2-runtime-evidence-unavailable"
     assert direct.observation.failure_disposition == "retryable_infra"
+
+
+@pytest.mark.parametrize("bench_version", [12, 14, None])
+async def test_missing_lease_for_a_non_v13_arrival_keeps_the_inconclusive_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bench_version: int | None
+) -> None:
+    """A per-agent cause must not enter the fleet infrastructure auto-retry."""
+    l1 = _FakeL1(_l1("low"))
+    l2 = _FakeL2(_model_result(_safe()))
+    l2._l3_enabled = False
+    layered = LayeredSourceReviewAgent(l1=l1, l2=l2, mode="enforce")  # type: ignore[arg-type]
+
+    held = await layered.review(
+        "unused",
+        artifact_sha256="c" * 64,
+        attempt_id=ATTEMPT,
+        policy_version=13,
+        scored_runtime_evidence=None,
+        bench_version=bench_version,
+    )
+
+    assert l1.calls == l2.calls == 0
+    assert held.error_code == "l2-runtime-evidence-unavailable"
+    assert held.failure_disposition == "pass_inconclusive"
+    audit = ScreenReviewAudit.model_validate(held.review_audit)
+    assert audit.cause_detail == "lease_unavailable"
+
+    sol = _sol_agent(tmp_path, _FakeHarness(), lambda _request: None)
+    sol._l3_enabled = False
+
+    async def must_not_run(*_args: object, **_kwargs: object) -> L2RunResult:
+        raise AssertionError("model must not run without the signed lease")
+
+    monkeypatch.setattr(sol, "_review_uncached", must_not_run)
+    direct = await sol.review(
+        str(tmp_path / "unused.tar"),
+        artifact_sha256="c" * 64,
+        attempt_id=ATTEMPT,
+        l1_observation=_l1(),
+        deadline=None,
+        policy_version=13,
+        scored_runtime_evidence=None,
+        bench_version=bench_version,
+    )
+    assert direct.observation.failure_disposition == "pass_inconclusive"
 
 
 async def test_v13_review_disabled_keeps_its_inconclusive_hold() -> None:
@@ -3241,7 +3289,7 @@ async def test_required_signed_lease_absence_holds_before_model(
         scored_runtime_evidence=None,
     )
     assert result.observation.error_code == "l2-runtime-evidence-unavailable"
-    assert result.observation.failure_disposition == "retryable_infra"
+    assert result.observation.failure_disposition == "pass_inconclusive"
 
 
 async def test_terminal_l2_model_inconclusive_carries_bounded_signed_audit(

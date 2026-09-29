@@ -1899,16 +1899,20 @@ async def test_every_review_entry_point_receives_the_claim_receipt_time(
     assert reviewer.resolve_calls == (1 if static_lead else 0)
 
 
-@pytest.mark.parametrize("lease_attached", [True, False])
+@pytest.mark.parametrize(
+    ("lease_attached", "bench_version"), [(True, 13), (False, 13), (False, 12)]
+)
 async def test_slow_build_does_not_age_out_a_receipt_fresh_v13_lease(
     make_config: Callable[..., ScreenerConfig],
     monkeypatch: pytest.MonkeyPatch,
     lease_attached: bool,
+    bench_version: int,
 ) -> None:
     """Build time counts from the claim, not against the signed lease window.
 
-    A claim Platform could not attach a lease to is retryable infrastructure,
-    never an inconclusive hold on the artifact.
+    A V13 arrival Platform could not attach a lease to is retryable fleet
+    infrastructure. Any other arrival without one keeps the inconclusive hold,
+    so a per-agent cause never loops through the infrastructure retry.
     """
     received_at = 1_800_000_000
     clock = [float(received_at)]
@@ -1992,7 +1996,7 @@ async def test_slow_build_does_not_age_out_a_receipt_fresh_v13_lease(
         result = await gate.screen(
             agent_id=_AGENT,
             attempt_id=_ATTEMPT,
-            bench_version=13,
+            bench_version=bench_version,
             miner_hotkey=_MINER,
             sha256=sha256,
             download_url=_URL,
@@ -2011,10 +2015,15 @@ async def test_slow_build_does_not_age_out_a_receipt_fresh_v13_lease(
         assert reviewed == ["l1", "l2"]
         assert result.outcome != ScreeningOutcome.INCONCLUSIVE
         assert held == []
-    else:
+    elif bench_version == 13:
         assert reviewed == []
         assert result.outcome == ScreeningOutcome.RETRYABLE_INFRA
         assert held == ["l2-runtime-evidence-unavailable"]
+    else:
+        # Exactly the pre-existing inconclusive hold, which parks the agent.
+        assert reviewed == []
+        assert result.outcome == ScreeningOutcome.INCONCLUSIVE
+        assert "source-review-inconclusive" in {item.code for item in result.evidence}
 
 
 async def test_policy_only_rescreen_starts_source_review_without_runtime(

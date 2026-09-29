@@ -3414,12 +3414,18 @@ async def _bind_claim_runtime_leases(
     """Bind each claimed attempt's arrival bench version and signed runtime lease.
 
     Under policy 13 with L3 off and L2 not in shadow, the worker holds a source
-    review that has no exact signed scorer-cohort lease. Leasing that attempt
-    would only build the artifact to park it, so when the lease is required but
-    unavailable (the pinned cohort is not fully healthy, or the arrival is not
-    V13) this raises and the caller rolls the whole claim back: the agent stays
-    queued, no attempt row exists, and nothing counts toward its attempt budget
-    or the orphan sweep. The lease stays optional with L3 on, for the mechanical
+    review that has no exact signed scorer-cohort lease. When a V13 arrival
+    under policy 13 gets no lease, the only cause is the pinned cohort: it is
+    not fully healthy, or an unpinned V13 ticket is live. That is fleet-wide
+    and transient, so this raises and the caller rolls the whole claim back:
+    the agent stays queued, no attempt row exists, and nothing counts toward
+    its attempt budget or the orphan sweep. Holding the queue is correct there,
+    because no other V13 attempt could get a lease either.
+
+    Any other missing lease has a per-agent cause, such as a non-V13 arrival
+    during an open rollout. Withholding it would stall every claim behind that
+    one agent, so it is leased without a lease as before and the worker holds
+    it inconclusive. The lease stays optional with L3 on, for the mechanical
     lane, and for a duplicate precheck; none of them run the source review.
     """
     bound: dict[UUID, tuple[int, ScoredRuntimeEvidenceLease | None]] = {}
@@ -3436,7 +3442,8 @@ async def _bind_claim_runtime_leases(
         bound[attempt.attempt_id] = (bench_version, lease)
         if (
             lease is not None
-            or attempt.policy_version < 13
+            or attempt.policy_version != 13
+            or bench_version != 13
             or attempt.build_only
             or duplicate_of is not None
             or attempt.review_settings_revision is None
@@ -3453,13 +3460,10 @@ async def _bind_claim_runtime_leases(
         withheld = True
         logger.warning(
             "scorer_cohort_unavailable agent_id=%s attempt_id=%s bench_version=%d "
-            "reason=%s",
+            "reason=no_cohort_packet",
             agent.agent_id,
             attempt.attempt_id,
             bench_version,
-            "no_cohort_packet"
-            if attempt.policy_version == 13 and bench_version == 13
-            else "not_v13",
         )
     if withheld:
         raise _ScorerCohortUnavailableError
