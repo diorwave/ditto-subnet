@@ -22518,8 +22518,44 @@ export interface components {
             /** X Url */
             x_url?: string | null;
         };
+        /**
+         * MinerScreeningAdjudication
+         * @description The automated court's digest-verified decision on one attempt.
+         *
+         *     ``escalate`` means the court refused to decide and an operator reviews the
+         *     hold; ``refusal`` names why. The court's model, prompt revision, run
+         *     diagnostics, and completion telemetry are operator-only and never carried.
+         */
+        MinerScreeningAdjudication: {
+            /** Citations */
+            citations?: components["schemas"]["MinerScreeningCitation"][];
+            /** Clear Clause */
+            clear_clause?: string | null;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "clear" | "reject" | "escalate";
+            /** Reason */
+            reason: string;
+            /** Refusal */
+            refusal?: ("adjudicator-unavailable" | "adjudicator-no-evidence" | "adjudicator-evidence-incomplete" | "adjudicator-packet-too-large" | "adjudicator-failed" | "adjudicator-operator-requested" | "uncited-decision" | "cited-unknown-member" | "cited-unread-source" | "inadmissible-citations" | "verdict-contract-failed") | null;
+            /** Reject Invariant */
+            reject_invariant?: string | null;
+        };
+        /**
+         * MinerScreeningCitation
+         * @description One ``path:line`` in the miner's own archive the court relied on.
+         */
+        MinerScreeningCitation: {
+            /** Line */
+            line: number;
+            /** Path */
+            path: string;
+        };
         /** MinerScreeningFailure */
         MinerScreeningFailure: {
+            adjudication?: components["schemas"]["MinerScreeningAdjudication"] | null;
             /**
              * Attempt Id
              * Format: uuid
@@ -22543,6 +22579,8 @@ export interface components {
             public_reason?: string | null;
             /** Reason Code */
             reason_code?: string | null;
+            /** Review Notes */
+            review_notes?: components["schemas"]["MinerScreeningReviewNote"][];
             /**
              * Started At
              * Format: date-time
@@ -22564,6 +22602,29 @@ export interface components {
             attempts: components["schemas"]["MinerScreeningFailure"][];
             /** Miner Hotkey */
             miner_hotkey: string;
+        };
+        /**
+         * MinerScreeningReviewNote
+         * @description One entry of the owner's digest-verified source-review notes ledger.
+         *
+         *     Summaries are reviewer-authored and never contain source text, prompts,
+         *     or challenge values. ``path``/``line`` name a location in the miner's own
+         *     archive. Reviewer confidence and stage are not carried.
+         */
+        MinerScreeningReviewNote: {
+            /** Category */
+            category: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "concern" | "cleared" | "observation";
+            /** Line */
+            line?: number | null;
+            /** Path */
+            path?: string | null;
+            /** Summary */
+            summary: string;
         };
         /** MinerSessionView */
         MinerSessionView: {

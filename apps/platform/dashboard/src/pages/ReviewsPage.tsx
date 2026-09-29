@@ -126,6 +126,49 @@ interface MinerScreeningFailure {
   detail?: string | null;
   log_tail?: string | null;
   captured_at?: string | null;
+  review_notes?: MinerScreeningReviewNote[];
+  adjudication?: MinerScreeningAdjudication | null;
+}
+
+/** One digest-verified entry of the owner's source-review notes ledger. */
+interface MinerScreeningReviewNote {
+  kind: "concern" | "cleared" | "observation";
+  category: string;
+  path?: string | null;
+  line?: number | null;
+  summary: string;
+}
+
+/** The automated court's digest-verified decision on one attempt. */
+interface MinerScreeningAdjudication {
+  decision: "clear" | "reject" | "escalate";
+  reason: string;
+  reject_invariant?: string | null;
+  clear_clause?: string | null;
+  citations: { path: string; line: number }[];
+  refusal?: string | null;
+}
+
+function noteLocation(path?: string | null, line?: number | null): string {
+  if (!path) return "";
+  return typeof line === "number" ? `${path}:${line}` : path;
+}
+
+/** One line naming what the automated court decided and on which basis. */
+function adjudicationHeadline(court: MinerScreeningAdjudication): string {
+  if (court.decision === "clear") {
+    return court.clear_clause
+      ? `Automated court cleared it · published basis ${court.clear_clause}`
+      : "Automated court cleared it";
+  }
+  if (court.decision === "reject") {
+    return court.reject_invariant
+      ? `Automated court rejected it · breached ${court.reject_invariant}`
+      : "Automated court rejected it";
+  }
+  return court.refusal
+    ? `Automated court could not decide (${court.refusal}); an operator is reviewing it`
+    : "Automated court could not decide; an operator is reviewing it";
 }
 
 interface MinerScreeningFeedback {
@@ -1145,6 +1188,43 @@ function AccountPanel(): JSX.Element {
                                 </Show>
                                 <Show when={attempt.log_tail}>
                                   <pre>{attempt.log_tail}</pre>
+                                </Show>
+                                <Show when={attempt.adjudication}>
+                                  {(court) => (
+                                    <>
+                                      <p>{adjudicationHeadline(court())}</p>
+                                      <p class="muted">{court().reason}</p>
+                                      <Show when={court().citations.length}>
+                                        <p class="muted">
+                                          Cited:{" "}
+                                          {court()
+                                            .citations.map((c) => noteLocation(c.path, c.line))
+                                            .join(", ")}
+                                        </p>
+                                      </Show>
+                                    </>
+                                  )}
+                                </Show>
+                                <Show when={attempt.review_notes?.length}>
+                                  <p>Review notes ({attempt.review_notes?.length})</p>
+                                  <ul class="account-logs">
+                                    <For each={attempt.review_notes || []}>
+                                      {(note) => (
+                                        <li>
+                                          <span class="muted">
+                                            {[
+                                              note.kind,
+                                              note.category,
+                                              noteLocation(note.path, note.line),
+                                            ]
+                                              .filter(Boolean)
+                                              .join(" · ")}
+                                          </span>{" "}
+                                          {note.summary}
+                                        </li>
+                                      )}
+                                    </For>
+                                  </ul>
                                 </Show>
                               </li>
                             )}

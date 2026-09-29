@@ -384,6 +384,156 @@ describe("gate notes (#1852)", () => {
   });
 });
 
+describe("screening review notes (#1249)", () => {
+  const session = {
+    token: "ditto_ms_abc",
+    hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+    scopes: ["read"],
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+  const agentId = "5fdadd33-bd0f-492d-ba71-49bef159f069";
+
+  function json(body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  async function openFeedback(attempts: unknown[]) {
+    localStorage.setItem("ditto.miner.session.v1", JSON.stringify(session));
+    const { setMinerSession } = await import("../stores/sessionStore");
+    setMinerSession(session);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/me")) {
+        return json({
+          session: {
+            miner_hotkey: session.hotkey,
+            scopes: ["read"],
+            expires_at: session.expiresAt,
+            expires_in: 3600,
+          },
+          profile: {},
+          profile_url: "/miner/" + session.hotkey,
+          commands: [],
+        });
+      }
+      if (url.endsWith("/me/submissions")) {
+        return json([
+          { agent_id: agentId, name: "alpha", status: "quarantined", created_at: "2026-09-28" },
+        ]);
+      }
+      if (url.endsWith("/me/reviews")) return json({ reviews: [] });
+      if (url.endsWith("/screening-feedback")) {
+        return json({
+          agent_id: agentId,
+          miner_hotkey: session.hotkey,
+          agent_status: "quarantined",
+          attempts,
+        });
+      }
+      return new Response("[]", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(() => <ReviewsPage />);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Signed in");
+    });
+    const submissionsTab = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "submissions",
+    );
+    fireEvent.click(submissionsTab as HTMLButtonElement);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("alpha");
+    });
+    const button = Array.from(document.querySelectorAll("button")).find(
+      (item) => item.textContent?.trim() === "Screening feedback",
+    );
+    fireEvent.click(button as HTMLButtonElement);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("policy v13");
+    });
+    return fetchMock;
+  }
+
+  const attempt = {
+    attempt_id: "0b8c4d1e-0000-4000-8000-000000000001",
+    status: "quarantined",
+    policy_version: 13,
+    started_at: "2026-09-28T00:00:00Z",
+    public_reason: "Submission held for anti-cheat review",
+  };
+
+  it("shows the owner's notes ledger and the court's reject basis and citations", async () => {
+    const fetchMock = await openFeedback([
+      {
+        ...attempt,
+        review_notes: [
+          {
+            kind: "concern",
+            category: "answer_lookup",
+            path: "src/router.rs",
+            line: 42,
+            summary: "Routes a benchmark-shaped prompt to a lookup table",
+          },
+          {
+            kind: "cleared",
+            category: "model_invocation",
+            path: "src/main.rs",
+            line: 6,
+            summary: "Served model authors the graded response",
+          },
+        ],
+        adjudication: {
+          decision: "reject",
+          reason: "The lookup at src/router.rs:42 answers without the model.",
+          reject_invariant: "i8_evaluation_independence",
+          clear_clause: null,
+          citations: [{ path: "src/router.rs", line: 42 }],
+          refusal: null,
+        },
+      },
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Automated court rejected it · breached i8_evaluation_independence");
+    expect(text).toContain("The lookup at src/router.rs:42 answers without the model.");
+    expect(text).toContain("Cited: src/router.rs:42");
+    expect(text).toContain("Review notes (2)");
+    expect(text).toContain(
+      "concern · answer_lookup · src/router.rs:42 Routes a benchmark-shaped prompt to a lookup table",
+    );
+    expect(text).toContain(
+      "cleared · model_invocation · src/main.rs:6 Served model authors the graded response",
+    );
+    const call = fetchMock.mock.calls.find((c) => String(c[0]).endsWith("/screening-feedback"));
+    const headers = new Headers((call?.[1] as RequestInit | undefined)?.headers);
+    expect(headers.get("authorization")).toBe("Bearer ditto_ms_abc");
+  });
+
+  it("names an escalated refusal and shows nothing for an attempt without a review", async () => {
+    await openFeedback([
+      {
+        ...attempt,
+        review_notes: [],
+        adjudication: {
+          decision: "escalate",
+          reason: "Automated adjudication did not complete; held for operator review",
+          citations: [],
+          refusal: "adjudicator-failed",
+        },
+      },
+      { ...attempt, attempt_id: "0b8c4d1e-0000-4000-8000-000000000002", status: "failed" },
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain(
+      "Automated court could not decide (adjudicator-failed); an operator is reviewing it",
+    );
+    expect(text).not.toContain("Review notes");
+    expect(text).not.toContain("Cited:");
+  });
+});
+
 describe("Ditto account link", () => {
   const session = {
     token: "ditto_ms_abc",
