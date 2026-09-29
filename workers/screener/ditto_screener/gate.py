@@ -1165,6 +1165,7 @@ class BuildGate:
         deferred_source_review: bool = False,
         policy_version: int = SCREENING_POLICY_VERSION,
         scored_runtime_evidence: ScoredRuntimeEvidenceLease | None = None,
+        scored_runtime_evidence_received_at: int | None = None,
         execution_namespace: UUID | None = None,
     ) -> ScreeningDecision:
         """Screen one agent end-to-end; never raises.
@@ -1194,6 +1195,10 @@ class BuildGate:
         ``policy_only`` selects a stale-policy rescreen whose previously
         verified image and runtime smoke are retained by Platform. It reruns
         archive/source policy checks without rebuilding, serving, or exporting.
+
+        ``scored_runtime_evidence_received_at`` is the wall-clock second the
+        claim carrying ``scored_runtime_evidence`` arrived. The signed lease's
+        freshness is judged against it, so build and L1 time cannot age it out.
         """
 
         if build_only and policy_only:
@@ -1380,6 +1385,9 @@ class BuildGate:
                         deadline=deadline,
                         policy_version=policy_version,
                         scored_runtime_evidence=scored_runtime_evidence,
+                        scored_runtime_evidence_received_at=(
+                            scored_runtime_evidence_received_at
+                        ),
                     )
                     if source_review_low_clearance_allowed(
                         resolved_preflight, policy_version=policy_version
@@ -1447,6 +1455,9 @@ class BuildGate:
                             deadline=deadline,
                             policy_version=policy_version,
                             scored_runtime_evidence=scored_runtime_evidence,
+                            scored_runtime_evidence_received_at=(
+                                scored_runtime_evidence_received_at
+                            ),
                         )
 
                     review_factory = review_locally

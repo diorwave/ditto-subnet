@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
+import time
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
@@ -172,6 +172,9 @@ async def consume(
         return False
     if payload is None:
         return False
+    # The packet is judged fresh once, at claim receipt, exactly as on the
+    # primary screening path.
+    received_at = int(time.time())
     claim = L2CanaryClaim.model_validate_json(json.dumps(payload))
     logger.info(
         "report-only L2 canary claimed canary_id=%s agent_id=%s lease_expires_at=%s",
@@ -234,13 +237,6 @@ async def consume(
         l2_review_mode="enforce",
         l2_always_escalate=True,
         require_signed_runtime_lease=True,
-        # This report-only packet was fresh when Platform issued the lease.
-        # Its observed timestamp may precede the claim by a few minutes; keep
-        # it valid only through this canary's bounded completion deadline.
-        signed_runtime_lease_max_age_seconds=math.ceil(
-            claim.lease_expires_at.timestamp()
-            - claim.scored_runtime_evidence.observed_at
-        ),
         l2_cache_dir=str(canary_root / "cache"),
         l2_audit_journal_file=str(canary_root / "l2-audit.jsonl"),
         static_preflight_audit_file=str(canary_root / "preflight-audit.jsonl"),
@@ -270,6 +266,7 @@ async def consume(
             deadline=deadline,
             policy_version=13,
             scored_runtime_evidence=claim.scored_runtime_evidence,
+            scored_runtime_evidence_received_at=received_at,
             progress=progress,
             execution_namespace=(
                 claim.canary_id if claim.run_mode == "full_runtime" else None

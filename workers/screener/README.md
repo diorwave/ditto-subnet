@@ -208,6 +208,17 @@ Required values are supplied through the production host's protected
   cohort lease for the exact attempt and artifact. Set on the Platform process
   and on the signed screener workers.
   Leave it off for legacy screening; never treat an absent lease as CLEAR.
+  V13 with L3 off requires the lease without this flag. Freshness is checked
+  against claim receipt, not against each later use, so a long build or L1
+  pass cannot age out a lease Platform just certified. A present lease that is
+  stale at receipt or bound to another attempt, artifact, or policy is held
+  inconclusive. A lease Platform could not attach (no healthy pinned scorer
+  cohort) is retryable infrastructure, `l2-runtime-evidence-unavailable`, and
+  Platform retries it automatically; Platform also withholds such a claim
+  while the lease is required.
+- `SCREENER_SIGNED_RUNTIME_LEASE_MAX_AGE_SECONDS` (default `300`, 1-3600):
+  oldest signed cohort observation accepted at claim receipt. The report-only
+  L2 canary uses the same receipt-anchored rule.
 - `SCREENER_STATIC_PREFLIGHT_V2_MODE`: `off` (default), `shadow`, or `enforce`.
   `off` and `shadow` preserve the v1 decisive result; `shadow` additionally
   computes the reachability-and-causality v2 candidate for comparison.
