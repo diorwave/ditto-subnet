@@ -44,13 +44,15 @@ directions, for `--inventory-failure-hold-passes` consecutive failing passes
 (default 4, about two minutes) and reports `PLATFORM_INVENTORY_UNAVAILABLE`. The
 hold never adds capacity. A routing read failure reuses the last good revision
 cached in the controller state file, so running GCE workers still match the
-Platform claim check; only a controller without a cached revision falls back to
-the synthetic, unready revision 0 (`PROVIDER_ROUTING_UNAVAILABLE`), whose
-workers cannot claim. Once the hold expires, the normal rules above apply: an
-unknown primary fails closed. The first failing pass records a
+Platform claim check. Without a cached revision, the controller publishes an
+unready revision 0 (`PROVIDER_ROUTING_UNAVAILABLE`) and preserves the current
+MIG size until an authoritative routing read succeeds; it neither adds
+capacity nor deletes workers on an unknown route. Once the hold expires, the
+normal rules above apply when a cached route exists: an unknown primary fails
+closed. The first successfully fenced failing pass records a
 `platform_inventory_unavailable` event and the expiry records
-`platform_inventory_hold_expired`. Every capacity event is sent once, on the
-fenced renew that opens the pass.
+`platform_inventory_hold_expired`. A failed pre-event read or first fenced
+renew leaves the transition pending for the next pass.
 
 Production uses `['hetzner', 'gcp']` for build, runtime smoke, and source review.
 The second entry means that separate GCE workers may claim still-unclaimed

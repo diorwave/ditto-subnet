@@ -808,15 +808,20 @@ def reconcile(settings: Settings) -> dict[str, Any]:
         if not available
     ]
     prior_failures = state.get("inventory_failures")
-    if not isinstance(prior_failures, int) or prior_failures < 0:
+    if (
+        not isinstance(prior_failures, int)
+        or isinstance(prior_failures, bool)
+        or prior_failures < 0
+    ):
         prior_failures = 0
     inventory_failures = prior_failures + 1 if failed_reads else 0
     holding = bool(failed_reads) and (
         inventory_failures <= settings.inventory_failure_hold_passes
     )
     if not settings.dry_run:
-        # Count before any later step can raise, so failing passes still add up.
-        state["inventory_failures"] = inventory_failures
+        # Keep the last good routing even if a later provider read fails. The
+        # failure count advances only once the first fenced renew delivers its
+        # transition events.
         if provider_routing_available:
             state["last_good_provider_routing"] = _routing_to_state(provider_routing)
         _write_state(settings.state_file, state)
@@ -845,6 +850,10 @@ def reconcile(settings: Settings) -> dict[str, Any]:
         global_cap=settings.global_cap,
     )
     if provider_error_code is not None:
+        # Without an authoritative routing revision, preserve the current MIG
+        # size without adding capacity. The unready snapshot blocks new claims
+        # until Platform can provide current policy again.
+        target = current_target
         reason = "PROVIDER_ROUTING_UNAVAILABLE"
     gce_has_active_lease = any(
         node.get("provider") == "gcp" and node.get("active_lease") is True
@@ -935,6 +944,7 @@ def reconcile(settings: Settings) -> dict[str, Any]:
     # The renewed snapshot delivered any reason-change event; record the
     # reason now so a later failed mutation cannot repeat the transition.
     state = _load_state(settings.state_file)
+    state["inventory_failures"] = inventory_failures
     state["last_fallback_reason"] = reason
     _write_state(settings.state_file, state)
     watchdog_enabled = target > 0

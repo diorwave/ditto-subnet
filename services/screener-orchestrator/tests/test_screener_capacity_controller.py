@@ -815,34 +815,41 @@ class CapacityDecisionTests(unittest.TestCase):
             )
 
     def test_unavailable_provider_revision_fails_closed_to_gcp(self) -> None:
-        with TemporaryDirectory() as directory:
-            # No cached revision and no hold: the synthetic route cannot claim.
-            settings = replace(
-                _settings(Path(directory)), inventory_failure_hold_passes=0
-            )
-            platform = _Platform(Demand(runnable=3, active=0, desired=2))
-            gce = _GCE()
+        for current_target in (0, 2):
             with (
-                patch.object(
-                    platform,
-                    "provider_routing",
-                    side_effect=ControllerError("provider settings unavailable"),
-                ),
-                patch(
-                    "screener_capacity.controller.PlatformControl",
-                    return_value=platform,
-                ),
-                patch("screener_capacity.controller.GCEFleet", return_value=gce),
+                self.subTest(current_target=current_target),
+                TemporaryDirectory() as directory,
             ):
-                snapshot = reconcile(settings)
-            self.assertEqual(gce.resized, [2])
-            self.assertEqual(
-                snapshot["fallback_reason"], "PROVIDER_ROUTING_UNAVAILABLE"
-            )
-            self.assertEqual(
-                snapshot["last_provider_error_code"],
-                "PROVIDER_ROUTING_UNAVAILABLE",
-            )
+                # No cached revision and no hold: neither a scale-out nor a blind
+                # scale-in is safe while the provider policy cannot be read.
+                settings = replace(
+                    _settings(Path(directory)), inventory_failure_hold_passes=0
+                )
+                platform = _Platform(Demand(runnable=3, active=0, desired=2))
+                gce = _GCE(target=current_target)
+                with (
+                    patch.object(
+                        platform,
+                        "provider_routing",
+                        side_effect=ControllerError("provider settings unavailable"),
+                    ),
+                    patch(
+                        "screener_capacity.controller.PlatformControl",
+                        return_value=platform,
+                    ),
+                    patch("screener_capacity.controller.GCEFleet", return_value=gce),
+                ):
+                    snapshot = reconcile(settings)
+                self.assertEqual(gce.resized, [])
+                self.assertEqual(snapshot["gce_target"], current_target)
+                self.assertFalse(snapshot["provider_ready"])
+                self.assertEqual(
+                    snapshot["fallback_reason"], "PROVIDER_ROUTING_UNAVAILABLE"
+                )
+                self.assertEqual(
+                    snapshot["last_provider_error_code"],
+                    "PROVIDER_ROUTING_UNAVAILABLE",
+                )
 
     def test_gce_read_success_advances_success_timestamp_when_routing_fails(
         self,
@@ -1094,7 +1101,8 @@ class CapacityDecisionTests(unittest.TestCase):
                 nodes=self._OPEN_PRIMARY,
             )
 
-            self.assertEqual(gce.resized, [2])
+            self.assertEqual(gce.resized, [])
+            self.assertEqual(snapshot["gce_target"], 0)
             self.assertEqual(snapshot["provider_settings_revision"], 0)
             self.assertFalse(snapshot["provider_ready"])
             self.assertEqual(
@@ -1193,6 +1201,139 @@ class CapacityDecisionTests(unittest.TestCase):
                     snapshot["last_provider_error_code"],
                     "PROVIDER_ROUTING_UNAVAILABLE",
                 )
+
+    def test_boolean_inventory_failure_count_starts_a_new_hold(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = replace(
+                _settings(Path(directory)), inventory_failure_hold_passes=1
+            )
+            settings.state_file.write_text(json.dumps({"inventory_failures": True}))
+            gce = _GCE(target=2)
+            snapshot, renewed = self._inventory_pass(
+                settings,
+                gce,
+                demand=Demand(runnable=24, active=0, desired=4),
+                routing=_overflow_routing(),
+                nodes=None,
+            )
+
+            self.assertEqual(snapshot["gce_target"], 2)
+            self.assertEqual(gce.resized, [])
+            self.assertEqual(
+                json.loads(settings.state_file.read_text())["inventory_failures"], 1
+            )
+            self.assertIn(
+                "platform_inventory_unavailable",
+                [event["event_type"] for event in renewed[0]["events"]],
+            )
+
+    def test_inventory_transition_event_retries_after_first_renew_fails(self) -> None:
+        for prior, event_type in (
+            (0, "platform_inventory_unavailable"),
+            (1, "platform_inventory_hold_expired"),
+        ):
+            with self.subTest(prior=prior), TemporaryDirectory() as directory:
+                settings = replace(
+                    _settings(Path(directory)), inventory_failure_hold_passes=1
+                )
+                settings.state_file.write_text(
+                    json.dumps({"inventory_failures": prior})
+                )
+                renewed: list[dict[str, Any]] = []
+
+                def failed_read() -> Any:
+                    raise ControllerError("node inventory unavailable")
+
+                def renew(
+                    snapshot: dict[str, Any],
+                    received: list[dict[str, Any]] = renewed,
+                ) -> dict[str, Any]:
+                    received.append(snapshot)
+                    if len(received) == 1:
+                        raise ControllerError("fenced renew failed")
+                    return snapshot
+
+                platform = SimpleNamespace(
+                    demand=lambda **_kwargs: Demand(runnable=0, active=0, desired=0),
+                    provider_routing=_overflow_routing,
+                    node_states=failed_read,
+                    renew=renew,
+                    fence=lambda **_kwargs: None,
+                )
+                with (
+                    patch(
+                        "screener_capacity.controller.PlatformControl",
+                        return_value=platform,
+                    ),
+                    patch(
+                        "screener_capacity.controller.GCEFleet",
+                        return_value=_GCE(),
+                    ),
+                ):
+                    with self.assertRaisesRegex(ControllerError, "fenced renew failed"):
+                        reconcile(settings)
+                    self.assertEqual(
+                        json.loads(settings.state_file.read_text())[
+                            "inventory_failures"
+                        ],
+                        prior,
+                    )
+                    reconcile(settings)
+
+                self.assertIn(
+                    event_type,
+                    [event["event_type"] for event in renewed[1]["events"]],
+                )
+                self.assertEqual(
+                    json.loads(settings.state_file.read_text())["inventory_failures"],
+                    prior + 1,
+                )
+
+    def test_inventory_event_retries_after_gce_read_fails(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory))
+            renewed: list[dict[str, Any]] = []
+            reads = 0
+
+            def failed_nodes() -> Any:
+                raise ControllerError("node inventory unavailable")
+
+            def target() -> int:
+                nonlocal reads
+                reads += 1
+                if reads == 1:
+                    raise ControllerError("GCE target unavailable")
+                return 0
+
+            platform = SimpleNamespace(
+                demand=lambda **_kwargs: Demand(runnable=0, active=0, desired=0),
+                provider_routing=_overflow_routing,
+                node_states=failed_nodes,
+                renew=lambda snapshot: renewed.append(snapshot) or snapshot,
+                fence=lambda **_kwargs: None,
+            )
+            gce = _GCE()
+            gce.target = target  # type: ignore[method-assign]
+            with (
+                patch(
+                    "screener_capacity.controller.PlatformControl",
+                    return_value=platform,
+                ),
+                patch("screener_capacity.controller.GCEFleet", return_value=gce),
+            ):
+                with self.assertRaisesRegex(ControllerError, "GCE target unavailable"):
+                    reconcile(settings)
+                state = json.loads(settings.state_file.read_text())
+                self.assertNotIn("inventory_failures", state)
+                reconcile(settings)
+
+            self.assertIn(
+                "platform_inventory_unavailable",
+                [event["event_type"] for event in renewed[0]["events"]],
+            )
+            self.assertEqual(
+                json.loads(settings.state_file.read_text())["inventory_failures"], 1
+            )
 
     def test_capacity_events_are_sent_once(self) -> None:
         with TemporaryDirectory() as directory:
