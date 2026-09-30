@@ -141,19 +141,72 @@ class L2CanaryView(BaseModel):
     completed_at: datetime | None
 
 
-class L2CanaryPreflightView(BaseModel):
-    """Current values of the scheduler's exact-source guards, before its recheck."""
+L2CanaryGuardName = Literal[
+    "ath_clear_action",
+    "attempt_owner",
+    "agent_artifact_sha256",
+    "attempt_policy_version",
+    "agent_status",
+    "score_row_count",
+    "attempt_artifact_sha256",
+    "historical_ruling_run_mode",
+    "historical_ruling",
+    "source_object_verified",
+    "arrival_bench_version",
+]
+
+
+class L2CanaryGuardCheck(BaseModel):
+    """One exact-source guard, in the order the scheduler evaluates it.
+
+    ``passed`` is null when the caller supplied no expected value to compare,
+    or, for ``source_object_verified``, because only scheduling re-hashes the
+    stored object. ``conflict_detail`` is the exact 409 detail the scheduler
+    answers when this is the first guard not known to pass.
+    """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
+    guard: L2CanaryGuardName
+    passed: bool | None
+    current: str | int | None
+    expected: str | int | None
+    conflict_detail: str
+    note: str | None = None
+
+
+class L2CanaryPreflightView(BaseModel):
+    """The scheduler's exact-source guards on current state; advisory only.
+
+    It authorizes nothing: scheduling reruns the same predicate under row locks
+    and, for a historical ruling, re-hashes the stored object before queueing.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    authority: Literal["none"] = "none"
     agent_id: UUID
     source_attempt_id: UUID
     agent_artifact_sha256: str
     source_attempt_artifact_sha256: str | None
     agent_status: str
     attempt_policy_version: int
-    arrival_bench_version: int
+    # Null when unavailable; the arrival_bench_version guard then fails exactly
+    # as scheduling refuses it.
+    arrival_bench_version: int | None
     score_row_count: int
+    attempt_agent_id: UUID
+    # Legacy attempts predate artifact pinning; only a historical ruling can
+    # schedule them, and the ruling does not prove what the old attempt ran.
+    legacy_null_attempt_sha256: bool
+    active_canary_id: UUID | None
+    # Whether a claim could lease now: the same report-only scored-runtime
+    # packet lookup the claim path performs. A queued canary waits otherwise.
+    report_only_packet_available: bool
+    guards: list[L2CanaryGuardCheck]
+    # False when any guard failed; null when none failed but at least one
+    # expected value was not supplied (or object verification is pending).
+    guards_pass: bool | None
 
 
 class L2CanaryClaimRequest(BaseModel):

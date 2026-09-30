@@ -88,6 +88,57 @@ describe('Backroom MCP tools', () => {
     }
   })
 
+  it('judges exact-source canary guards read-only with the admin token server-side', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const agentId = '11111111-1111-4111-8111-111111111111'
+    const sourceAttemptId = '22222222-2222-4222-8222-222222222222'
+    const payload = {
+      authority: 'none', agent_id: agentId, source_attempt_id: sourceAttemptId,
+      agent_artifact_sha256: 'a'.repeat(64), source_attempt_artifact_sha256: null,
+      agent_status: 'scored', attempt_policy_version: 13, arrival_bench_version: 13,
+      score_row_count: 3, attempt_agent_id: agentId, legacy_null_attempt_sha256: true,
+      active_canary_id: null, report_only_packet_available: true,
+      guards: [
+        { guard: 'score_row_count', passed: false, current: 3, expected: 2,
+          conflict_detail: 'canary exact-source guard changed: score_row_count', note: null },
+        { guard: 'attempt_artifact_sha256', passed: false, current: null, expected: 'a'.repeat(64),
+          conflict_detail: 'canary exact-source guard changed: attempt_artifact_sha256',
+          note: 'legacy attempt has no pinned artifact SHA' },
+      ],
+      guards_pass: false,
+      signed_download_url: 'must-not-escape',
+    }
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json(payload))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    try {
+      const response = await client.callTool({
+        name: 'get_l2_report_canary_preflight',
+        arguments: { agentId, sourceAttemptId, artifactSha256: 'a'.repeat(64),
+          expectedAgentStatus: 'scored', expectedScoreCount: 2 },
+      })
+      expect(response.isError).not.toBe(true)
+      const body = readJsonResult(response) as typeof payload
+      expect(body.guards_pass).toBe(false)
+      expect(body.guards.map((check) => check.conflict_detail)).toEqual([
+        'canary exact-source guard changed: score_row_count',
+        'canary exact-source guard changed: attempt_artifact_sha256',
+      ])
+      expect(body.legacy_null_attempt_sha256).toBe(true)
+      expect(JSON.stringify(body)).not.toContain('must-not-escape')
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toContain(
+        `/preflight/${agentId}/${sourceAttemptId}?artifact_sha256=${'a'.repeat(64)}` +
+          '&expected_agent_status=scored&expected_score_count=2',
+      )
+      expect(init.method).toBe('GET')
+      expect(JSON.stringify(readTextResult(response))).not.toContain('platform-admin-token')
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  })
+
   it('reads block-bound vTrust and pending rounds without exposing ciphertext', async () => {
     process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
     const payload = {
@@ -423,9 +474,9 @@ describe('Backroom MCP tools', () => {
     // Main also adds the no-input validator-capacity read (#2036), and the
     // guarded verified V13 court-clear release adds a bounded writer entry.
     // Four canonical starter fixture controls bring the measured catalog to
-    // 179,468 bytes; retain about 0.5 KB headroom. The optional canary
-    // review-posture pin (reviewSettingsRevision) measured 179,642;
-    // node canary cap (#2447) adds one required setting and catalog note.
+    // 179,468 bytes before the optional review-posture pin, node cap and
+    // expected-value canary guard inputs. Keep operational tutorials in help
+    // and retain the existing catalog budget as these inputs evolve.
     expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(180_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live

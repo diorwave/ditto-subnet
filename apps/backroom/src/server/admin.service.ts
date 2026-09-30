@@ -676,8 +676,23 @@ export async function fetchL2ReportCanary(rawInput: unknown) {
 
 export async function fetchL2ReportCanaryPreflight(rawInput: unknown) {
   const input = l2ReportCanaryPreflightInputSchema.parse(rawInput)
+  const params = new URLSearchParams()
+  if (input.artifactSha256 !== undefined) params.set('artifact_sha256', input.artifactSha256)
+  if (input.expectedAgentStatus !== undefined) {
+    params.set('expected_agent_status', input.expectedAgentStatus)
+  }
+  if (input.expectedScoreCount !== undefined) {
+    params.set('expected_score_count', String(input.expectedScoreCount))
+  }
+  if (input.historicalRulingKind !== undefined) {
+    params.set('historical_ruling_kind', input.historicalRulingKind)
+  }
+  if (input.historicalRulingId !== undefined) {
+    params.set('historical_ruling_id', input.historicalRulingId)
+  }
+  const query = params.toString()
   const payload = await platformAdminRequest(
-    `/api/v1/admin/screener-l2-report-canaries/preflight/${input.agentId}/${input.sourceAttemptId}`,
+    `/api/v1/admin/screener-l2-report-canaries/preflight/${input.agentId}/${input.sourceAttemptId}${query ? `?${query}` : ''}`,
   )
   return l2ReportCanaryPreflightViewSchema.parse(payload)
 }

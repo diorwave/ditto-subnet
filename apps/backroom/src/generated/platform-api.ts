@@ -2057,7 +2057,14 @@ export interface paths {
         };
         /**
          * Get L2 Report Canary Preflight
-         * @description Expose exact guard inputs; scheduling still rechecks them under a lock.
+         * @description Evaluate the scheduler's own guard predicate; advisory only.
+         *
+         *     Read-only and non-authorizing: no row locks, no queue write, and no storage
+         *     read. It grants nothing; scheduling reruns the same predicate under row
+         *     locks and, for a historical ruling, re-hashes the stored object. Omitted
+         *     expected values report the current value with ``passed=null``. Scheduling
+         *     would refuse at the first guard not known to pass, with its
+         *     ``conflict_detail``.
          */
         get: operations["get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get"];
         put?: never;
@@ -21476,6 +21483,32 @@ export interface components {
             accepted: boolean;
         };
         /**
+         * L2CanaryGuardCheck
+         * @description One exact-source guard, in the order the scheduler evaluates it.
+         *
+         *     ``passed`` is null when the caller supplied no expected value to compare,
+         *     or, for ``source_object_verified``, because only scheduling re-hashes the
+         *     stored object. ``conflict_detail`` is the exact 409 detail the scheduler
+         *     answers when this is the first guard not known to pass.
+         */
+        L2CanaryGuardCheck: {
+            /** Conflict Detail */
+            conflict_detail: string;
+            /** Current */
+            current: string | number | null;
+            /** Expected */
+            expected: string | number | null;
+            /**
+             * Guard
+             * @enum {string}
+             */
+            guard: "ath_clear_action" | "attempt_owner" | "agent_artifact_sha256" | "attempt_policy_version" | "agent_status" | "score_row_count" | "attempt_artifact_sha256" | "historical_ruling_run_mode" | "historical_ruling" | "source_object_verified" | "arrival_bench_version";
+            /** Note */
+            note?: string | null;
+            /** Passed */
+            passed: boolean | null;
+        };
+        /**
          * L2CanaryPinnedScheduleRequest
          * @description ``POST /pinned``: the schedule request with a required posture pin.
          */
@@ -21533,9 +21566,14 @@ export interface components {
         };
         /**
          * L2CanaryPreflightView
-         * @description Current values of the scheduler's exact-source guards, before its recheck.
+         * @description The scheduler's exact-source guards on current state; advisory only.
+         *
+         *     It authorizes nothing: scheduling reruns the same predicate under row locks
+         *     and, for a historical ruling, re-hashes the stored object before queueing.
          */
         L2CanaryPreflightView: {
+            /** Active Canary Id */
+            active_canary_id: string | null;
             /** Agent Artifact Sha256 */
             agent_artifact_sha256: string;
             /**
@@ -21546,9 +21584,28 @@ export interface components {
             /** Agent Status */
             agent_status: string;
             /** Arrival Bench Version */
-            arrival_bench_version: number;
+            arrival_bench_version: number | null;
+            /**
+             * Attempt Agent Id
+             * Format: uuid
+             */
+            attempt_agent_id: string;
             /** Attempt Policy Version */
             attempt_policy_version: number;
+            /**
+             * Authority
+             * @default none
+             * @constant
+             */
+            authority: "none";
+            /** Guards */
+            guards: components["schemas"]["L2CanaryGuardCheck"][];
+            /** Guards Pass */
+            guards_pass: boolean | null;
+            /** Legacy Null Attempt Sha256 */
+            legacy_null_attempt_sha256: boolean;
+            /** Report Only Packet Available */
+            report_only_packet_available: boolean;
             /** Score Row Count */
             score_row_count: number;
             /** Source Attempt Artifact Sha256 */
@@ -39376,7 +39433,13 @@ export interface operations {
     };
     get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                artifact_sha256?: string | null;
+                expected_agent_status?: string | null;
+                expected_score_count?: number | null;
+                historical_ruling_kind?: ("ath_clear" | "screening_reject") | null;
+                historical_ruling_id?: string | null;
+            };
             header?: {
                 authorization?: string | null;
             };

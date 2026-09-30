@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -26,7 +26,9 @@ from ditto.api_models.l2_report_canary import (
     L2CanaryClaimRequest,
     L2CanaryClaimResponse,
     L2CanaryCompleteRequest,
+    L2CanaryGuardCheck,
     L2CanaryPinnedScheduleRequest,
+    L2CanaryPreflightView,
     L2CanaryScheduleRequest,
     L2CanaryView,
 )
@@ -718,6 +720,7 @@ async def test_canary_preflight_exposes_scheduler_guard_values_without_mutation(
     assert view.agent_status == "evaluating"
     assert view.attempt_policy_version == 13
     assert view.score_row_count == 1
+    assert view.arrival_bench_version is not None
     assert view.arrival_bench_version >= 1
     async with session_maker() as session:
         with pytest.raises(HTTPException) as error:
@@ -725,6 +728,401 @@ async def test_canary_preflight_exposes_scheduler_guard_values_without_mutation(
                 uuid4(), attempt_id, Response(), None, session
             )
     assert error.value.status_code == 404
+
+
+async def _seed_preflight_source(
+    session_maker: async_sessionmaker[AsyncSession],
+    *,
+    agent_sha: str,
+    attempt_sha: str | None,
+    status: AgentStatus = AgentStatus.EVALUATING,
+) -> tuple[UUID, UUID, str]:
+    agent_id = await _seed_agent(session_maker, status=status, sha256=agent_sha)
+    await _seed_score(session_maker, agent_id=agent_id)
+    attempt_id = uuid4()
+    node_id = f"canary-preflight-{uuid4().hex[:12]}"
+    now = datetime.now(UTC)
+    async with session_maker() as session, session.begin():
+        session.add_all(
+            [
+                ScreenerNode(
+                    environment="prod",
+                    node_id=node_id,
+                    provider="hetzner",
+                    provider_resource_id=node_id,
+                    screener_hotkey=f"hotkey-{node_id}",
+                    token_hash="f" * 64,
+                    token_expires_at=now + timedelta(hours=1),
+                    status="active",
+                    capacity=1,
+                ),
+                ScreeningAttempt(
+                    attempt_id=attempt_id,
+                    agent_id=agent_id,
+                    artifact_sha256=attempt_sha,
+                    screener_hotkey=f"hotkey-{node_id}",
+                    policy_version=13,
+                    status="passed",
+                    started_at=now - timedelta(minutes=1),
+                    deadline=now,
+                    finished_at=now,
+                ),
+            ]
+        )
+    return agent_id, attempt_id, node_id
+
+
+def _schedule_payload(
+    agent_id: UUID,
+    attempt_id: UUID,
+    node_id: str,
+    *,
+    sha: str,
+    status: str,
+    score_count: int,
+) -> L2CanaryScheduleRequest:
+    return L2CanaryScheduleRequest(
+        request_id=uuid4(),
+        agent_id=agent_id,
+        source_attempt_id=attempt_id,
+        artifact_sha256=sha,
+        policy_version=13,
+        expected_agent_status=status,
+        expected_score_count=score_count,
+        target_node_id=node_id,
+        review_label="candidate_clear",
+        confirm_report_only=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attempt_sha", "status", "score_count", "failed_guard"),
+    [
+        ("a" * 64, "evaluating", 1, None),
+        ("a" * 64, "evaluating", 0, "score_row_count"),
+        ("a" * 64, "scored", 1, "agent_status"),
+        ("b" * 64, "evaluating", 1, "attempt_artifact_sha256"),
+        (None, "evaluating", 1, "attempt_artifact_sha256"),
+    ],
+)
+async def test_canary_preflight_reports_the_guard_scheduling_enforces(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    attempt_sha: str | None,
+    status: str,
+    score_count: int,
+    failed_guard: str | None,
+) -> None:
+    sha = "a" * 64
+    agent_id, attempt_id, node_id = await _seed_preflight_source(
+        session_maker, agent_sha=sha, attempt_sha=attempt_sha
+    )
+    monkeypatch.setattr(endpoints, "arrival_bench_version", AsyncMock(return_value=13))
+    monkeypatch.setattr(
+        endpoints,
+        "scored_runtime_evidence_for_lease",
+        AsyncMock(return_value=_packet(attempt_id, sha)),
+    )
+    async with session_maker() as session:
+        view = await endpoints.get_l2_report_canary_preflight(
+            agent_id,
+            attempt_id,
+            Response(),
+            None,
+            session,
+            artifact_sha256=sha,
+            expected_agent_status=status,
+            expected_score_count=score_count,
+        )
+    assert [check.guard for check in view.guards] == [
+        "attempt_owner",
+        "agent_artifact_sha256",
+        "attempt_policy_version",
+        "agent_status",
+        "score_row_count",
+        "attempt_artifact_sha256",
+        "arrival_bench_version",
+    ]
+    assert view.attempt_agent_id == agent_id
+    assert view.legacy_null_attempt_sha256 is (attempt_sha is None)
+    assert view.report_only_packet_available is True
+    assert view.active_canary_id is None
+    failed = [check for check in view.guards if check.passed is not True]
+    assert [check.guard for check in failed] == (
+        [] if failed_guard is None else [failed_guard]
+    )
+    assert view.guards_pass is (failed_guard is None)
+    sha_check = next(c for c in view.guards if c.guard == "attempt_artifact_sha256")
+    assert (sha_check.note is not None) is (attempt_sha is None)
+    if attempt_sha is None:
+        assert sha_check.note is not None and "legacy" in sha_check.note
+
+    payload = _schedule_payload(
+        agent_id, attempt_id, node_id, sha=sha, status=status, score_count=score_count
+    )
+    storage = cast(S3StorageClient, SimpleNamespace())
+    async with session_maker() as session:
+        if failed_guard is None:
+            scheduled = await endpoints.schedule_l2_report_canary(
+                payload, None, session, storage, None
+            )
+        else:
+            with pytest.raises(HTTPException) as error:
+                await endpoints.schedule_l2_report_canary(
+                    payload, None, session, storage, None
+                )
+            # The scheduler names the same first failing guard the preflight shows.
+            assert error.value.status_code == 409
+            assert error.value.detail == failed[0].conflict_detail
+            assert error.value.detail == (
+                f"canary exact-source guard changed: {failed_guard}"
+            )
+    if failed_guard is None:
+        async with session_maker() as session:
+            again = await endpoints.get_l2_report_canary_preflight(
+                agent_id, attempt_id, Response(), None, session
+            )
+        assert again.active_canary_id == scheduled.canary_id
+        # Omitted expectations stay unjudged rather than guessed.
+        assert {check.guard for check in again.guards if check.passed is None} == {
+            "agent_artifact_sha256",
+            "agent_status",
+            "score_row_count",
+            "attempt_artifact_sha256",
+        }
+        assert again.guards_pass is None
+
+
+@pytest.mark.asyncio
+async def test_canary_preflight_explains_legacy_null_sha_historical_ruling(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "a" * 64
+    agent_id, attempt_id, _node_id = await _seed_preflight_source(
+        session_maker, agent_sha=sha, attempt_sha=None, status=AgentStatus.SCORED
+    )
+    ruling_id = uuid4()
+    now = datetime.now(UTC)
+    async with session_maker() as session, session.begin():
+        session.add(
+            AthReview(
+                review_id=ruling_id,
+                agent_id=agent_id,
+                status="resolved",
+                resolved_at=now,
+                resolved_by="human-reviewer",
+                resolution="clear",
+                resolution_reason="Exact artifact independently cleared",
+                original_policy_version=13,
+                original_evidence={"sha256": sha},
+                algorithm_provenance={},
+            )
+        )
+        await session.flush()
+        session.add(
+            AthReviewAction(
+                action_id=uuid4(),
+                review_id=ruling_id,
+                action="clear",
+                reason="Exact artifact independently cleared",
+                actor="human-reviewer",
+                evidence={},
+                created_at=now,
+            )
+        )
+    monkeypatch.setattr(endpoints, "arrival_bench_version", AsyncMock(return_value=13))
+    monkeypatch.setattr(
+        endpoints, "scored_runtime_evidence_for_lease", AsyncMock(return_value=None)
+    )
+    async with session_maker() as session:
+        view = await endpoints.get_l2_report_canary_preflight(
+            agent_id,
+            attempt_id,
+            Response(),
+            None,
+            session,
+            artifact_sha256=sha,
+            expected_agent_status="scored",
+            expected_score_count=1,
+            historical_ruling_kind="ath_clear",
+            historical_ruling_id=ruling_id,
+        )
+        results = {check.guard: check.passed for check in view.guards}
+        assert results["attempt_artifact_sha256"] is True
+        assert results["historical_ruling"] is True
+        assert results["historical_ruling_run_mode"] is True
+        # Only scheduling re-hashes the stored object.
+        assert results["source_object_verified"] is None
+        assert view.guards_pass is None
+        assert view.legacy_null_attempt_sha256 is True
+        assert view.report_only_packet_available is False
+
+        with pytest.raises(HTTPException) as error:
+            await endpoints.get_l2_report_canary_preflight(
+                agent_id,
+                attempt_id,
+                Response(),
+                None,
+                session,
+                historical_ruling_kind="ath_clear",
+                historical_ruling_id=ruling_id,
+            )
+        assert error.value.status_code == 422
+        with pytest.raises(HTTPException) as error:
+            await endpoints.get_l2_report_canary_preflight(
+                agent_id,
+                attempt_id,
+                Response(),
+                None,
+                session,
+                artifact_sha256=sha,
+                historical_ruling_kind="ath_clear",
+            )
+        assert error.value.status_code == 422
+
+
+async def _seed_ath_clear(
+    session_maker: async_sessionmaker[AsyncSession],
+    *,
+    agent_id: UUID,
+    sha: str,
+    with_clear_action: bool,
+) -> UUID:
+    ruling_id = uuid4()
+    now = datetime.now(UTC)
+    async with session_maker() as session, session.begin():
+        session.add(
+            AthReview(
+                review_id=ruling_id,
+                agent_id=agent_id,
+                status="resolved",
+                resolved_at=now,
+                resolved_by="human-reviewer",
+                resolution="clear",
+                resolution_reason="Exact artifact independently cleared",
+                original_policy_version=13,
+                original_evidence={"sha256": sha},
+                algorithm_provenance={},
+            )
+        )
+        await session.flush()
+        if with_clear_action:
+            session.add(
+                AthReviewAction(
+                    action_id=uuid4(),
+                    review_id=ruling_id,
+                    action="clear",
+                    reason="Exact artifact independently cleared",
+                    actor="human-reviewer",
+                    evidence={},
+                    created_at=now,
+                )
+            )
+    return ruling_id
+
+
+def _first_refusal(view: L2CanaryPreflightView) -> L2CanaryGuardCheck:
+    """The guard scheduling would stop at: the first one not known to pass."""
+    return next(check for check in view.guards if check.passed is not True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["ath_action_missing", "object_drift", "no_bench"])
+async def test_preflight_and_scheduler_refuse_identically_on_the_same_state(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """The advisory preflight names the exact refusal scheduling then returns."""
+    sha = "a" * 64
+    legacy = case != "no_bench"
+    agent_id, attempt_id, node_id = await _seed_preflight_source(
+        session_maker,
+        agent_sha=sha,
+        attempt_sha=None if legacy else sha,
+        status=AgentStatus.SCORED,
+    )
+    ruling_id = (
+        await _seed_ath_clear(
+            session_maker,
+            agent_id=agent_id,
+            sha=sha,
+            with_clear_action=case != "ath_action_missing",
+        )
+        if legacy
+        else None
+    )
+    monkeypatch.setattr(
+        endpoints,
+        "arrival_bench_version",
+        AsyncMock(return_value=None if case == "no_bench" else 13),
+    )
+    monkeypatch.setattr(
+        endpoints, "scored_runtime_evidence_for_lease", AsyncMock(return_value=None)
+    )
+    storage = cast(
+        S3StorageClient,
+        SimpleNamespace(
+            verify_object_sha256=AsyncMock(
+                return_value=VerifiedObject(size_bytes=123, sha256="b" * 64)
+            )
+        ),
+    )
+    kind: Literal["ath_clear"] | None = "ath_clear" if legacy else None
+    async with session_maker() as session:
+        view = await endpoints.get_l2_report_canary_preflight(
+            agent_id,
+            attempt_id,
+            Response(),
+            None,
+            session,
+            artifact_sha256=sha,
+            expected_agent_status="scored",
+            expected_score_count=1,
+            historical_ruling_kind=kind,
+            historical_ruling_id=ruling_id,
+        )
+    # Advisory only: the preflight never reads the stored object.
+    assert storage.verify_object_sha256.await_count == 0  # type: ignore[attr-defined]
+    assert view.guards_pass is not True
+    refusal = _first_refusal(view)
+    payload = L2CanaryScheduleRequest(
+        request_id=uuid4(),
+        agent_id=agent_id,
+        source_attempt_id=attempt_id,
+        artifact_sha256=sha,
+        policy_version=13,
+        expected_agent_status="scored",
+        expected_score_count=1,
+        target_node_id=node_id,
+        review_label="candidate_clear",
+        confirm_report_only=True,
+        historical_ruling_kind=kind,
+        historical_ruling_id=ruling_id,
+    )
+    async with session_maker() as session:
+        with pytest.raises(HTTPException) as error:
+            await endpoints.schedule_l2_report_canary(
+                payload, None, session, storage, "operator@example.com"
+            )
+    assert error.value.status_code == 409
+    assert error.value.detail == refusal.conflict_detail
+    expected = {
+        "ath_action_missing": ("ath_clear_action", False, "ATH clear action missing"),
+        "object_drift": (
+            "source_object_verified",
+            None,  # Not judged: only scheduling re-hashes the object.
+            "current source object differs from ruling",
+        ),
+        "no_bench": ("arrival_bench_version", False, "source is not benchmark v13"),
+    }[case]
+    assert (refusal.guard, refusal.passed, refusal.conflict_detail) == expected
+    if case == "no_bench":
+        assert view.arrival_bench_version is None
+    # The response itself says it authorizes nothing.
+    assert view.authority == "none"
 
 
 @pytest.mark.asyncio

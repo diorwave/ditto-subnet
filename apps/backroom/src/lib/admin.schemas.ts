@@ -486,17 +486,60 @@ export const l2ReportCanaryLookupInputSchema = z.object({
 export const l2ReportCanaryPreflightInputSchema = z.object({
   agentId: z.string().uuid(),
   sourceAttemptId: z.string().uuid(),
+  // Optional expected values: each supplied one is judged by the scheduler's
+  // own guard predicate; omitted ones are reported with passed=null.
+  artifactSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  expectedAgentStatus: z.string().min(1).max(64).optional(),
+  expectedScoreCount: z.number().int().nonnegative().optional(),
+  historicalRulingKind: z.enum(['ath_clear', 'screening_reject']).optional(),
+  historicalRulingId: z.string().uuid().optional(),
+}).superRefine((input, ctx) => {
+  if ((input.historicalRulingKind === undefined) !== (input.historicalRulingId === undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'historical ruling kind and id must be supplied together' })
+  }
+  if (input.historicalRulingKind !== undefined && input.artifactSha256 === undefined) {
+    ctx.addIssue({ code: 'custom', message: 'a historical ruling preflight requires artifactSha256' })
+  }
+})
+
+export const l2CanaryGuardCheckSchema = z.object({
+  guard: z.enum([
+    'ath_clear_action',
+    'attempt_owner',
+    'agent_artifact_sha256',
+    'attempt_policy_version',
+    'agent_status',
+    'score_row_count',
+    'attempt_artifact_sha256',
+    'historical_ruling_run_mode',
+    'historical_ruling',
+    'source_object_verified',
+    'arrival_bench_version',
+  ]),
+  passed: z.boolean().nullable(),
+  current: z.union([z.string(), z.number()]).nullable(),
+  expected: z.union([z.string(), z.number()]).nullable(),
+  conflict_detail: z.string(),
+  note: z.string().nullable().optional(),
 })
 
 export const l2ReportCanaryPreflightViewSchema = z.object({
+  // Advisory only: scheduling reruns the same guards and authorizes nothing here.
+  authority: z.literal('none'),
   agent_id: z.string().uuid(),
   source_attempt_id: z.string().uuid(),
   agent_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
   source_attempt_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   agent_status: z.string(),
   attempt_policy_version: z.number().int().nonnegative(),
-  arrival_bench_version: z.number().int().nonnegative(),
+  arrival_bench_version: z.number().int().nonnegative().nullable(),
   score_row_count: z.number().int().nonnegative(),
+  attempt_agent_id: z.string().uuid(),
+  legacy_null_attempt_sha256: z.boolean(),
+  active_canary_id: z.string().uuid().nullable(),
+  report_only_packet_available: z.boolean(),
+  guards: z.array(l2CanaryGuardCheckSchema).max(16),
+  guards_pass: z.boolean().nullable(),
 })
 
 export const scheduleL2ReportCanaryInputSchema = z.object({
