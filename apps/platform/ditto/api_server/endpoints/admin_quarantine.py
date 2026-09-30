@@ -643,10 +643,12 @@ def _preview_signature_payload(
 def _terminal_fence_payload(
     decisions_digest: str,
     terminal_rulings: list[AdminQuarantineTerminalRuling | None],
+    terminal_reconciliations: list[bool],
 ) -> bytes:
     return json.dumps(
         {
             "decisions_digest": decisions_digest,
+            "terminal_reconciliations": terminal_reconciliations,
             "terminal_rulings": [
                 ruling.model_dump(mode="json") if ruling is not None else None
                 for ruling in terminal_rulings
@@ -663,11 +665,14 @@ def _sign_batch_preview(
     decisions: list[AdminQuarantineBatchDecision],
     issued_at: int,
     terminal_rulings: list[AdminQuarantineTerminalRuling | None],
+    terminal_reconciliations: list[bool],
 ) -> str:
     """``issued_at.decisions_digest.terminal_fence_digest``.
 
     The second digest binds each item's previewed terminal ruling (or its
-    absence), so execution can refuse a batch whose terminal state moved
+    absence) and terminal classification, so an unidentified terminal ruling
+    cannot be confused with a nonterminal preview. Execution refuses a batch
+    whose terminal state moved
     (ditto-subnet#2038) with its own message.
     """
     digest = hmac.new(
@@ -677,7 +682,7 @@ def _sign_batch_preview(
     ).hexdigest()
     fence = hmac.new(
         secret.encode(),
-        _terminal_fence_payload(digest, terminal_rulings),
+        _terminal_fence_payload(digest, terminal_rulings, terminal_reconciliations),
         hashlib.sha256,
     ).hexdigest()
     return f"{issued_at}.{digest}.{fence}"
@@ -689,6 +694,7 @@ def _verify_batch_preview(
     actor: str,
     decisions: list[AdminQuarantineBatchDecision],
     terminal_rulings: list[AdminQuarantineTerminalRuling | None],
+    terminal_reconciliations: list[bool],
 ) -> None:
     try:
         issued_text, digest, fence = token.split(".")
@@ -703,7 +709,7 @@ def _verify_batch_preview(
             status_code=409, detail="batch preview expired; preview again"
         )
     expected = _sign_batch_preview(
-        secret, actor, decisions, issued_at, terminal_rulings
+        secret, actor, decisions, issued_at, terminal_rulings, terminal_reconciliations
     )
     _issued, expected_digest, expected_fence = expected.split(".")
     if not secrets.compare_digest(digest, expected_digest):
@@ -1244,6 +1250,7 @@ async def preview_quarantine_batch(
             payload.decisions,
             issued_at,
             [item.terminal_ruling for item in items],
+            [item.terminal_reconciliation for item in items],
         ),
         expires_at=datetime.fromtimestamp(issued_at, UTC) + BATCH_PREVIEW_TTL,
         items=items,
@@ -1352,12 +1359,12 @@ async def execute_quarantine_batch(
     assert secret is not None
     # The token signs each item's previewed terminal ruling. Re-derive them now
     # so a batch whose terminal state moved since the preview is refused whole.
-    previewed_rulings = [
-        (
-            await _preview_batch_decision(session, decision, x_admin_actor)
-        ).terminal_ruling
+    previewed_items = [
+        await _preview_batch_decision(session, decision, x_admin_actor)
         for decision in payload.decisions
     ]
+    previewed_rulings = [item.terminal_ruling for item in previewed_items]
+    previewed_terminal = [item.terminal_reconciliation for item in previewed_items]
     await session.rollback()
     _verify_batch_preview(
         payload.preview_token,
@@ -1365,18 +1372,22 @@ async def execute_quarantine_batch(
         x_admin_actor,
         payload.decisions,
         previewed_rulings,
+        previewed_terminal,
     )
 
     results: list[AdminQuarantineBatchExecuteItem] = []
-    for decision, previewed_ruling in zip(
-        payload.decisions, previewed_rulings, strict=True
+    for decision, previewed_ruling, was_terminal in zip(
+        payload.decisions, previewed_rulings, previewed_terminal, strict=True
     ):
         try:
             preview = await _preview_batch_decision(session, decision, x_admin_actor)
             # End the read-only implicit transaction before the per-item write
             # transaction (and before release dataset preparation).
             await session.rollback()
-            if preview.terminal_ruling != previewed_ruling:
+            if (
+                preview.terminal_ruling != previewed_ruling
+                or preview.terminal_reconciliation != was_terminal
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail="terminal ruling changed after preview; preview again",
@@ -1458,7 +1469,10 @@ async def execute_quarantine_batch(
                     if is_terminal_ghost or replayed
                     else None
                 )
-                if _terminal_ruling_wire(locked_ruling) != previewed_ruling:
+                if (
+                    _terminal_ruling_wire(locked_ruling) != previewed_ruling
+                    or (is_terminal_ghost or replayed) != was_terminal
+                ):
                     raise HTTPException(
                         status_code=409,
                         detail="terminal ruling changed after preview",
