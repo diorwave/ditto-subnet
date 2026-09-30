@@ -751,7 +751,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Queue one isolated exact-artifact report. No screening/scoring authority. reviewSettingsRevision pins only l2-report-canary scopes; never experiment on node scopes. See tool help.',
 
   get_canonical_starter_fixture_preflight:
-    'Read starter identity/review/integrity/readiness.',
+    'Pinned starter source, independent review, object integrity and schedule readiness.',
   register_canonical_starter_fixture:
     'Stage exact released starter: operator fixture, no miner submission.',
   review_canonical_starter_fixture:
@@ -820,7 +820,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_v13_private_generation_group:
     'Read V13 group or optional role package digests; unverified, no verdict.',
   get_screening_review_deadline:
-    'Read exact V13 artifact deadline binding; null/not_configured means no authoritative window. Attempt leases are not finalizer dates.',
+    'Exact V13 artifact review window; null/not_configured means none. Attempt leases are not finalizer dates.',
   reject_screening_submission:
     'Reject a screening row. Confirmation: REJECT SCREENING SUBMISSION. Requires backroom:write.',
   release_verified_v13_court_clear:
@@ -828,9 +828,9 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_queue_policy_settings:
     'Read queue policy, rollout locks, defaults and optional history (default 0). Settings do not resize open rollout snapshots.',
   get_screener_policy_activation:
-    'Read the scheduled screening-policy activation and its revision history; latest is null when none was ever scheduled.',
+    'Scheduled screening-policy activation and history; latest=null if never scheduled.',
   get_v13_review_clock:
-    'Read the explicitly scheduled V13 first-claim review clock. No row means no authoritative deadline; this does not activate a finalizer.',
+    'Scheduled V13 first-claim clock; absent means no authoritative deadline. No finalizer activation.',
   schedule_v13_review_clock:
     'Schedule a future V13 first-claim clock for new submissions only. Requires exact document/manifest digests, 65-minute notice, revision guard, and confirmation. Does not finalize holds.',
   schedule_screener_policy_activation:
@@ -870,7 +870,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   retry_failed_screening_now:
     'Manually retry the latest terminal screening attempt with fresh artifact/score-count/attempt guards; preserves history.',
   get_screening_baseline_diff:
-    'Compare residual miner source with the platform starter baseline. Use file reader for bodies. If custom_added_lines_complete is false, the total is a lower bound; omitted_paths are not compared. Artifact scope.',
+    'Starter/residual diff. custom_added_lines_complete=false means a lower bound; omitted_paths are unexamined. File reader gives bodies. Artifact scope.',
   list_screening_source_files:
     'Readable archive manifest; default returns the full platform-capped listing. has_more means paging remains; truncated means dropped paths cannot be recovered by offset. If either is set, the inventory is incomplete. Requires artifact scope.',
   get_efficiency_bonus_settings:
@@ -878,7 +878,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_leaderboard:
     'Authoritative leaderboard for a benchmark version (default current): rank, score state, emission eligibility and registration.',
   get_source_release_policy:
-    'Read source gate, release counts and up to 25 payout receipts. Public source needs completed winner emissions; release continues. Optional history, default 0.',
+    'Source gate/counts and up to 25 receipts. Public needs completed winner emissions; releases continue. Optional history, default 0.',
   set_burn_settings:
     'Apply a burn revision with expectedRevision, reason and "APPLY BURN SETTINGS". MOVES TAO; scales miner weights without reranking. Fleet effect takes an epoch. See tool help.',
   get_burn_settings:
@@ -890,9 +890,9 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   quote_treasury_topup: 'Quote finalized GM funding routes and price impact. No execution.',
   preview_treasury_topup: 'Dry-run a GM route against shadow limits. Execution disabled.',
   get_agent_emission_eligibility:
-    'Explain one exact agent UUID: whether it is earning, the withheld class and reason, when a clear starts earning, and whether the validator fold sees it.',
+    'Exact agent eligibility: earning/withheld reason, clear activation time and validator fold visibility.',
   get_submission_cooldown:
-    'Read the current miner submission fee and owner-coldkey cooldown. Revision history is newest-first and opt-in; historyLimit defaults to 0.',
+    'Current miner fee and owner-coldkey cooldown; optional newest-first history, historyLimit=0 default.',
   list_hotkey_bans: 'Hotkey bans.',
   unban_hotkey: 'Unban.',
   get_confirmation_bundle_settings:
@@ -933,7 +933,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   list_screening_adjudication_attempts:
     'Recent L4 outcomes with attempt SHA, manifest and pinned settings; observed timing/provider only when recorded. Null success telemetry is unavailable, not zero.',
   get_screening_quarantine_context:
-    'Read before deciding: evidence, digest-verified findings and source locations, attempts, miner history and identical artifacts. shadow_review is advisory, often null; divergence requires source review, never authorizes a decision.',
+    'Before a decision: verified findings/locations, evidence, attempts, miner history and duplicates. shadow_review is advisory; divergence requires source review, never authorizes a decision.',
   search_screening_source:
     'Grep one screened submission\'s readable source (regex, or mode=literal) for {path, line, text} matches with optional context — the "where is X" tool for a 10,000-line baseline.rs. Scope with pathGlob; has_more is the paging signal; opaque_skipped counts binaries never searched. Requires backroom:artifact:read.',
   // Paired with the tool above: an operator now arrives here already holding a
