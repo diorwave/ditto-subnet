@@ -734,7 +734,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_l2_report_canary:
     'Read one exact-attempt non-authoritative L2 canary report and lease outcome.',
   get_l2_report_canary_preflight:
-    'Read current exact-source canary guards; scheduling rechecks them.',
+    'Evaluate each exact-source canary guard; scheduling rechecks them.',
   get_v13_scorer_cohort:
     'Read the immutable three-validator V13 scorer pin, including exact signed runtime packet.',
   get_v13_scorer_cohort_preflight:
@@ -749,14 +749,15 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Rotate the exact pinned V13 cohort to a unanimously signed packet after all V13 tickets drain; preserves pin history.',
   schedule_l2_report_canary:
     'Queue one isolated exact-artifact report. No screening/scoring authority. reviewSettingsRevision pins only l2-report-canary scopes; never experiment on node scopes. See tool help.',
+
   get_canonical_starter_fixture_preflight:
-    'Read the pinned public starter tree and archive, independent review provenance, object integrity and scheduling readiness.',
+    'Read starter identity/review/integrity/readiness.',
   register_canonical_starter_fixture:
-    'Stage the exact released public starter source as an operator-only fixture without a miner submission.',
+    'Stage exact released starter: operator fixture, no miner submission.',
   review_canonical_starter_fixture:
-    'Record an independent exact-source and served-path candidate review with its public evidence digest and image digest.',
+    'Record independent exact-source/served-path review with public evidence and image digests.',
   schedule_canonical_starter_fixture:
-    'Queue one bounded source-only report after independent review; no screening, score or admission authority.',
+    'Queue one bounded source-only report after independent review; no screening/score/admission authority.',
   get_copy_court_settings:
     'Read the copy-hold triage court posture and revision history.',
   get_confirmation_seed_anchors:
@@ -766,7 +767,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   apply_screener_review_settings:
     'Write one L1/L2/L3 source-review revision. Confirmation: APPLY SCREENER REVIEW {scope} {MODE}.',
   set_queue_policy_settings:
-    'Apply a complete queue-policy revision with expectedRevision, reason, and "APPLY QUEUE POLICY SETTINGS". It NEVER resizes an in-flight rollout; rollout-locked fields are REFUSED while a benchmark rollout is open. similarity_budget is a queue-fairness and capacity rail; prev_gen_carryover ships DISABLED. The whole nested block is required. This is subnet queue policy; Ditto app entitlement flags are not served by this server.',
+    'Complete subnet policy: expectedRevision/reason/"APPLY QUEUE POLICY SETTINGS". NEVER resizes an in-flight rollout; locked fields REFUSED while a benchmark rollout is open. similarity_budget: queue-fairness and capacity rail; prev_gen_carryover ships DISABLED. The whole nested block is required. Ditto app entitlement flags not served by this server.',
   set_continual_retest_settings:
     'Apply a complete continual-retest revision with expectedRevision, reason, and "APPLY CONTINUAL RETEST SETTINGS". wave_membership CHANGES WHAT VALIDATORS WEIGHT; every one of these fields is required because revisions store whole policies. Read field_support first for rollout compatibility.',
   evict_live_validator_leases:
@@ -792,7 +793,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_outlier_escalation_dry_run:
     'Replay outlier escalation on the scored ledger: would-trigger count and agents.',
   get_inference_failure_taxonomy:
-    'Group recent chat and embedding outcomes by model, lane, gateway, upstream route, and error code. route_basis says how much of a route is known; an unknown route never names one. rate_limit_bursts is a report-only 5-minute 429 signal with affected tickets.',
+    'Group chat/embedding outcomes by model/lane/gateway/route/code. route_basis preserves unknown routes. rate_limit_bursts: report-only 5-minute 429s and affected tickets.',
   start_runtime_profile:
     'Capture bounded private relay pprof.',
   download_runtime_profile:
@@ -801,13 +802,13 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   download_inference_trace: 'Presigned trace URL; artifact scope.',
   peek_inference_trace: 'Peek trace records; artifact scope.',
   get_owner_attestations:
-    'Read direct signed owner links, including revoked history. Direct-only, non-transitive, and limited to near-duplicate review.',
+    'Direct signed owner links including revocations; non-transitive, near-duplicate review only.',
   list_lease_revocations:
     'Page ended leases with operator_evicted and exact verdicts. Evidence is WHOLE AND UNTYPED validator_lease_audit context. AN EMPTY RESULT IS A FINDING, NOT AN UNWIRED FEATURE.',
   list_stuck_submissions:
     'Page stuck-submission urgency order with ticket counts and silent_expiry_count. generation=all spans benchmarks; get_validation_retry includes infra_retry_grants.',
   list_screening_submissions:
-    'Page submissions newest first; summary shows the latest attempt. To find a named agent, hotkey, coldkey, SHA-256, status, or reason code use search_submissions, never page and grep.',
+    'Newest-first submissions/latest attempt. For name/hotkey/coldkey/SHA/status/reason code use search_submissions, never page and grep.',
   search_submissions:
     'Find submissions by exact/prefix name, hotkey, coldkey, SHA-256, status, reason code, or submitted window. Filtered count; identity rows by default; all generations.',
   summarize_screening_failures:
@@ -1048,7 +1049,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'List screening quarantines',
       description:
-        'Page active, resolved, or all SN118 screening quarantines. Defaults newest first by created_at then quarantine_id; pass sort=oldest for chronology. detail=summary (default) returns evidence counts/codes and finding summaries; detail=full returns every screener and source-review evidence row. Use exact context before decisions. The review queue remains oldest first for fairness. Every row carries two codes that are never interchangeable: screening_reason_code is why the screener held the submission and is preserved across the resolution, and resolution_reason_code derives from resolution and names the operator ruling. Read screening_reason_code as the lead the operator ruled on, never as the ruling itself or as the miner\'s final outcome.',
+        'Page active, resolved, or all SN118 screening quarantines. Defaults newest first by created_at then quarantine_id; pass sort=oldest for chronology. detail=summary (default) returns evidence counts/codes and finding summaries; detail=full returns every screener and source-review evidence row. Use exact context before decisions. The review queue remains oldest first for fairness. Every row carries two codes that are never interchangeable: screening_reason_code is why the screener held the submission and is preserved across the resolution, and resolution_reason_code derives from resolution and names the operator ruling. Read screening_reason_code as the lead the operator ruled on, never as the ruling itself or as the miner\'s final outcome. An active row with terminal_ghost=true sits behind an agent already banned or rejected (agent_status): historical reconciliation work, not review backlog. terminal_ghost_count, actionable_count and oldest_actionable_created_at keep those rows out of the actionable count and age; close one with a preview/execute_screening_quarantine_batch reject for its exact agent UUID and SHA, which leaves the terminal ruling unchanged.',
       inputSchema: {
         status: z.enum(['active', 'resolved', 'all']).default('active'),
         sort: z.enum(['oldest', 'newest']).default('newest'),
@@ -1233,7 +1234,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Resolve ATH review',
       description:
-        'Clear or reject one ATH hold with an auditable public reason. Clearing restores the status held before a manual benchmark-overfit review; rejecting bans the submission. Requires backroom:write.',
+        'Clear or reject one ATH hold with an auditable public reason. Clearing restores the status held before a manual benchmark-overfit review; rejecting bans the submission and closes its active screening quarantine (reconciled_quarantine_ids). Requires backroom:write.',
       inputSchema: resolveCopyReviewInputSchema,
       annotations: toolAnnotations('write', true),
     },
@@ -1645,7 +1646,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Preview screening quarantine batch',
       description:
-        'Dry-run up to 50 per-item release, rescreen, or reject decisions. Validates exact agent and artifact identities, current actionability, reasons, and idempotent replays. Returns a short-lived actor-bound preview token. This tool cannot change review state.',
+        'Dry-run up to 50 per-item release, rescreen, or reject decisions. Validates exact agent and artifact identities, current actionability, reasons, and idempotent replays. Returns a short-lived actor-bound preview token. A reject on a terminal_ghost row closes it and keeps the terminal agent ruling (terminal_reconciliation); the token is fenced to terminal_ruling. This tool cannot change review state.',
       inputSchema: screeningQuarantineBatchPreviewInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -2488,7 +2489,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_l2_report_canary_preflight',
     {
       title: 'Get L2 canary preflight',
-      description: 'Read agent/attempt SHA, status, policy/bench version and raw Score count. Advisory snapshot; scheduling rechecks. Requires backroom:read.',
+      description: 'Read-only scheduler guard check; no authority. Planned SHA/status/score count/ruling yield per-guard results and 409 detail (omitted: null). Includes legacy SHA, active canary and packet state. Requires backroom:read.',
       inputSchema: l2ReportCanaryPreflightInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -3212,7 +3213,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get source-review queue-age SLO',
       description:
-        'Read the ordinary (pre-score) source-review queue-age SLO: p50/p95/oldest actionable age in seconds, throughput (completions per hour over a fixed window), and the current backlog broken out by reason -- active_work (a screener is claimed and running), capacity_wait (uploaded, no screener has claimed it yet), infrastructure_backoff (the last attempt ended retryable_infra/inconclusive and is fail-closed parked for an operator-authorized retry), and escalation (an active anti-cheat quarantine hold, which wins regardless of what the underlying attempt itself reports, e.g. a rescreen that then failed). Age is the stable queue-entry clock (the submission\'s own upload time); a retry never resets it, so a long-overdue item stays overdue through every rescreen. Also reports three reconciliation counts that are visible but NEVER folded into the metrics above: stale_running_ghost_count (a screening attempt still looks running though its agent already reached a terminal or later status), resolved_quarantine_ghost_count (an agent stuck at quarantined status with no active quarantine row), and attempt_status_drift_ghost_count (the latest attempt reports a status this SLO\'s reason classification does not cover, e.g. a terminal verdict on an agent whose own status never advanced). overdue_count and p95_exceeds_threshold are null until an operator configures a threshold (there is no shipped default); this tool enforces nothing -- no alert, no operator escalation action. Covers ORDINARY screening review only: stronger top-agent review, copy review, ATH review, and human escalation are separate review classes with their own clocks, not yet built. Requires backroom:read and changes nothing.',
+        'Read the ordinary (pre-score) source-review queue-age SLO: p50/p95/oldest actionable age in seconds, throughput (completions per hour over a fixed window), and the current backlog broken out by reason -- active_work (a screener is claimed and running), capacity_wait (uploaded, no screener has claimed it yet), infrastructure_backoff (the last attempt ended retryable_infra/inconclusive and is fail-closed parked for an operator-authorized retry), and escalation (an active anti-cheat quarantine hold, which wins regardless of what the underlying attempt itself reports, e.g. a rescreen that then failed). Age is the stable queue-entry clock (the submission\'s own upload time); a retry never resets it, so a long-overdue item stays overdue through every rescreen. Also reports four reconciliation counts that are visible but NEVER folded into the metrics above: stale_running_ghost_count (a screening attempt still looks running though its agent already reached a terminal or later status), resolved_quarantine_ghost_count (an agent stuck at quarantined status with no active quarantine row), terminal_quarantine_ghost_count (an active quarantine whose agent is already banned or rejected; close it with a fenced batch reject), and attempt_status_drift_ghost_count (the latest attempt reports a status this SLO\'s reason classification does not cover, e.g. a terminal verdict on an agent whose own status never advanced). overdue_count and p95_exceeds_threshold are null until an operator configures a threshold (there is no shipped default); this tool enforces nothing -- no alert, no operator escalation action. Covers ORDINARY screening review only: stronger top-agent review, copy review, ATH review, and human escalation are separate review classes with their own clocks, not yet built. Requires backroom:read and changes nothing.',
       annotations: toolAnnotations('read'),
     },
     async () => result(await fetchSourceReviewQueueSlo()),

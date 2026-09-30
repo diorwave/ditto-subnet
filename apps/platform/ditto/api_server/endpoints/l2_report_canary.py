@@ -8,11 +8,13 @@ import logging
 import re
 import secrets
 import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, cast
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from sqlalchemy import ColumnElement, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +26,8 @@ from ditto.api_models.l2_report_canary import (
     L2CanaryClaimResponse,
     L2CanaryCompleteRequest,
     L2CanaryCompleteResponse,
+    L2CanaryGuardCheck,
+    L2CanaryGuardName,
     L2CanaryPinnedScheduleRequest,
     L2CanaryPreflightView,
     L2CanaryScheduleBase,
@@ -531,38 +535,329 @@ async def _score_count(session: AsyncSession, agent_id: UUID) -> int:
     )
 
 
+_EXACT_SOURCE_CHANGED = "canary exact-source guard changed"
+_ATTESTATION_CHANGED = "canary source attestation changed"
+_NOT_BENCH_V13 = "source is not benchmark v13"
+_ATH_ACTION_MISSING = "ATH clear action missing"
+_RULING_CHANGED = "historical ruling changed"
+_OBJECT_DIFFERS = "current source object differs from ruling"
+_LEGACY_NULL_SHA_NOTE = (
+    "legacy attempt has no pinned artifact SHA; only a historical ath_clear or "
+    "screening_reject ruling can schedule it, and that ruling does not prove "
+    "what the old attempt executed"
+)
+_RULING_NEEDS_LEGACY_NOTE = (
+    "a historical ruling applies only to a legacy null-SHA attempt; schedule "
+    "this pinned attempt without one"
+)
+_OBJECT_PENDING_NOTE = (
+    "not judged: only scheduling re-hashes the stored object, and refuses with "
+    "this detail when it differs (or 503 when storage is unavailable)"
+)
+_BENCH_UNAVAILABLE_NOTE = "arrival benchmark version unavailable"
+
+
+@dataclass(frozen=True)
+class _CanarySource:
+    """What one submission canary pins; expected values may be omitted."""
+
+    agent_id: UUID
+    source_attempt_id: UUID
+    artifact_sha256: str | None
+    policy_version: int
+    expected_agent_status: str | None
+    expected_score_count: int | None
+    review_label: str
+    run_mode: str
+    source_attestation: dict | None
+
+
+@dataclass(frozen=True)
+class _SourceGuards:
+    agent: Agent | None
+    attempt: ScreeningAttempt | None
+    score_row_count: int | None
+    arrival_bench_version: int | None
+    checks: tuple[L2CanaryGuardCheck, ...]
+
+    @property
+    def refusal(self) -> L2CanaryGuardCheck | None:
+        """The guard an enforcing caller stops at: the first not known to pass."""
+        return next((check for check in self.checks if check.passed is not True), None)
+
+
+# Scheduling passes a verifier that re-hashes the stored object; the advisory
+# preflight passes none and reports that guard as not judged.
+_ObjectVerifier = Callable[[Agent], Awaitable[bool]]
+
+
+def _source_from_row(row: ScreenerL2ReportCanary) -> _CanarySource:
+    if row.agent_id is None or row.source_attempt_id is None:
+        raise HTTPException(status_code=409, detail="not a submission canary")
+    return _CanarySource(
+        agent_id=row.agent_id,
+        source_attempt_id=row.source_attempt_id,
+        artifact_sha256=row.artifact_sha256,
+        policy_version=row.policy_version,
+        expected_agent_status=row.expected_agent_status,
+        expected_score_count=row.expected_score_count,
+        review_label=row.review_label,
+        run_mode=row.run_mode,
+        source_attestation=row.source_attestation,
+    )
+
+
+def _guard(
+    guard: L2CanaryGuardName,
+    current: str | int | None,
+    expected: str | int | None,
+    conflict: str,
+    *,
+    note: str | None = None,
+) -> L2CanaryGuardCheck:
+    return L2CanaryGuardCheck(
+        guard=guard,
+        passed=None if expected is None else current == expected,
+        current=current,
+        expected=expected,
+        conflict_detail=f"{conflict}: {guard}",
+        note=note,
+    )
+
+
+def _ruling_id(attestation: dict) -> str | None:
+    value = attestation.get("ruling_id")
+    return value if isinstance(value, str) else None
+
+
+async def _evaluate_exact_source(
+    session: AsyncSession,
+    source: _CanarySource,
+    *,
+    scheduling: bool = False,
+    verify_object: _ObjectVerifier | None = None,
+    stop_at_refusal: bool = False,
+) -> _SourceGuards:
+    """The single exact-source predicate for schedule, claim, complete and preflight.
+
+    Guards are produced in the order the caller enforces them. ``scheduling``
+    adds the scheduler's historical-ruling admission (clear action, ruling,
+    stored object) ahead of the exact-source guards and the arrival benchmark
+    after them; claim and completion instead recheck the pinned attestation.
+    Enforcing callers stop at the first refusal, so later guards (and the
+    storage read) run only when every earlier one passed. The advisory
+    preflight collects every guard instead.
+    """
+    agent = await session.get(Agent, source.agent_id)
+    attempt = await session.get(ScreeningAttempt, source.source_attempt_id)
+    if agent is None or attempt is None:
+        return _SourceGuards(agent, attempt, None, None, ())
+    checks: list[L2CanaryGuardCheck] = []
+    score_row_count: int | None = None
+    bench: int | None = None
+
+    def done() -> _SourceGuards:
+        return _SourceGuards(agent, attempt, score_row_count, bench, tuple(checks))
+
+    def refused() -> bool:
+        return stop_at_refusal and checks[-1].passed is not True
+
+    attestation = source.source_attestation
+    well_formed = isinstance(attestation, dict)
+    if scheduling and attestation is not None:
+        assert isinstance(attestation, dict)
+        if attestation.get("kind") == "ath_clear":
+            action_id = attestation.get("action_id")
+            ruling_id = _ruling_id(attestation)
+            try:
+                ruling_uuid = UUID(ruling_id) if ruling_id is not None else None
+            except ValueError:
+                ruling_uuid = None
+            latest_action = (
+                await _latest_ath_action(session, ruling_uuid)
+                if ruling_uuid is not None
+                else None
+            )
+            current_clear = bool(
+                isinstance(action_id, str)
+                and latest_action is not None
+                and latest_action.action == "clear"
+                and str(latest_action.action_id) == action_id
+            )
+            checks.append(
+                L2CanaryGuardCheck(
+                    guard="ath_clear_action",
+                    passed=current_clear,
+                    current=str(latest_action.action_id) if latest_action else None,
+                    expected=action_id if isinstance(action_id, str) else None,
+                    conflict_detail=_ATH_ACTION_MISSING,
+                    note=None
+                    if current_clear
+                    else "the ruling's latest ATH action is not the pinned clear",
+                )
+            )
+            if refused():
+                return done()
+        checks.append(
+            L2CanaryGuardCheck(
+                guard="historical_ruling",
+                passed=await _historical_ruling_matches(session, source),
+                current=_ruling_id(attestation),
+                expected=None,
+                conflict_detail=_RULING_CHANGED,
+            )
+        )
+        if refused():
+            return done()
+        checks.append(
+            L2CanaryGuardCheck(
+                guard="source_object_verified",
+                passed=None if verify_object is None else await verify_object(agent),
+                current=None,
+                expected=source.artifact_sha256,
+                conflict_detail=_OBJECT_DIFFERS,
+                note=_OBJECT_PENDING_NOTE if verify_object is None else None,
+            )
+        )
+        if refused():
+            return done()
+
+    score_row_count = await _score_count(session, source.agent_id)
+    attempt_sha = attempt.artifact_sha256.lower() if attempt.artifact_sha256 else None
+    for check in (
+        _guard(
+            "attempt_owner",
+            str(attempt.agent_id),
+            str(source.agent_id),
+            _EXACT_SOURCE_CHANGED,
+        ),
+        _guard(
+            "agent_artifact_sha256",
+            agent.sha256.lower(),
+            source.artifact_sha256,
+            _EXACT_SOURCE_CHANGED,
+        ),
+        _guard(
+            "attempt_policy_version",
+            attempt.policy_version,
+            source.policy_version,
+            _EXACT_SOURCE_CHANGED,
+        ),
+        _guard(
+            "agent_status",
+            agent.status.value,
+            source.expected_agent_status,
+            _EXACT_SOURCE_CHANGED,
+        ),
+        _guard(
+            "score_row_count",
+            score_row_count,
+            source.expected_score_count,
+            _EXACT_SOURCE_CHANGED,
+        ),
+    ):
+        checks.append(check)
+        if refused():
+            return done()
+    if attestation is None:
+        check = _guard(
+            "attempt_artifact_sha256",
+            attempt_sha,
+            source.artifact_sha256,
+            _EXACT_SOURCE_CHANGED,
+            note=_LEGACY_NULL_SHA_NOTE if attempt_sha is None else None,
+        )
+        if attempt_sha is None:
+            # No expected value can ever match a legacy null pin.
+            check = check.model_copy(update={"passed": False})
+        checks.append(check)
+        if refused():
+            return done()
+    else:
+        pinned: list[L2CanaryGuardCheck] = [
+            L2CanaryGuardCheck(
+                guard="attempt_artifact_sha256",
+                passed=attempt_sha is None,
+                current=attempt_sha,
+                expected=None,
+                conflict_detail=f"{_ATTESTATION_CHANGED}: attempt_artifact_sha256",
+                note=None if attempt_sha is None else _RULING_NEEDS_LEGACY_NOTE,
+            ),
+            _guard(
+                "historical_ruling_run_mode",
+                source.run_mode,
+                "source_only",
+                _ATTESTATION_CHANGED,
+            ),
+        ]
+        for check in pinned:
+            checks.append(check)
+            if refused():
+                return done()
+        if not scheduling:
+            # Claim and completion recheck what scheduling pinned.
+            checks.append(
+                L2CanaryGuardCheck(
+                    guard="historical_ruling",
+                    passed=well_formed
+                    and await _historical_ruling_matches(session, source),
+                    current=_ruling_id(attestation) if well_formed else None,
+                    expected=None,
+                    conflict_detail=f"{_ATTESTATION_CHANGED}: historical_ruling",
+                )
+            )
+            if refused():
+                return done()
+            checks.append(
+                L2CanaryGuardCheck(
+                    guard="source_object_verified",
+                    passed=bool(
+                        well_formed
+                        and attestation.get("verified_at")
+                        and attestation.get("artifact_sha256") == source.artifact_sha256
+                    ),
+                    current=None,
+                    expected=None,
+                    conflict_detail=(f"{_ATTESTATION_CHANGED}: source_object_verified"),
+                )
+            )
+            if refused():
+                return done()
+    if scheduling:
+        observed = await arrival_bench_version(session, agent=agent)
+        bench = observed if isinstance(observed, int) else None
+        # An unavailable version is judged exactly as scheduling judges it:
+        # it is not 13, so scheduling refuses.
+        checks.append(
+            L2CanaryGuardCheck(
+                guard="arrival_bench_version",
+                passed=bench == 13,
+                current=bench,
+                expected=13,
+                conflict_detail=_NOT_BENCH_V13,
+                note=_BENCH_UNAVAILABLE_NOTE if bench is None else None,
+            )
+        )
+    return done()
+
+
+def _enforce(guards: _SourceGuards) -> tuple[Agent, ScreeningAttempt]:
+    if guards.agent is None or guards.attempt is None:
+        raise HTTPException(status_code=409, detail=f"{_EXACT_SOURCE_CHANGED}: source")
+    refusal = guards.refusal
+    if refusal is not None:
+        raise HTTPException(status_code=409, detail=refusal.conflict_detail)
+    return guards.agent, guards.attempt
+
+
 async def _exact_source(
     session: AsyncSession, row: ScreenerL2ReportCanary
 ) -> tuple[Agent, ScreeningAttempt]:
-    if row.agent_id is None or row.source_attempt_id is None:
-        raise HTTPException(status_code=409, detail="not a submission canary")
-    agent = await session.get(Agent, row.agent_id)
-    attempt = await session.get(ScreeningAttempt, row.source_attempt_id)
-    if (
-        agent is None
-        or attempt is None
-        or attempt.agent_id != row.agent_id
-        or agent.sha256.lower() != row.artifact_sha256
-        or attempt.policy_version != row.policy_version
-        or agent.status.value != row.expected_agent_status
-        or await _score_count(session, row.agent_id) != row.expected_score_count
-    ):
-        raise HTTPException(status_code=409, detail="canary exact-source guard changed")
-    if row.source_attestation is None:
-        if (attempt.artifact_sha256 or "").lower() != row.artifact_sha256:
-            raise HTTPException(
-                status_code=409, detail="canary exact-source guard changed"
-            )
-    elif (
-        not isinstance(row.source_attestation, dict)
-        or not row.source_attestation.get("verified_at")
-        or attempt.artifact_sha256 is not None
-        or row.run_mode != "source_only"
-        or row.source_attestation.get("artifact_sha256") != row.artifact_sha256
-        or not await _historical_ruling_matches(session, row)
-    ):
-        raise HTTPException(status_code=409, detail="canary source attestation changed")
-    return agent, attempt
+    return _enforce(
+        await _evaluate_exact_source(
+            session, _source_from_row(row), stop_at_refusal=True
+        )
+    )
 
 
 def _fixture_attestation_valid(row: ScreenerL2ReportCanary) -> bool:
@@ -604,7 +899,7 @@ async def _fixture_object_matches(storage: S3StorageClient) -> bool:
 
 
 async def _historical_ruling_matches(
-    session: AsyncSession, row: ScreenerL2ReportCanary
+    session: AsyncSession, row: _CanarySource | ScreenerL2ReportCanary
 ) -> bool:
     """A historical ruling labels this current-object replay, not past execution."""
     attestation = row.source_attestation
@@ -678,6 +973,37 @@ async def _current_object_matches(
     )
 
 
+async def _ruling_attestation(
+    session: AsyncSession,
+    *,
+    kind: str,
+    ruling_id: UUID,
+    artifact_sha256: str,
+) -> dict:
+    """The attestation scheduling would pin; ATH clears bind their latest clear."""
+    attestation: dict = {
+        "kind": kind,
+        "ruling_id": str(ruling_id),
+        "artifact_sha256": artifact_sha256,
+    }
+    if kind == "ath_clear":
+        action = await _latest_ath_action(session, ruling_id)
+        if action is not None and action.action == "clear":
+            attestation["action_id"] = str(action.action_id)
+    return attestation
+
+
+async def _active_canary_id(
+    session: AsyncSession, source_attempt_id: UUID
+) -> UUID | None:
+    return await session.scalar(
+        select(ScreenerL2ReportCanary.canary_id).where(
+            ScreenerL2ReportCanary.source_attempt_id == source_attempt_id,
+            ScreenerL2ReportCanary.status.in_(("queued", "leased")),
+        )
+    )
+
+
 @admin_router.get(
     "/preflight/{agent_id}/{source_attempt_id}", response_model=L2CanaryPreflightView
 )
@@ -687,24 +1013,93 @@ async def get_l2_report_canary_preflight(
     response: Response,
     _admin: AdminDep,
     session: SessionDep,
+    artifact_sha256: Annotated[str | None, Query(pattern=r"^[0-9a-f]{64}$")] = None,
+    expected_agent_status: Annotated[
+        str | None, Query(min_length=1, max_length=64)
+    ] = None,
+    expected_score_count: Annotated[int | None, Query(ge=0)] = None,
+    historical_ruling_kind: Literal["ath_clear", "screening_reject"] | None = None,
+    historical_ruling_id: UUID | None = None,
 ) -> L2CanaryPreflightView:
-    """Expose exact guard inputs; scheduling still rechecks them under a lock."""
+    """Evaluate the scheduler's own guard predicate; advisory only.
+
+    Read-only and non-authorizing: no row locks, no queue write, and no storage
+    read. It grants nothing; scheduling reruns the same predicate under row
+    locks and, for a historical ruling, re-hashes the stored object. Omitted
+    expected values report the current value with ``passed=null``. Scheduling
+    would refuse at the first guard not known to pass, with its
+    ``conflict_detail``.
+    """
     response.headers["Cache-Control"] = "no-store"
-    agent = await session.get(Agent, agent_id)
-    attempt = await session.get(ScreeningAttempt, source_attempt_id)
-    if agent is None or attempt is None or attempt.agent_id != agent_id:
+    if (historical_ruling_kind is None) != (historical_ruling_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="historical ruling kind and id must be supplied together",
+        )
+    attestation = None
+    if historical_ruling_kind is not None and historical_ruling_id is not None:
+        if artifact_sha256 is None:
+            raise HTTPException(
+                status_code=422,
+                detail="a historical ruling preflight requires artifact_sha256",
+            )
+        attestation = await _ruling_attestation(
+            session,
+            kind=historical_ruling_kind,
+            ruling_id=historical_ruling_id,
+            artifact_sha256=artifact_sha256,
+        )
+    guards = await _evaluate_exact_source(
+        session,
+        _CanarySource(
+            agent_id=agent_id,
+            source_attempt_id=source_attempt_id,
+            artifact_sha256=artifact_sha256,
+            policy_version=13,
+            expected_agent_status=expected_agent_status,
+            expected_score_count=expected_score_count,
+            review_label=(
+                "known_reject"
+                if historical_ruling_kind == "screening_reject"
+                else "candidate_clear"
+            ),
+            run_mode="source_only",
+            source_attestation=attestation,
+        ),
+        scheduling=True,
+    )
+    agent, attempt = guards.agent, guards.attempt
+    if agent is None or attempt is None:
         raise HTTPException(status_code=404, detail="canary source not found")
+    attempt_sha = attempt.artifact_sha256.lower() if attempt.artifact_sha256 else None
+    packet = await scored_runtime_evidence_for_lease(
+        session,
+        attempt_id=source_attempt_id,
+        artifact_sha256=artifact_sha256 or agent.sha256.lower(),
+        policy_version=13,
+        bench_version=13,
+        report_only_current_packet=True,
+    )
+    outcomes = [check.passed for check in guards.checks]
+    assert guards.score_row_count is not None
     return L2CanaryPreflightView(
+        authority="none",
         agent_id=agent_id,
         source_attempt_id=source_attempt_id,
         agent_artifact_sha256=agent.sha256.lower(),
-        source_attempt_artifact_sha256=(
-            attempt.artifact_sha256.lower() if attempt.artifact_sha256 else None
-        ),
+        source_attempt_artifact_sha256=attempt_sha,
         agent_status=agent.status.value,
         attempt_policy_version=attempt.policy_version,
-        arrival_bench_version=await arrival_bench_version(session, agent=agent),
-        score_row_count=await _score_count(session, agent_id),
+        arrival_bench_version=guards.arrival_bench_version,
+        score_row_count=guards.score_row_count,
+        attempt_agent_id=attempt.agent_id,
+        legacy_null_attempt_sha256=attempt_sha is None,
+        active_canary_id=await _active_canary_id(session, source_attempt_id),
+        report_only_packet_available=packet is not None,
+        guards=list(guards.checks),
+        guards_pass=(
+            False if False in outcomes else None if None in outcomes else True
+        ),
     )
 
 
@@ -808,13 +1203,7 @@ async def _schedule_l2_report_canary(
             .where(ScreeningAttempt.attempt_id == payload.source_attempt_id)
             .with_for_update()
         )
-        active = await session.scalar(
-            select(ScreenerL2ReportCanary.canary_id).where(
-                ScreenerL2ReportCanary.source_attempt_id == payload.source_attempt_id,
-                ScreenerL2ReportCanary.status.in_(("queued", "leased")),
-            )
-        )
-        if active is not None:
+        if await _active_canary_id(session, payload.source_attempt_id) is not None:
             raise HTTPException(
                 status_code=409, detail="source already has an active canary"
             )
@@ -839,42 +1228,47 @@ async def _schedule_l2_report_canary(
         if payload.historical_ruling_id is not None:
             if not x_admin_actor or not x_admin_actor.strip():
                 raise HTTPException(status_code=400, detail="operator actor required")
+            assert payload.historical_ruling_kind is not None
             row.source_attestation = {
-                "kind": payload.historical_ruling_kind,
-                "ruling_id": str(payload.historical_ruling_id),
-                "artifact_sha256": payload.artifact_sha256,
+                **await _ruling_attestation(
+                    session,
+                    kind=payload.historical_ruling_kind,
+                    ruling_id=payload.historical_ruling_id,
+                    artifact_sha256=payload.artifact_sha256,
+                ),
                 "scope": "current-object-only; historical execution unverified",
                 "actor": x_admin_actor.strip(),
             }
         agent = await session.get(Agent, row.agent_id, with_for_update=True)
         if agent is None:
             raise HTTPException(status_code=409, detail="canary source not found")
-        if row.source_attestation is not None:
-            if payload.historical_ruling_kind == "ath_clear":
-                assert payload.historical_ruling_id is not None
-                action = await _latest_ath_action(session, payload.historical_ruling_id)
-                if action is None or action.action != "clear":
-                    raise HTTPException(
-                        status_code=409, detail="ATH clear action missing"
-                    )
-                row.source_attestation["action_id"] = str(action.action_id)
-            if not await _historical_ruling_matches(session, row):
-                raise HTTPException(status_code=409, detail="historical ruling changed")
+        attestation = row.source_attestation
+
+        async def verify_object(source_agent: Agent) -> bool:
+            assert attestation is not None
             try:
                 matches, size_bytes = await _current_object_matches(
-                    storage, agent, row.artifact_sha256
+                    storage, source_agent, row.artifact_sha256
                 )
             except StorageError:
                 raise HTTPException(
                     503, "source object verification unavailable"
                 ) from None
-            if not matches:
-                raise HTTPException(409, "current source object differs from ruling")
-            row.source_attestation["verified_size_bytes"] = size_bytes
-            row.source_attestation["verified_at"] = datetime.now(UTC).isoformat()
-        agent, _ = await _exact_source(session, row)
-        if await arrival_bench_version(session, agent=agent) != 13:
-            raise HTTPException(status_code=409, detail="source is not benchmark v13")
+            if matches:
+                attestation["verified_size_bytes"] = size_bytes
+                attestation["verified_at"] = datetime.now(UTC).isoformat()
+            return matches
+
+        # The advisory preflight runs this same predicate without the verifier.
+        _enforce(
+            await _evaluate_exact_source(
+                session,
+                _source_from_row(row),
+                scheduling=True,
+                verify_object=verify_object if attestation is not None else None,
+                stop_at_refusal=True,
+            )
+        )
         session.add(row)
         await session.flush()
         return _view(row)

@@ -2084,7 +2084,14 @@ export interface paths {
         };
         /**
          * Get L2 Report Canary Preflight
-         * @description Expose exact guard inputs; scheduling still rechecks them under a lock.
+         * @description Evaluate the scheduler's own guard predicate; advisory only.
+         *
+         *     Read-only and non-authorizing: no row locks, no queue write, and no storage
+         *     read. It grants nothing; scheduling reruns the same predicate under row
+         *     locks and, for a historical ruling, re-hashes the stored object. Omitted
+         *     expected values report the current value with ``passed=null``. Scheduling
+         *     would refuse at the first guard not known to pass, with its
+         *     ``conflict_detail``.
          */
         get: operations["get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get"];
         put?: never;
@@ -9432,6 +9439,8 @@ export interface components {
             previous_status?: string | null;
             /** Reason */
             reason: string;
+            /** Reconciled Quarantine Ids */
+            reconciled_quarantine_ids?: string[];
             /** Score Count */
             score_count?: number | null;
         };
@@ -9751,6 +9760,8 @@ export interface components {
             agent_status: string;
             /** Idempotent */
             idempotent: boolean;
+            /** Reconciled Quarantine Ids */
+            reconciled_quarantine_ids?: string[];
             review: components["schemas"]["AdminCopyReviewItem"];
         };
         /** AdminCopySimilarityEvidence */
@@ -10850,6 +10861,12 @@ export interface components {
              * @enum {string}
              */
             status: "applied" | "already_applied" | "failed";
+            /**
+             * Terminal Reconciliation
+             * @default false
+             */
+            terminal_reconciliation: boolean;
+            terminal_ruling?: components["schemas"]["AdminQuarantineTerminalRuling"] | null;
         };
         /** AdminQuarantineBatchExecuteRequest */
         AdminQuarantineBatchExecuteRequest: {
@@ -10907,6 +10924,12 @@ export interface components {
             resolution: "release" | "rescreen" | "reject";
             /** Resulting Agent Status */
             resulting_agent_status?: string | null;
+            /**
+             * Terminal Reconciliation
+             * @default false
+             */
+            terminal_reconciliation: boolean;
+            terminal_ruling?: components["schemas"]["AdminQuarantineTerminalRuling"] | null;
         };
         /** AdminQuarantineBatchPreviewRequest */
         AdminQuarantineBatchPreviewRequest: {
@@ -10955,6 +10978,8 @@ export interface components {
             agent_id: string;
             /** Agent Name */
             agent_name: string;
+            /** Agent Status */
+            agent_status?: string | null;
             /** Agent Version */
             agent_version?: number | null;
             /** Artifact Sha256 */
@@ -11027,13 +11052,27 @@ export interface components {
              * @enum {string}
              */
             status: "active" | "resolved";
+            /**
+             * Terminal Ghost
+             * @default false
+             */
+            terminal_ghost: boolean;
         };
         /** AdminQuarantineList */
         AdminQuarantineList: {
+            /** Actionable Count */
+            actionable_count?: number | null;
             /** Count */
             count: number;
             /** Items */
             items: components["schemas"]["AdminQuarantineItem"][];
+            /** Oldest Actionable Created At */
+            oldest_actionable_created_at?: string | null;
+            /**
+             * Terminal Ghost Count
+             * @default 0
+             */
+            terminal_ghost_count: number;
         };
         /** AdminQuarantineResolutionEvent */
         AdminQuarantineResolutionEvent: {
@@ -11069,6 +11108,25 @@ export interface components {
             /** Agent Status */
             agent_status: string;
             quarantine: components["schemas"]["AdminQuarantineItem"];
+        };
+        /**
+         * AdminQuarantineTerminalRuling
+         * @description The exact ruling that holds a quarantine's agent terminal.
+         *
+         *     A batch preview signs this into its token, and execution re-derives it
+         *     under the quarantine and agent row locks; any change refuses the item.
+         */
+        AdminQuarantineTerminalRuling: {
+            /** Agent Status */
+            agent_status: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Ath Action Id */
+            ath_action_id?: string | null;
+            /** Ath Resolved At */
+            ath_resolved_at?: string | null;
+            /** Ath Review Id */
+            ath_review_id?: string | null;
         };
         /** AdminQueuePolicySettingsRequest */
         AdminQueuePolicySettingsRequest: {
@@ -21579,6 +21637,32 @@ export interface components {
             accepted: boolean;
         };
         /**
+         * L2CanaryGuardCheck
+         * @description One exact-source guard, in the order the scheduler evaluates it.
+         *
+         *     ``passed`` is null when the caller supplied no expected value to compare,
+         *     or, for ``source_object_verified``, because only scheduling re-hashes the
+         *     stored object. ``conflict_detail`` is the exact 409 detail the scheduler
+         *     answers when this is the first guard not known to pass.
+         */
+        L2CanaryGuardCheck: {
+            /** Conflict Detail */
+            conflict_detail: string;
+            /** Current */
+            current: string | number | null;
+            /** Expected */
+            expected: string | number | null;
+            /**
+             * Guard
+             * @enum {string}
+             */
+            guard: "ath_clear_action" | "attempt_owner" | "agent_artifact_sha256" | "attempt_policy_version" | "agent_status" | "score_row_count" | "attempt_artifact_sha256" | "historical_ruling_run_mode" | "historical_ruling" | "source_object_verified" | "arrival_bench_version";
+            /** Note */
+            note?: string | null;
+            /** Passed */
+            passed: boolean | null;
+        };
+        /**
          * L2CanaryPinnedScheduleRequest
          * @description ``POST /pinned``: the schedule request with a required posture pin.
          */
@@ -21636,9 +21720,14 @@ export interface components {
         };
         /**
          * L2CanaryPreflightView
-         * @description Current values of the scheduler's exact-source guards, before its recheck.
+         * @description The scheduler's exact-source guards on current state; advisory only.
+         *
+         *     It authorizes nothing: scheduling reruns the same predicate under row locks
+         *     and, for a historical ruling, re-hashes the stored object before queueing.
          */
         L2CanaryPreflightView: {
+            /** Active Canary Id */
+            active_canary_id: string | null;
             /** Agent Artifact Sha256 */
             agent_artifact_sha256: string;
             /**
@@ -21649,9 +21738,28 @@ export interface components {
             /** Agent Status */
             agent_status: string;
             /** Arrival Bench Version */
-            arrival_bench_version: number;
+            arrival_bench_version: number | null;
+            /**
+             * Attempt Agent Id
+             * Format: uuid
+             */
+            attempt_agent_id: string;
             /** Attempt Policy Version */
             attempt_policy_version: number;
+            /**
+             * Authority
+             * @default none
+             * @constant
+             */
+            authority: "none";
+            /** Guards */
+            guards: components["schemas"]["L2CanaryGuardCheck"][];
+            /** Guards Pass */
+            guards_pass: boolean | null;
+            /** Legacy Null Attempt Sha256 */
+            legacy_null_attempt_sha256: boolean;
+            /** Report Only Packet Available */
+            report_only_packet_available: boolean;
             /** Score Row Count */
             score_row_count: number;
             /** Source Attempt Artifact Sha256 */
@@ -32041,7 +32149,7 @@ export interface components {
             active_work_count: number;
             /**
              * Attempt Status Drift Ghost Count
-             * @description Agents whose latest screening attempt reports a status this endpoint's reason classification does not cover (e.g. a terminal passed/rejected verdict on an agent whose own status never advanced past screening) -- the same kind of attempts/agents drift as the two counts above, never folded into backlog_count.
+             * @description Agents whose latest screening attempt reports a status this endpoint's reason classification does not cover (e.g. a terminal passed/rejected verdict on an agent whose own status never advanced past screening) -- the same kind of attempts/agents drift as the stale-running and resolved-quarantine counts, never folded into backlog_count.
              */
             attempt_status_drift_ghost_count: number;
             /**
@@ -32060,7 +32168,7 @@ export interface components {
             generated_at: string;
             /**
              * Ghost Count
-             * @description Sum of the three reconciliation counts above.
+             * @description Sum of the four reconciliation counts above.
              */
             ghost_count: number;
             /** Infrastructure Backoff Count */
@@ -32101,9 +32209,14 @@ export interface components {
             resolved_quarantine_ghost_count: number;
             /**
              * Stale Running Ghost Count
-             * @description Agents whose latest screening attempt still looks 'running' although the agent already reached a terminal or progressed-past-screening status. Visible for reconciliation; never folded into the counts above. See ditto-subnet#2038.
+             * @description Agents whose latest screening attempt still looks 'running' although the agent already reached a terminal or progressed-past-screening status. Visible for reconciliation; never folded into the counts above.
              */
             stale_running_ghost_count: number;
+            /**
+             * Terminal Quarantine Ghost Count
+             * @description Active screening quarantines whose exact agent is already banned or rejected. Historical, never escalation backlog or oldest age; close each with a fenced batch reject. See ditto-subnet#2038.
+             */
+            terminal_quarantine_ghost_count: number;
             /**
              * Throughput Completed Count
              * @description Full (non-build-only) screening attempts reaching a passed or rejected verdict within the throughput window.
@@ -39718,7 +39831,13 @@ export interface operations {
     };
     get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                artifact_sha256?: string | null;
+                expected_agent_status?: string | null;
+                expected_score_count?: number | null;
+                historical_ruling_kind?: ("ath_clear" | "screening_reject") | null;
+                historical_ruling_id?: string | null;
+            };
             header?: {
                 authorization?: string | null;
             };

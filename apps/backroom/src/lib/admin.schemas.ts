@@ -486,17 +486,60 @@ export const l2ReportCanaryLookupInputSchema = z.object({
 export const l2ReportCanaryPreflightInputSchema = z.object({
   agentId: z.string().uuid(),
   sourceAttemptId: z.string().uuid(),
+  // Optional expected values: each supplied one is judged by the scheduler's
+  // own guard predicate; omitted ones are reported with passed=null.
+  artifactSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  expectedAgentStatus: z.string().min(1).max(64).optional(),
+  expectedScoreCount: z.number().int().nonnegative().optional(),
+  historicalRulingKind: z.enum(['ath_clear', 'screening_reject']).optional(),
+  historicalRulingId: z.string().uuid().optional(),
+}).superRefine((input, ctx) => {
+  if ((input.historicalRulingKind === undefined) !== (input.historicalRulingId === undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'historical ruling kind and id must be supplied together' })
+  }
+  if (input.historicalRulingKind !== undefined && input.artifactSha256 === undefined) {
+    ctx.addIssue({ code: 'custom', message: 'a historical ruling preflight requires artifactSha256' })
+  }
+})
+
+export const l2CanaryGuardCheckSchema = z.object({
+  guard: z.enum([
+    'ath_clear_action',
+    'attempt_owner',
+    'agent_artifact_sha256',
+    'attempt_policy_version',
+    'agent_status',
+    'score_row_count',
+    'attempt_artifact_sha256',
+    'historical_ruling_run_mode',
+    'historical_ruling',
+    'source_object_verified',
+    'arrival_bench_version',
+  ]),
+  passed: z.boolean().nullable(),
+  current: z.union([z.string(), z.number()]).nullable(),
+  expected: z.union([z.string(), z.number()]).nullable(),
+  conflict_detail: z.string(),
+  note: z.string().nullable().optional(),
 })
 
 export const l2ReportCanaryPreflightViewSchema = z.object({
+  // Advisory only: scheduling reruns the same guards and authorizes nothing here.
+  authority: z.literal('none'),
   agent_id: z.string().uuid(),
   source_attempt_id: z.string().uuid(),
   agent_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
   source_attempt_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   agent_status: z.string(),
   attempt_policy_version: z.number().int().nonnegative(),
-  arrival_bench_version: z.number().int().nonnegative(),
+  arrival_bench_version: z.number().int().nonnegative().nullable(),
   score_row_count: z.number().int().nonnegative(),
+  attempt_agent_id: z.string().uuid(),
+  legacy_null_attempt_sha256: z.boolean(),
+  active_canary_id: z.string().uuid().nullable(),
+  report_only_packet_available: z.boolean(),
+  guards: z.array(l2CanaryGuardCheckSchema).max(16),
+  guards_pass: z.boolean().nullable(),
 })
 
 export const scheduleL2ReportCanaryInputSchema = z.object({
@@ -4857,6 +4900,12 @@ export const screeningQuarantineSchema = z.object({
   // string rather than an enum: a platform that learns a new resolution value
   // must not blank the panel here.
   resolution_reason_code: z.string().nullish().default(null),
+  // The exact agent's live status, and whether this active row sits behind an
+  // already banned/rejected agent (ditto-subnet#2038): historical
+  // reconciliation work, never actionable review. Nullish/defaulted for a
+  // platform that predates the fields.
+  agent_status: z.string().nullish().default(null),
+  terminal_ghost: z.boolean().nullish().default(false),
 }).transform(({ reason_code, ...rest }) => ({
   ...rest,
   screening_reason_code: screeningOriginCode(rest.screening_reason_code, reason_code),
@@ -4865,6 +4914,11 @@ export const screeningQuarantineSchema = z.object({
 export const screeningQuarantineListSchema = z.object({
   items: z.array(screeningQuarantineSchema),
   count: z.number().int().nonnegative(),
+  // `count` is the pagination total. Terminal ghosts are counted separately
+  // and kept out of the actionable count and oldest actionable age.
+  terminal_ghost_count: z.number().int().nonnegative().nullish().default(0),
+  actionable_count: z.number().int().nonnegative().nullish().default(null),
+  oldest_actionable_created_at: z.string().nullish().default(null),
 })
 
 const screeningReviewEventSchema = z.object({
@@ -5594,6 +5648,16 @@ export const screeningQuarantineBatchPreviewInputSchema = z
     }
   })
 
+// The exact ruling holding a quarantine's agent terminal (ditto-subnet#2038).
+// The preview token signs it and execution re-derives it under lock.
+export const screeningQuarantineTerminalRulingSchema = z.object({
+  agent_status: z.string(),
+  artifact_sha256: z.string(),
+  ath_review_id: z.string().uuid().nullable().default(null),
+  ath_action_id: z.string().uuid().nullable().default(null),
+  ath_resolved_at: z.string().nullable().default(null),
+})
+
 export const screeningQuarantineBatchPreviewItemSchema = z.object({
   quarantine_id: z.string().uuid(),
   agent_id: z.string().uuid().nullable().default(null),
@@ -5605,6 +5669,10 @@ export const screeningQuarantineBatchPreviewItemSchema = z.object({
   resulting_agent_status: z.string().nullable().default(null),
   public_reason_code: z.string().nullable().default(null),
   public_record_hash: z.string().nullable().default(null),
+  // A reject that closes an orphaned quarantine behind an already-terminal
+  // agent without changing that agent's ruling (ditto-subnet#2038).
+  terminal_reconciliation: z.boolean().nullish().default(false),
+  terminal_ruling: screeningQuarantineTerminalRulingSchema.nullish().default(null),
   message: z.string(),
 })
 
@@ -5629,6 +5697,8 @@ export const screeningQuarantineBatchExecuteItemSchema = z.object({
   quarantine_id: z.string().uuid(),
   status: z.enum(['applied', 'already_applied', 'failed']),
   agent_status: z.string().nullable().default(null),
+  terminal_reconciliation: z.boolean().nullish().default(false),
+  terminal_ruling: screeningQuarantineTerminalRulingSchema.nullish().default(null),
   message: z.string(),
 })
 
@@ -7787,6 +7857,9 @@ export const resolveCopyReviewResponseSchema = z.object({
   review: copyReviewItemSchema,
   agent_status: z.string(),
   idempotent: z.boolean(),
+  // Active screening quarantines a terminal reject closed in the same
+  // transaction (ditto-subnet#2038).
+  reconciled_quarantine_ids: z.array(z.string().uuid()).nullish().default([]),
 })
 
 export const getAthReviewInputSchema = z.object({
@@ -7850,6 +7923,7 @@ export const athReviewAuditSchema = z.object({
     previous_status: z.string().nullable(),
     artifact_sha256: z.string().nullable(),
     score_count: z.number().int().nonnegative().nullable(),
+    reconciled_quarantine_ids: z.array(z.string().uuid()).nullish().default([]),
   })).default([]),
 })
 
@@ -9397,6 +9471,8 @@ export const sourceReviewQueueSloSchema = z.object({
   throughput_per_hour: z.number().nonnegative(),
   stale_running_ghost_count: z.number().int().nonnegative(),
   resolved_quarantine_ghost_count: z.number().int().nonnegative(),
+  // Active quarantines behind an already banned/rejected agent (#2038).
+  terminal_quarantine_ghost_count: z.number().int().nonnegative().nullish().default(0),
   attempt_status_drift_ghost_count: z.number().int().nonnegative(),
   ghost_count: z.number().int().nonnegative(),
   max_actionable_age_threshold_seconds: z.number().int().positive().nullable(),

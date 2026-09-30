@@ -317,6 +317,38 @@ so a compromised or stale process can be stopped. Both writes require
 No key registration, capacity change, or live host enrollment is performed by
 these tools merely becoming available.
 
+## Report-only L2 canary preflight
+
+`get_l2_report_canary_preflight` runs the same exact-source guard predicate that
+`schedule_l2_report_canary` enforces (and that claim and completion recheck),
+without a lock, queue write, or storage read. Pass the values you intend to
+schedule with (`artifactSha256`, `expectedAgentStatus`, `expectedScoreCount`,
+and for a legacy null-SHA attempt `historicalRulingKind` / `historicalRulingId`).
+Each guard returns `passed`, `current`, `expected`, and the exact 409
+`conflict_detail` the scheduler answers when it is the first failure; an omitted
+expected value returns `passed=null` rather than a guess.
+
+The preflight is advisory and non-authorizing (`authority: "none"`): it grants
+nothing, and scheduling reruns the same predicate under row locks. The first
+guard that is not known to pass is where scheduling would refuse, with that
+guard's detail. With a historical ruling, scheduling checks the ruling first:
+`ath_clear_action` (`ATH clear action missing`), `historical_ruling`
+(`historical ruling changed`), then `source_object_verified`
+(`current source object differs from ruling`, or 503 when storage is
+unavailable). Only then does it check the exact-source guards and the arrival
+benchmark. An unavailable arrival benchmark version returns
+`arrival_bench_version: null` and a failed guard, which scheduling also refuses.
+
+The score guard compares the raw `Score` row count for the agent, not a filtered
+or accepted-score view. A legacy attempt with a null pinned artifact SHA always
+fails `attempt_artifact_sha256` without a historical ruling, and a ruling cannot
+schedule an attempt that has a pinned SHA. `source_object_verified` stays
+`null` because only scheduling re-hashes the stored object. The response also
+shows any active queued or leased canary for the attempt and whether the
+report-only scored-runtime packet a claim needs is currently available; a
+queued canary waits without a packet. The response carries no source text,
+signed URL, credential, or private challenge material.
+
 ## Finding a submission
 
 `search_submissions` resolves what an operator knows (an agent name or name
