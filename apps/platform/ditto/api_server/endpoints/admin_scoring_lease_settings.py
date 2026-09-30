@@ -44,6 +44,8 @@ from ditto.db.queries.scoring_lease_settings import (
 )
 
 router = APIRouter(prefix="/admin/scoring-lease-settings", tags=["admin"])
+MIN_REASON_LENGTH = 8
+MAX_ACTOR_LENGTH = 120
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 AdminDep = Annotated[None, Depends(require_admin)]
 
@@ -117,14 +119,41 @@ async def create_settings_revision(
     Reaches ticket issuance within the resolver TTL, fleet-wide, with no
     restart. Live tickets keep the deadline they were minted with.
     """
+    # Audit fields are validated on their TRIMMED values, first, so blank or
+    # whitespace-padded input is a clear 422 and never reaches the revision
+    # check or the table's trimmed-length constraints (which would surface as
+    # a misleading "changed concurrently" 409 that no refresh can fix).
+    reason = payload.reason.strip()
+    actor = payload.actor.strip()
+    expected_confirmation = scoring_lease_confirmation(
+        payload.settings.scoring_ticket_ttl_minutes
+    )
+    if len(reason) < MIN_REASON_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"reason must be at least {MIN_REASON_LENGTH} characters after "
+                "trimming whitespace"
+            ),
+        )
+    if not 1 <= len(actor) <= MAX_ACTOR_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"actor must be 1-{MAX_ACTOR_LENGTH} characters after trimming "
+                "whitespace"
+            ),
+        )
+    if not payload.confirmation.strip():
+        raise HTTPException(
+            status_code=422,
+            detail=f"confirmation is required: type exactly {expected_confirmation}",
+        )
     if payload.scope != GLOBAL_SCOPE:
         raise HTTPException(
             status_code=422,
             detail="scoring lease settings are subnet-global; scope must be '*'",
         )
-    expected_confirmation = scoring_lease_confirmation(
-        payload.settings.scoring_ticket_ttl_minutes
-    )
     if payload.confirmation != expected_confirmation:
         raise HTTPException(
             status_code=409,
@@ -147,8 +176,8 @@ async def create_settings_revision(
             scope=payload.scope,
             settings=payload.settings.model_dump(mode="json"),
             checksum=_checksum(payload.settings),
-            reason=payload.reason.strip(),
-            actor=payload.actor.strip(),
+            reason=reason,
+            actor=actor,
         )
         await session.commit()
     except IntegrityError as error:

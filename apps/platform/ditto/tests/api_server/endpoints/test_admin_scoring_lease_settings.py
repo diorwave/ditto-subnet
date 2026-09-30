@@ -244,6 +244,63 @@ class TestWrite:
         assert after.total_seconds() == 90 * 60
 
 
+class TestWhitespaceAuditFields:
+    """Blank audit fields are invalid input, never a revision conflict.
+
+    A whitespace-padded reason or actor used to pass the raw-length check, fail
+    the table's trimmed-length constraint on insert, and come back as the
+    "changed concurrently" 409 -- advice no refresh can satisfy.
+    """
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("reason", " " * 12, "reason"),
+            ("reason", "   short   ", "reason"),
+            ("actor", "    ", "actor"),
+            ("confirmation", "   ", "confirmation"),
+        ],
+    )
+    async def test_blank_audit_field_is_a_clear_422_before_the_revision_check(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+        field: str,
+        value: str,
+        message: str,
+    ) -> None:
+        _install(app, session_maker)
+        # A stale expected revision too: the audit-field refusal must win, so
+        # the operator is never told to refresh for an input problem.
+        assert (
+            await client.post(_URL, headers=_HEADERS, json=_payload(150))
+        ).status_code == 200
+        payload = _payload(120)
+        payload[field] = value
+        response = await client.post(_URL, headers=_HEADERS, json=payload)
+        assert response.status_code == 422, response.text
+        body = response.text
+        assert message in body
+        assert "changed" not in body
+        assert await _revision_count(session_maker) == 1
+
+    async def test_padded_audit_fields_are_trimmed_and_accepted(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install(app, session_maker)
+        payload = _payload(150)
+        payload["reason"] = "   v11 completions fit inside 150 minutes   "
+        payload["actor"] = "  backroom:test  "
+        response = await client.post(_URL, headers=_HEADERS, json=payload)
+        assert response.status_code == 200, response.text
+        assert response.json()["reason"] == "v11 completions fit inside 150 minutes"
+        assert response.json()["actor"] == "backroom:test"
+
+
 class TestAuditProjection:
     def test_public_activity_publishes_only_the_ttl(self) -> None:
         details = public_details(
