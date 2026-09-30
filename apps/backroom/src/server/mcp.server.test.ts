@@ -93,7 +93,7 @@ describe('Backroom MCP tools', () => {
     const agentId = '11111111-1111-4111-8111-111111111111'
     const sourceAttemptId = '22222222-2222-4222-8222-222222222222'
     const payload = {
-      agent_id: agentId, source_attempt_id: sourceAttemptId,
+      authority: 'none', agent_id: agentId, source_attempt_id: sourceAttemptId,
       agent_artifact_sha256: 'a'.repeat(64), source_attempt_artifact_sha256: null,
       agent_status: 'scored', attempt_policy_version: 13, arrival_bench_version: 13,
       score_row_count: 3, attempt_agent_id: agentId, legacy_null_attempt_sha256: true,

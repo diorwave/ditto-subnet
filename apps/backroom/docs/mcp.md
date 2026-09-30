@@ -283,6 +283,17 @@ Each guard returns `passed`, `current`, `expected`, and the exact 409
 `conflict_detail` the scheduler answers when it is the first failure; an omitted
 expected value returns `passed=null` rather than a guess.
 
+The preflight is advisory and non-authorizing (`authority: "none"`): it grants
+nothing, and scheduling reruns the same predicate under row locks. The first
+guard that is not known to pass is where scheduling would refuse, with that
+guard's detail. With a historical ruling, scheduling checks the ruling first:
+`ath_clear_action` (`ATH clear action missing`), `historical_ruling`
+(`historical ruling changed`), then `source_object_verified`
+(`current source object differs from ruling`, or 503 when storage is
+unavailable). Only then does it check the exact-source guards and the arrival
+benchmark. An unavailable arrival benchmark version returns
+`arrival_bench_version: null` and a failed guard, which scheduling also refuses.
+
 The score guard compares the raw `Score` row count for the agent, not a filtered
 or accepted-score view. A legacy attempt with a null pinned artifact SHA always
 fails `attempt_artifact_sha256` without a historical ruling, and a ruling cannot

@@ -696,6 +696,7 @@ describe('screening submission admin service', () => {
     const agentId = '11111111-1111-4111-8111-111111111111'
     const sourceAttemptId = '22222222-2222-4222-8222-222222222222'
     const snapshot = {
+      authority: 'none',
       agent_id: agentId,
       source_attempt_id: sourceAttemptId,
       agent_artifact_sha256: 'a'.repeat(64),
@@ -769,6 +770,48 @@ describe('screening submission admin service', () => {
       }),
     ).rejects.toThrow()
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps scheduler-matched preflight refusals for ruling and benchmark guards', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const agentId = '11111111-1111-4111-8111-111111111111'
+    const snapshot = {
+      authority: 'none',
+      agent_id: agentId,
+      source_attempt_id: '22222222-2222-4222-8222-222222222222',
+      agent_artifact_sha256: 'a'.repeat(64),
+      source_attempt_artifact_sha256: null,
+      agent_status: 'scored',
+      attempt_policy_version: 13,
+      arrival_bench_version: null,
+      score_row_count: 1,
+      attempt_agent_id: agentId,
+      legacy_null_attempt_sha256: true,
+      active_canary_id: null,
+      report_only_packet_available: false,
+      guards: [
+        { guard: 'ath_clear_action', passed: false, current: null, expected: null,
+          conflict_detail: 'ATH clear action missing', note: null },
+        { guard: 'source_object_verified', passed: null, current: null, expected: 'a'.repeat(64),
+          conflict_detail: 'current source object differs from ruling', note: 'not judged' },
+        { guard: 'arrival_bench_version', passed: false, current: null, expected: 13,
+          conflict_detail: 'source is not benchmark v13', note: 'arrival benchmark version unavailable' },
+      ],
+      guards_pass: false,
+    }
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => Response.json(snapshot)))
+
+    await expect(
+      fetchL2ReportCanaryPreflight({ agentId, sourceAttemptId: snapshot.source_attempt_id }),
+    ).resolves.toEqual(snapshot)
+    // A snapshot that claims authority is not a preflight this tool accepts.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => Response.json({ ...snapshot, authority: 'granted' })),
+    )
+    await expect(
+      fetchL2ReportCanaryPreflight({ agentId, sourceAttemptId: snapshot.source_attempt_id }),
+    ).rejects.toThrow()
   })
 
   it('forwards explicit pagination for screening history and disputes', async () => {

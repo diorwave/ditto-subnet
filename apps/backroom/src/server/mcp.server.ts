@@ -2476,7 +2476,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_l2_report_canary_preflight',
     {
       title: 'Get L2 canary preflight',
-      description: 'Run the scheduler\'s exact-source guards read-only. Pass the planned SHA/status/raw score count/ruling for per-guard results and the exact 409 detail (omitted: passed=null). Shows legacy null attempt SHA, active canary and packet availability. Requires backroom:read.',
+      description: 'Advisory, read-only run of the scheduler\'s exact-source guards; authorizes nothing. Pass the planned SHA/status/raw score count/ruling for per-guard results and the exact 409 detail (omitted: passed=null). Shows legacy null attempt SHA, active canary and packet availability. Requires backroom:read.',
       inputSchema: l2ReportCanaryPreflightInputSchema,
       annotations: toolAnnotations('read'),
     },

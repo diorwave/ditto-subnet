@@ -2026,10 +2026,13 @@ export interface paths {
         };
         /**
          * Get L2 Report Canary Preflight
-         * @description Evaluate the scheduler's own guard predicate; scheduling still rechecks it.
+         * @description Evaluate the scheduler's own guard predicate; advisory only.
          *
-         *     Read-only: no row locks, no queue write, and no storage read. Omitted
-         *     expected values report the current value with ``passed=null``.
+         *     Read-only and non-authorizing: no row locks, no queue write, and no storage
+         *     read. It grants nothing; scheduling reruns the same predicate under row
+         *     locks and re-hashes the stored object. Omitted expected values report the
+         *     current value with ``passed=null``; the first guard not known to pass is
+         *     where scheduling would refuse, with that guard's ``conflict_detail``.
          */
         get: operations["get_l2_report_canary_preflight_api_v1_admin_screener_l2_report_canaries_preflight__agent_id___source_attempt_id__get"];
         put?: never;
@@ -21427,7 +21430,7 @@ export interface components {
          *     ``passed`` is null when the caller supplied no expected value to compare,
          *     or, for ``source_object_verified``, because only scheduling re-hashes the
          *     stored object. ``conflict_detail`` is the exact 409 detail the scheduler
-         *     answers when this is the first failing guard.
+         *     answers when this is the first guard not known to pass.
          */
         L2CanaryGuardCheck: {
             /** Conflict Detail */
@@ -21440,7 +21443,7 @@ export interface components {
              * Guard
              * @enum {string}
              */
-            guard: "attempt_owner" | "agent_artifact_sha256" | "attempt_policy_version" | "agent_status" | "score_row_count" | "attempt_artifact_sha256" | "historical_ruling_run_mode" | "historical_ruling" | "source_object_verified" | "arrival_bench_version";
+            guard: "ath_clear_action" | "attempt_owner" | "agent_artifact_sha256" | "attempt_policy_version" | "agent_status" | "score_row_count" | "attempt_artifact_sha256" | "historical_ruling_run_mode" | "historical_ruling" | "source_object_verified" | "arrival_bench_version";
             /** Note */
             note?: string | null;
             /** Passed */
@@ -21448,7 +21451,10 @@ export interface components {
         };
         /**
          * L2CanaryPreflightView
-         * @description Current values of the scheduler's exact-source guards, before its recheck.
+         * @description The scheduler's exact-source guards on current state; advisory only.
+         *
+         *     It authorizes nothing: scheduling reruns the same predicate under row locks
+         *     and re-hashes the stored object before any canary is queued.
          */
         L2CanaryPreflightView: {
             /** Active Canary Id */
@@ -21463,7 +21469,7 @@ export interface components {
             /** Agent Status */
             agent_status: string;
             /** Arrival Bench Version */
-            arrival_bench_version: number;
+            arrival_bench_version: number | null;
             /**
              * Attempt Agent Id
              * Format: uuid
@@ -21471,6 +21477,12 @@ export interface components {
             attempt_agent_id: string;
             /** Attempt Policy Version */
             attempt_policy_version: number;
+            /**
+             * Authority
+             * @default none
+             * @constant
+             */
+            authority: "none";
             /** Guards */
             guards: components["schemas"]["L2CanaryGuardCheck"][];
             /** Guards Pass */

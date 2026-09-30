@@ -101,6 +101,7 @@ class L2CanaryView(BaseModel):
 
 
 L2CanaryGuardName = Literal[
+    "ath_clear_action",
     "attempt_owner",
     "agent_artifact_sha256",
     "attempt_policy_version",
@@ -120,7 +121,7 @@ class L2CanaryGuardCheck(BaseModel):
     ``passed`` is null when the caller supplied no expected value to compare,
     or, for ``source_object_verified``, because only scheduling re-hashes the
     stored object. ``conflict_detail`` is the exact 409 detail the scheduler
-    answers when this is the first failing guard.
+    answers when this is the first guard not known to pass.
     """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
@@ -134,17 +135,24 @@ class L2CanaryGuardCheck(BaseModel):
 
 
 class L2CanaryPreflightView(BaseModel):
-    """Current values of the scheduler's exact-source guards, before its recheck."""
+    """The scheduler's exact-source guards on current state; advisory only.
+
+    It authorizes nothing: scheduling reruns the same predicate under row locks
+    and re-hashes the stored object before any canary is queued.
+    """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
+    authority: Literal["none"] = "none"
     agent_id: UUID
     source_attempt_id: UUID
     agent_artifact_sha256: str
     source_attempt_artifact_sha256: str | None
     agent_status: str
     attempt_policy_version: int
-    arrival_bench_version: int
+    # Null when unavailable; the arrival_bench_version guard then fails exactly
+    # as scheduling refuses it.
+    arrival_bench_version: int | None
     score_row_count: int
     attempt_agent_id: UUID
     # Legacy attempts predate artifact pinning; only a historical ruling can

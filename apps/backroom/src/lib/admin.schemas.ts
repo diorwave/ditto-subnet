@@ -503,6 +503,7 @@ export const l2ReportCanaryPreflightInputSchema = z.object({
 
 export const l2CanaryGuardCheckSchema = z.object({
   guard: z.enum([
+    'ath_clear_action',
     'attempt_owner',
     'agent_artifact_sha256',
     'attempt_policy_version',
@@ -522,13 +523,15 @@ export const l2CanaryGuardCheckSchema = z.object({
 })
 
 export const l2ReportCanaryPreflightViewSchema = z.object({
+  // Advisory only: scheduling reruns the same guards and authorizes nothing here.
+  authority: z.literal('none'),
   agent_id: z.string().uuid(),
   source_attempt_id: z.string().uuid(),
   agent_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/),
   source_attempt_artifact_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   agent_status: z.string(),
   attempt_policy_version: z.number().int().nonnegative(),
-  arrival_bench_version: z.number().int().nonnegative(),
+  arrival_bench_version: z.number().int().nonnegative().nullable(),
   score_row_count: z.number().int().nonnegative(),
   attempt_agent_id: z.string().uuid(),
   legacy_null_attempt_sha256: z.boolean(),
