@@ -88,6 +88,46 @@ class TestAuth:
 
 
 class TestRead:
+    async def test_corrupt_current_and_history_remain_readable(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install(app, session_maker)
+        for revision, minutes in enumerate((150, 200)):
+            response = await client.post(
+                _URL,
+                headers=_HEADERS,
+                json=_payload(minutes, expected_revision=revision),
+            )
+            assert response.status_code == 200, response.text
+
+        async with session_maker() as session:
+            rows = (await session.scalars(select(ScoringLeaseSettingsRevision))).all()
+            checksums = {row.revision: row.checksum for row in rows}
+            for row in rows:
+                row.settings = {"scoring_ticket_ttl_minutes": 1}
+            await session.commit()
+
+        response = await client.get(_URL, headers=_HEADERS)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["effective"]["settings"] == {"scoring_ticket_ttl_minutes": 180}
+        assert body["effective"]["revision"] == 2
+        assert [row["revision"] for row in body["history"]] == [2, 1]
+        for row in body["current"] + body["history"]:
+            assert row["settings"] == {"scoring_ticket_ttl_minutes": 180}
+            assert row["checksum"] == checksums[row["revision"]]
+            assert row["actor"] == "backroom:test"
+
+        # Reading the fallback never repairs or overwrites the audit records.
+        async with session_maker() as session:
+            rows = (await session.scalars(select(ScoringLeaseSettingsRevision))).all()
+            assert all(
+                row.settings == {"scoring_ticket_ttl_minutes": 1} for row in rows
+            )
+
     async def test_empty_board_reports_the_180_minute_default(
         self,
         app: FastAPI,

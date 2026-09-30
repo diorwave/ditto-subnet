@@ -62,7 +62,7 @@ def _revision(row: RevisionRow) -> ScoringLeaseSettingsRevision:
         revision=row.revision,
         parent_revision=row.parent_revision,
         scope=row.scope,
-        settings=ScoringLeaseSettings.model_validate(row.settings),
+        settings=settings_from_row(row),
         reason=row.reason,
         actor=row.actor,
         created_at=row.created_at,
