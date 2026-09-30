@@ -1082,6 +1082,22 @@ class AdminQuarantineBatchPreviewRequest(BaseModel):
     ]
 
 
+class AdminQuarantineTerminalRuling(BaseModel):
+    """The exact ruling that holds a quarantine's agent terminal.
+
+    A batch preview signs this into its token, and execution re-derives it
+    under the quarantine and agent row locks; any change refuses the item.
+    """
+
+    agent_status: str
+    artifact_sha256: str
+    ath_review_id: UUID | None = None
+    ath_action_id: UUID | None = None
+    """The specific ATH reject action; null only when the review predates the
+    action ledger (or for the legacy CLI ban, which cites no review)."""
+    ath_resolved_at: datetime | None = None
+
+
 class AdminQuarantineBatchPreviewItem(BaseModel):
     quarantine_id: UUID
     agent_id: UUID | None = None
@@ -1094,9 +1110,14 @@ class AdminQuarantineBatchPreviewItem(BaseModel):
     public_reason_code: str | None = None
     public_record_hash: str | None = None
     terminal_reconciliation: bool = False
-    """True for an active quarantine whose exact agent is already ``banned`` or
-    ``rejected`` (ditto-subnet#2038). Only ``reject`` is ready: it closes the
-    orphan and leaves the terminal agent ruling and public record unchanged."""
+    """True for a quarantine behind an already-terminal agent
+    (ditto-subnet#2038), active or already closed behind that ruling. Only
+    ``reject`` is ready, and only against an identified current ATH reject: it
+    closes the orphan and leaves the terminal agent ruling and public record
+    unchanged. A closed one replays as ``already_applied``."""
+    terminal_ruling: AdminQuarantineTerminalRuling | None = None
+    """The current terminal ruling this decision is fenced to; signed into the
+    preview token and re-checked under lock at execution."""
     message: str
 
 
@@ -1121,6 +1142,7 @@ class AdminQuarantineBatchExecuteItem(BaseModel):
     terminal_reconciliation: bool = False
     """True when ``reject`` closed an orphaned quarantine behind an
     already-terminal agent without changing that agent's ruling."""
+    terminal_ruling: AdminQuarantineTerminalRuling | None = None
     message: str
 
 

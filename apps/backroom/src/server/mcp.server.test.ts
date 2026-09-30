@@ -6031,6 +6031,13 @@ describe('Backroom MCP tools', () => {
             public_reason_code: null,
             public_record_hash: null,
             terminal_reconciliation: true,
+            terminal_ruling: {
+              agent_status: 'banned',
+              artifact_sha256: decision.expectedArtifactSha256,
+              ath_review_id: '35b446e0-25ce-4ffb-a1c7-775a7bab1832',
+              ath_action_id: '46c557f1-36df-4ffc-b2d8-886b8b8c2943',
+              ath_resolved_at: '2026-09-22T12:00:00Z',
+            },
             message:
               'will close the orphaned quarantine; submission stays banned under its terminal ruling',
           },
@@ -6057,6 +6064,11 @@ describe('Backroom MCP tools', () => {
           disposition: 'ready',
           resulting_agent_status: 'banned',
           terminal_reconciliation: true,
+          // The exact ruling the preview token is fenced to.
+          terminal_ruling: {
+            ath_review_id: '35b446e0-25ce-4ffb-a1c7-775a7bab1832',
+            ath_action_id: '46c557f1-36df-4ffc-b2d8-886b8b8c2943',
+          },
         },
       ],
     })

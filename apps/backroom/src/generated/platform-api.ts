@@ -10784,6 +10784,7 @@ export interface components {
              * @default false
              */
             terminal_reconciliation: boolean;
+            terminal_ruling?: components["schemas"]["AdminQuarantineTerminalRuling"] | null;
         };
         /** AdminQuarantineBatchExecuteRequest */
         AdminQuarantineBatchExecuteRequest: {
@@ -10846,6 +10847,7 @@ export interface components {
              * @default false
              */
             terminal_reconciliation: boolean;
+            terminal_ruling?: components["schemas"]["AdminQuarantineTerminalRuling"] | null;
         };
         /** AdminQuarantineBatchPreviewRequest */
         AdminQuarantineBatchPreviewRequest: {
@@ -11024,6 +11026,25 @@ export interface components {
             /** Agent Status */
             agent_status: string;
             quarantine: components["schemas"]["AdminQuarantineItem"];
+        };
+        /**
+         * AdminQuarantineTerminalRuling
+         * @description The exact ruling that holds a quarantine's agent terminal.
+         *
+         *     A batch preview signs this into its token, and execution re-derives it
+         *     under the quarantine and agent row locks; any change refuses the item.
+         */
+        AdminQuarantineTerminalRuling: {
+            /** Agent Status */
+            agent_status: string;
+            /** Artifact Sha256 */
+            artifact_sha256: string;
+            /** Ath Action Id */
+            ath_action_id?: string | null;
+            /** Ath Resolved At */
+            ath_resolved_at?: string | null;
+            /** Ath Review Id */
+            ath_review_id?: string | null;
         };
         /** AdminQueuePolicySettingsRequest */
         AdminQueuePolicySettingsRequest: {

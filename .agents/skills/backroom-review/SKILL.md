@@ -148,14 +148,22 @@ release or rescreen it to undo a terminal ruling.
 1. Confirm the terminal ruling on that exact UUID (`get_ath_review` for a ban).
 2. Preview `reject` with the exact agent UUID and artifact SHA-256 and a reason
    naming that ruling. Require `disposition: ready`, `terminal_reconciliation:
-   true`, and `resulting_agent_status` equal to the current terminal status.
-3. Execute with the preview token. The quarantine closes with its own
-   resolution row and review event that names the ATH ruling; the agent's
-   status, miner-visible reason, and public record stay unchanged.
+   true`, `resulting_agent_status` equal to the current terminal status, and a
+   `terminal_ruling` whose `ath_review_id` / `ath_action_id` match the current
+   reject in `get_ath_review`. A preview with no `terminal_ruling` is "not
+   reconcilable" (no current ATH reject for that exact agent and artifact, for
+   example a `rejected` screening agent): leave it and escalate.
+3. Execute with the preview token. The token is fenced to that ruling: if the
+   ruling or terminal state moved, the batch (or the item, if it moved under
+   lock) is refused; preview again. The quarantine closes with its own
+   resolution row and review event naming the ATH review and reject action;
+   the agent's status, miner-visible reason, and public record stay unchanged.
 
-The unfenced single-row resolver refuses these rows. A terminal ATH reject now
-closes the matching active quarantine in the same transaction, so new ghosts
-should not appear; treat one as a pre-fix row or a bug to report.
+A reject on a row already closed behind a terminal ruling (by the ruling itself
+or another operator) returns `already_applied`, never a conflict. The unfenced
+single-row resolver refuses these rows. A terminal ATH reject now closes the
+matching active quarantine in the same transaction, so new ghosts should not
+appear; treat one as a pre-fix row or a bug to report.
 
 ## ATH board
 

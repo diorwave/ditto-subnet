@@ -260,14 +260,24 @@ async def resolve_review(
         agent.review_reason = None
     if banning:
         from ditto.db.queries.terminal_quarantine_reconciliation import (
+            TerminalRuling,
             close_quarantines_for_terminal_ruling,
         )
 
-        # A ban must not leave an actionable-looking screening quarantine.
+        # A ban must not leave an actionable-looking screening quarantine. This
+        # legacy exit never resolves an ath_reviews row, so the ruling it cites
+        # is the ban itself on this exact agent and artifact.
         await close_quarantines_for_terminal_ruling(
             session,
             agent=agent,
-            ath_review=None,
+            ruling=TerminalRuling(
+                agent_status=agent.status.value,
+                artifact_sha256=agent.sha256,
+                ath_review_id=None,
+                ath_action_id=None,
+                ath_resolved_at=None,
+            ),
+            source="cli_ban",
             actor="cli:scripts/resolve_review.py",
             reason="Closed by the terminal ban recorded by scripts/resolve_review.py",
             now=datetime.now(UTC),

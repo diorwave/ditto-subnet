@@ -147,6 +147,14 @@ terminal agent, so before ditto-subnet#2038 nothing could close it.
   with the exact agent UUID and artifact SHA-256 is `ready` with
   `terminal_reconciliation: true`; release and rescreen stay `conflict`. The
   unfenced single-row resolver refuses the row.
+- The preview names the current terminal ruling (`terminal_ruling`: agent
+  status, artifact SHA-256, ATH review, and its newest action, which must be
+  the reject). No such ruling (no resolved reject, a later reopen, or a review
+  held on another digest) means "not reconcilable". The preview token signs
+  every item's ruling; execute re-derives them and refuses the batch if any
+  moved, then re-derives each one under the quarantine and agent row locks and
+  refuses the item if it moved. A reject of a quarantine already closed behind
+  a terminal ruling, by any path or operator, replays as `already_applied`.
 - Either path appends a `screening_quarantine_resolutions` row and a manual
   `screening_review_events` snapshot whose `terminal_reconciliation` evidence
   names the source and the ATH review. It never changes `agents.status`, the

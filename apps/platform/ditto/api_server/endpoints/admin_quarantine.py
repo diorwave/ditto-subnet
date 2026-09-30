@@ -59,6 +59,7 @@ from ditto.api_models.admin_quarantine import (
     AdminQuarantineResolutionEvent,
     AdminQuarantineResolveRequest,
     AdminQuarantineResolveResponse,
+    AdminQuarantineTerminalRuling,
     AdminRejectScreeningRequest,
     AdminRejectScreeningResponse,
     AdminScreenedImageRebuildDetail,
@@ -220,9 +221,11 @@ from ditto.db.queries.screening_review_events import append_manual_review_event
 from ditto.db.queries.terminal_quarantine_reconciliation import (
     TERMINAL_QUARANTINE_AGENT_STATUSES,
     TERMINAL_RECONCILIATION_RESOLUTION,
+    TerminalRuling,
+    current_terminal_ruling,
     is_terminal_quarantine_ghost,
     reconcile_terminal_quarantine,
-    terminal_ath_ruling,
+    terminal_reconciliation_record,
 )
 from ditto.db.queries.tickets import RETRY_COOLDOWN, ticket_attempt_cap
 from ditto.screener_policy_state import effective_screening_policy_version
@@ -637,18 +640,47 @@ def _preview_signature_payload(
     ).encode()
 
 
+def _terminal_fence_payload(
+    decisions_digest: str,
+    terminal_rulings: list[AdminQuarantineTerminalRuling | None],
+) -> bytes:
+    return json.dumps(
+        {
+            "decisions_digest": decisions_digest,
+            "terminal_rulings": [
+                ruling.model_dump(mode="json") if ruling is not None else None
+                for ruling in terminal_rulings
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
 def _sign_batch_preview(
     secret: str,
     actor: str,
     decisions: list[AdminQuarantineBatchDecision],
     issued_at: int,
+    terminal_rulings: list[AdminQuarantineTerminalRuling | None],
 ) -> str:
+    """``issued_at.decisions_digest.terminal_fence_digest``.
+
+    The second digest binds each item's previewed terminal ruling (or its
+    absence), so execution can refuse a batch whose terminal state moved
+    (ditto-subnet#2038) with its own message.
+    """
     digest = hmac.new(
         secret.encode(),
         _preview_signature_payload(actor, decisions, issued_at),
         hashlib.sha256,
     ).hexdigest()
-    return f"{issued_at}.{digest}"
+    fence = hmac.new(
+        secret.encode(),
+        _terminal_fence_payload(digest, terminal_rulings),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{issued_at}.{digest}.{fence}"
 
 
 def _verify_batch_preview(
@@ -656,9 +688,10 @@ def _verify_batch_preview(
     secret: str,
     actor: str,
     decisions: list[AdminQuarantineBatchDecision],
+    terminal_rulings: list[AdminQuarantineTerminalRuling | None],
 ) -> None:
     try:
-        issued_text, _digest = token.split(".", 1)
+        issued_text, digest, fence = token.split(".")
         issued_at = int(issued_text)
     except (TypeError, ValueError):
         raise HTTPException(
@@ -669,11 +702,19 @@ def _verify_batch_preview(
         raise HTTPException(
             status_code=409, detail="batch preview expired; preview again"
         )
-    expected = _sign_batch_preview(secret, actor, decisions, issued_at)
-    if not secrets.compare_digest(token, expected):
+    expected = _sign_batch_preview(
+        secret, actor, decisions, issued_at, terminal_rulings
+    )
+    _issued, expected_digest, expected_fence = expected.split(".")
+    if not secrets.compare_digest(digest, expected_digest):
         raise HTTPException(
             status_code=409,
             detail="batch decisions changed after preview; preview again",
+        )
+    if not secrets.compare_digest(fence, expected_fence):
+        raise HTTPException(
+            status_code=409,
+            detail="terminal ruling changed after preview; preview again",
         )
 
 
@@ -1019,29 +1060,14 @@ async def _preview_batch_decision(
             disposition="conflict",
             message="submission identity changed",
         )
-    if is_terminal_quarantine_ghost(quarantine, agent):
-        # An active row behind an already-terminal agent (ditto-subnet#2038).
-        # Only ``reject`` agrees with the terminal ruling, and it closes the
-        # quarantine without changing the agent or publishing a new record.
-        if decision.resolution != TERMINAL_RECONCILIATION_RESOLUTION:
-            return AdminQuarantineBatchPreviewItem(
-                **base,
-                disposition="conflict",
-                terminal_reconciliation=True,
-                message=(
-                    f"submission is already {agent.status.value}; only reject "
-                    "can close this orphaned quarantine"
-                ),
-            )
-        return AdminQuarantineBatchPreviewItem(
-            **base,
-            disposition="ready",
-            resulting_agent_status=agent.status,
-            terminal_reconciliation=True,
-            message=(
-                "will close the orphaned quarantine; submission stays "
-                f"{agent.status.value} under its terminal ruling"
-            ),
+    reconciled = await terminal_reconciliation_record(session, quarantine=quarantine)
+    if reconciled is not None or is_terminal_quarantine_ghost(quarantine, agent):
+        return await _preview_terminal_reconciliation(
+            session,
+            decision=decision,
+            agent=agent,
+            reconciled=reconciled,
+            base=base,
         )
     target = {
         "release": AgentStatus.EVALUATING,
@@ -1055,27 +1081,13 @@ async def _preview_batch_decision(
         previous_status=public_status(agent.status),
         resulting_status=public_status(target),
     )
-    already_recorded = (
+    if (
         quarantine.status == "resolved"
         and quarantine.resolution == decision.resolution
         and quarantine.resolution_reason == decision.reason
         and quarantine.resolved_by == actor
-    )
-    if (
-        already_recorded
-        and agent.status != target
-        and decision.resolution == TERMINAL_RECONCILIATION_RESOLUTION
-        and agent.status in TERMINAL_QUARANTINE_AGENT_STATUSES
+        and agent.status == target
     ):
-        # A replayed terminal reconciliation: the agent kept its own ruling.
-        return AdminQuarantineBatchPreviewItem(
-            **base,
-            disposition="already_applied",
-            resulting_agent_status=agent.status,
-            terminal_reconciliation=True,
-            message="this exact operator decision is already recorded",
-        )
-    if already_recorded and agent.status == target:
         return AdminQuarantineBatchPreviewItem(
             **base,
             disposition="already_applied",
@@ -1109,6 +1121,96 @@ async def _preview_batch_decision(
     )
 
 
+def _terminal_ruling_wire(
+    ruling: TerminalRuling | None,
+) -> AdminQuarantineTerminalRuling | None:
+    if ruling is None:
+        return None
+    return AdminQuarantineTerminalRuling(
+        agent_status=ruling.agent_status,
+        artifact_sha256=ruling.artifact_sha256,
+        ath_review_id=ruling.ath_review_id,
+        ath_action_id=ruling.ath_action_id,
+        ath_resolved_at=ruling.ath_resolved_at,
+    )
+
+
+async def _preview_terminal_reconciliation(
+    session: AsyncSession,
+    *,
+    decision: AdminQuarantineBatchDecision,
+    agent: Agent,
+    reconciled: ScreeningReviewEvent | None,
+    base: dict[str, object],
+) -> AdminQuarantineBatchPreviewItem:
+    """Preview a quarantine behind an already-terminal agent (ditto-subnet#2038).
+
+    Only ``reject`` agrees with a terminal ruling; it closes the quarantine
+    without changing the agent or publishing a new record. It is ready only
+    against the identified current ATH reject for this exact agent and
+    artifact, which the preview returns and its token signs. A quarantine
+    already closed behind a terminal ruling -- by the ruling itself or by any
+    operator -- replays as ``already_applied``.
+    """
+    ruling = _terminal_ruling_wire(await current_terminal_ruling(session, agent=agent))
+    status = agent.status.value
+    if reconciled is not None:
+        if decision.resolution != TERMINAL_RECONCILIATION_RESOLUTION:
+            return AdminQuarantineBatchPreviewItem(
+                **base,  # type: ignore[arg-type]
+                disposition="conflict",
+                terminal_reconciliation=True,
+                terminal_ruling=ruling,
+                message=(
+                    "quarantine was already closed behind a terminal ruling; "
+                    "no screening decision applies"
+                ),
+            )
+        return AdminQuarantineBatchPreviewItem(
+            **base,  # type: ignore[arg-type]
+            disposition="already_applied",
+            resulting_agent_status=status,
+            terminal_reconciliation=True,
+            terminal_ruling=ruling,
+            message=(
+                f"orphaned quarantine already closed by {reconciled.actor}; "
+                "terminal agent ruling unchanged"
+            ),
+        )
+    if ruling is None:
+        return AdminQuarantineBatchPreviewItem(
+            **base,  # type: ignore[arg-type]
+            disposition="conflict",
+            terminal_reconciliation=True,
+            message=(
+                f"submission is already {status}, but no current ATH reject "
+                "identifies this exact agent and artifact; not reconcilable"
+            ),
+        )
+    if decision.resolution != TERMINAL_RECONCILIATION_RESOLUTION:
+        return AdminQuarantineBatchPreviewItem(
+            **base,  # type: ignore[arg-type]
+            disposition="conflict",
+            terminal_reconciliation=True,
+            terminal_ruling=ruling,
+            message=(
+                f"submission is already {status}; only reject can close this "
+                "orphaned quarantine"
+            ),
+        )
+    return AdminQuarantineBatchPreviewItem(
+        **base,  # type: ignore[arg-type]
+        disposition="ready",
+        resulting_agent_status=status,
+        terminal_reconciliation=True,
+        terminal_ruling=ruling,
+        message=(
+            f"will close the orphaned quarantine; submission stays {status} "
+            "under its terminal ruling"
+        ),
+    )
+
+
 @router.post(
     "/screening-quarantines/batch-preview",
     response_model=AdminQuarantineBatchPreviewResponse,
@@ -1136,7 +1238,11 @@ async def preview_quarantine_batch(
     assert secret is not None
     return AdminQuarantineBatchPreviewResponse(
         preview_token=_sign_batch_preview(
-            secret, x_admin_actor, payload.decisions, issued_at
+            secret,
+            x_admin_actor,
+            payload.decisions,
+            issued_at,
+            [item.terminal_ruling for item in items],
         ),
         expires_at=datetime.fromtimestamp(issued_at, UTC) + BATCH_PREVIEW_TTL,
         items=items,
@@ -1243,26 +1349,45 @@ async def execute_quarantine_batch(
         )
     secret = request.app.state.config.admin_api_token
     assert secret is not None
+    # The token signs each item's previewed terminal ruling. Re-derive them now
+    # so a batch whose terminal state moved since the preview is refused whole.
+    previewed_rulings = [
+        (
+            await _preview_batch_decision(session, decision, x_admin_actor)
+        ).terminal_ruling
+        for decision in payload.decisions
+    ]
+    await session.rollback()
     _verify_batch_preview(
         payload.preview_token,
         secret,
         x_admin_actor,
         payload.decisions,
+        previewed_rulings,
     )
 
     results: list[AdminQuarantineBatchExecuteItem] = []
-    for decision in payload.decisions:
+    for decision, previewed_ruling in zip(
+        payload.decisions, previewed_rulings, strict=True
+    ):
         try:
             preview = await _preview_batch_decision(session, decision, x_admin_actor)
             # End the read-only implicit transaction before the per-item write
             # transaction (and before release dataset preparation).
             await session.rollback()
+            if preview.terminal_ruling != previewed_ruling:
+                raise HTTPException(
+                    status_code=409,
+                    detail="terminal ruling changed after preview; preview again",
+                )
             if preview.disposition == "already_applied":
                 results.append(
                     AdminQuarantineBatchExecuteItem(
                         quarantine_id=decision.quarantine_id,
                         status="already_applied",
                         agent_status=preview.resulting_agent_status,
+                        terminal_reconciliation=preview.terminal_reconciliation,
+                        terminal_ruling=preview.terminal_ruling,
                         message=preview.message,
                     )
                 )
@@ -1315,16 +1440,36 @@ async def execute_quarantine_batch(
                     and agent.status == AgentStatus.REJECTED
                     and decision.resolution == "release"
                 )
-                is_terminal_ghost = (
-                    decision.resolution == TERMINAL_RECONCILIATION_RESOLUTION
-                    and is_terminal_quarantine_ghost(quarantine, agent)
+                # Fence the previewed terminal state under both row locks
+                # (ditto-subnet#2038): the same classification, and for a
+                # reconciliation the same ruling on the same artifact.
+                is_terminal_ghost = is_terminal_quarantine_ghost(quarantine, agent)
+                replayed = (
+                    previewed_ruling is not None
+                    and not is_terminal_ghost
+                    and await terminal_reconciliation_record(
+                        session, quarantine=quarantine
+                    )
+                    is not None
                 )
-                if not is_initial and not is_correction and not is_terminal_ghost:
+                locked_ruling = (
+                    await current_terminal_ruling(session, agent=agent)
+                    if is_terminal_ghost or replayed
+                    else None
+                )
+                if _terminal_ruling_wire(locked_ruling) != previewed_ruling:
                     raise HTTPException(
                         status_code=409,
-                        detail="quarantine changed after preview",
+                        detail="terminal ruling changed after preview",
                     )
-                if is_terminal_ghost:
+                if replayed:
+                    # A concurrent execution closed it behind this same ruling.
+                    target = agent.status
+                elif (
+                    is_terminal_ghost
+                    and locked_ruling is not None
+                    and decision.resolution == TERMINAL_RECONCILIATION_RESOLUTION
+                ):
                     await reconcile_terminal_quarantine(
                         session,
                         agent=agent,
@@ -1333,11 +1478,14 @@ async def execute_quarantine_batch(
                         reason=decision.reason,
                         now=datetime.now(UTC),
                         source="operator_reconciliation",
-                        ath_review=await terminal_ath_ruling(
-                            session, agent_id=agent.agent_id
-                        ),
+                        ruling=locked_ruling,
                     )
                     target = agent.status
+                elif not is_initial and not is_correction:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="quarantine changed after preview",
+                    )
                 else:
                     target = await _apply_batch_resolution(
                         session,
@@ -1350,14 +1498,20 @@ async def execute_quarantine_batch(
             results.append(
                 AdminQuarantineBatchExecuteItem(
                     quarantine_id=decision.quarantine_id,
-                    status="applied",
+                    status="already_applied" if replayed else "applied",
                     agent_status=target,
-                    terminal_reconciliation=is_terminal_ghost,
+                    terminal_reconciliation=previewed_ruling is not None,
+                    terminal_ruling=previewed_ruling,
                     message=(
+                        "orphaned quarantine was already closed behind this "
+                        "terminal ruling"
+                    )
+                    if replayed
+                    else (
                         "orphaned quarantine closed and audit event recorded; "
                         "terminal agent ruling unchanged"
                     )
-                    if is_terminal_ghost
+                    if previewed_ruling is not None
                     else "decision applied and audit event recorded",
                 )
             )

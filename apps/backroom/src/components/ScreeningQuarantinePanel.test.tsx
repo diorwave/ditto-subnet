@@ -518,6 +518,7 @@ describe('ScreeningQuarantinePanel', () => {
         public_reason_code: 'operator_rescreen',
         public_record_hash: 'ab'.repeat(32),
         terminal_reconciliation: false,
+        terminal_ruling: null,
         message: 'will set submission status to screening_failed',
       })),
     })
@@ -527,6 +528,7 @@ describe('ScreeningQuarantinePanel', () => {
         status: 'applied' as const,
         agent_status: 'screening_failed',
         terminal_reconciliation: false,
+        terminal_ruling: null,
         message: 'decision applied and audit event recorded',
       })),
       applied_count: 2,

@@ -5482,6 +5482,16 @@ export const screeningQuarantineBatchPreviewInputSchema = z
     }
   })
 
+// The exact ruling holding a quarantine's agent terminal (ditto-subnet#2038).
+// The preview token signs it and execution re-derives it under lock.
+export const screeningQuarantineTerminalRulingSchema = z.object({
+  agent_status: z.string(),
+  artifact_sha256: z.string(),
+  ath_review_id: z.string().uuid().nullable().default(null),
+  ath_action_id: z.string().uuid().nullable().default(null),
+  ath_resolved_at: z.string().nullable().default(null),
+})
+
 export const screeningQuarantineBatchPreviewItemSchema = z.object({
   quarantine_id: z.string().uuid(),
   agent_id: z.string().uuid().nullable().default(null),
@@ -5496,6 +5506,7 @@ export const screeningQuarantineBatchPreviewItemSchema = z.object({
   // A reject that closes an orphaned quarantine behind an already-terminal
   // agent without changing that agent's ruling (ditto-subnet#2038).
   terminal_reconciliation: z.boolean().nullish().default(false),
+  terminal_ruling: screeningQuarantineTerminalRulingSchema.nullish().default(null),
   message: z.string(),
 })
 
@@ -5521,6 +5532,7 @@ export const screeningQuarantineBatchExecuteItemSchema = z.object({
   status: z.enum(['applied', 'already_applied', 'failed']),
   agent_status: z.string().nullable().default(null),
   terminal_reconciliation: z.boolean().nullish().default(false),
+  terminal_ruling: screeningQuarantineTerminalRulingSchema.nullish().default(null),
   message: z.string(),
 })
 

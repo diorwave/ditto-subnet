@@ -87,6 +87,7 @@ from ditto.db.queries.scores import (
     list_scores_for_agent,
 )
 from ditto.db.queries.terminal_quarantine_reconciliation import (
+    TerminalRuling,
     close_quarantines_for_terminal_ruling,
     lock_active_quarantines,
 )
@@ -1136,13 +1137,22 @@ async def resolve_copy_review(
         review.resolved_by = actor
         review.resolution = canonical
         review.resolution_reason = payload.reason
+        action_id = uuid4()
         if canonical == "reject":
             # A terminal ruling must not leave an actionable-looking screening
             # quarantine behind: no guarded resolver could close it afterwards.
+            # The closure cites this exact review and the reject action below.
             reconciled_quarantine_ids = await close_quarantines_for_terminal_ruling(
                 session,
                 agent=agent,
-                ath_review=review,
+                ruling=TerminalRuling(
+                    agent_status=agent.status.value,
+                    artifact_sha256=agent.sha256,
+                    ath_review_id=review.review_id,
+                    ath_action_id=action_id,
+                    ath_resolved_at=now,
+                ),
+                source="ath_ruling",
                 actor=actor,
                 reason=f"Closed by terminal ATH ruling: {payload.reason}",
                 now=now,
@@ -1154,7 +1164,7 @@ async def resolve_copy_review(
             ]
         session.add(
             AthReviewAction(
-                action_id=uuid4(),
+                action_id=action_id,
                 review_id=review.review_id,
                 action=canonical,
                 reason=payload.reason,
