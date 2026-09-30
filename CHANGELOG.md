@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.333.1 (2026-09-30)
+
+### Bug Fixes
+
+- **screener**: Require successful source reads for safe coverage
+  ([#2605](https://github.com/ditto-assistant/ditto-subnet/pull/2605),
+  [`2f4e489`](https://github.com/ditto-assistant/ditto-subnet/commit/2f4e489e936b2138fa3c44a4ac3b24d61f05f6f7))
+
+
+## v0.333.0 (2026-09-30)
+
+### Features
+
+- **treasury**: Add service wallet controls and Gamma beta transparency
+  ([#2602](https://github.com/ditto-assistant/ditto-subnet/pull/2602),
+  [`00f8c81`](https://github.com/ditto-assistant/ditto-subnet/commit/00f8c81d653ec3b893ad3ab40ad0739069d8ce38))
+
+
 ## v0.332.3 (2026-09-30)
 
 ### Bug Fixes
