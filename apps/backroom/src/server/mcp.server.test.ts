@@ -5479,6 +5479,57 @@ describe('Backroom MCP tools', () => {
       await server.close()
     })
 
+    it('refuses a whitespace-only reason locally instead of reporting a conflict', async () => {
+      process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+      const fetchMock = vi.fn()
+      vi.stubGlobal('fetch', fetchMock)
+      const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+
+      const response = await client.callTool({
+        name: 'set_scoring_lease_settings',
+        arguments: {
+          expectedRevision: 0,
+          settings: { scoring_ticket_ttl_minutes: 150 },
+          reason: '            ',
+          confirmation: 'APPLY SCORING TICKET TTL 150 MINUTES',
+        },
+      })
+
+      expect(response.isError).toBe(true)
+      expect(JSON.stringify(response.content)).not.toContain('get_scoring_lease_settings')
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      await client.close()
+      await server.close()
+    })
+
+    it('keeps confirmation-specific recovery for a Platform confirmation refusal', async () => {
+      process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+      const detail = 'confirmation must be exactly APPLY SCORING TICKET TTL 150 MINUTES'
+      const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ detail }, { status: 409 }))
+      vi.stubGlobal('fetch', fetchMock)
+      const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+
+      const response = await client.callTool({
+        name: 'set_scoring_lease_settings',
+        arguments: {
+          expectedRevision: 0,
+          settings: { scoring_ticket_ttl_minutes: 150 },
+          reason: 'v11 completions fit well inside 150 minutes',
+          confirmation: 'APPLY SCORING TICKET TTL 150 MINUTES',
+        },
+      })
+
+      expect(response.isError).toBe(true)
+      const message = readTextResult(response)
+      expect(message).toContain(detail)
+      expect(message).toContain('confirmation must name the TTL this revision applies')
+      expect(message).not.toContain('re-read get_scoring_lease_settings')
+
+      await client.close()
+      await server.close()
+    })
+
     it('does not change the scoring TTL without the write scope', async () => {
       const fetchMock = vi.fn()
       vi.stubGlobal('fetch', fetchMock)

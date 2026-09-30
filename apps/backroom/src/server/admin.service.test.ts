@@ -62,6 +62,7 @@ import {
   fetchValidatorSlotSettings,
   setValidatorSlotSettings,
   setValidatorIssuancePause,
+  setScoringLeaseSettings,
   fetchValidatorFleet,
   fetchValidatorFleetObservability,
   fetchAgentScores,
@@ -4985,6 +4986,104 @@ describe('validator slot administration', () => {
       ),
     ).rejects.toThrow(/expected 1, current 2/)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('scoring lease administration (#1156)', () => {
+  const input = {
+    expectedRevision: 0,
+    settings: { scoring_ticket_ttl_minutes: 150 },
+    reason: 'v11 completions fit well inside 150 minutes',
+    confirmation: 'APPLY SCORING TICKET TTL 150 MINUTES',
+  }
+
+  const refusal = async (status: number, detail: string) => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({ detail }, { status }))
+    vi.stubGlobal('fetch', fetchMock)
+    const error = await setScoringLeaseSettings(input, 'operator@omniaura.ai').catch(
+      (cause: unknown) => cause as Error,
+    )
+    // No re-read after a refusal, so a fresh GET is never mistaken for an apply.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    return (error as Error).message
+  }
+
+  it('reserves the re-read advice for a stale or concurrent revision', async () => {
+    const detail =
+      'scoring lease settings changed; refresh before applying (expected 0, current 2)'
+    const message = await refusal(409, detail)
+    expect(message).toContain(detail)
+    expect(message).toContain('re-read get_scoring_lease_settings')
+  })
+
+  it('gives a confirmation refusal confirmation-specific recovery', async () => {
+    const detail = 'confirmation must be exactly APPLY SCORING TICKET TTL 150 MINUTES'
+    const message = await refusal(409, detail)
+    expect(message).toContain(detail)
+    expect(message).toMatch(/confirmation must name the TTL this revision applies/)
+    expect(message).not.toContain('re-read get_scoring_lease_settings')
+  })
+
+  it('gives an input validation refusal input-specific recovery', async () => {
+    for (const detail of [
+      'reason must be at least 8 characters after trimming whitespace',
+      'request validation failed',
+    ]) {
+      const message = await refusal(422, detail)
+      expect(message).toContain(detail)
+      expect(message).toMatch(/revision did not change/)
+      expect(message).not.toContain('re-read get_scoring_lease_settings')
+    }
+  })
+
+  it('refuses whitespace-only audit input before any admin call', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    for (const overrides of [
+      { reason: '            ' },
+      { reason: '   short   ' },
+      { confirmation: '   ' },
+    ]) {
+      await expect(
+        setScoringLeaseSettings({ ...input, ...overrides }, 'operator@omniaura.ai'),
+      ).rejects.toThrow()
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends a trimmed reason', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ revision: 1 }))
+      .mockResolvedValueOnce(
+        Response.json({
+          current: [],
+          history: [],
+          default: { scoring_ticket_ttl_minutes: 180 },
+          effective: {
+            revision: 1,
+            scope: '*',
+            settings: { scoring_ticket_ttl_minutes: 150 },
+            checksum: 'cd'.repeat(32),
+            source: 'revision',
+            min_scoring_ticket_ttl_minutes: 60,
+            max_scoring_ticket_ttl_minutes: 240,
+            max_age_seconds: 5,
+          },
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await setScoringLeaseSettings(
+      { ...input, reason: `   ${input.reason}   ` },
+      'operator@omniaura.ai',
+    )
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body)).reason).toBe(input.reason)
   })
 })
 
