@@ -22523,44 +22523,8 @@ export interface components {
             /** X Url */
             x_url?: string | null;
         };
-        /**
-         * MinerScreeningAdjudication
-         * @description The automated court's digest-verified decision on one attempt.
-         *
-         *     ``escalate`` means the court refused to decide and an operator reviews the
-         *     hold; ``refusal`` names why. The court's model, prompt revision, run
-         *     diagnostics, and completion telemetry are operator-only and never carried.
-         */
-        MinerScreeningAdjudication: {
-            /** Citations */
-            citations?: components["schemas"]["MinerScreeningCitation"][];
-            /** Clear Clause */
-            clear_clause?: string | null;
-            /**
-             * Decision
-             * @enum {string}
-             */
-            decision: "clear" | "reject" | "escalate";
-            /** Reason */
-            reason: string;
-            /** Refusal */
-            refusal?: ("adjudicator-unavailable" | "adjudicator-no-evidence" | "adjudicator-evidence-incomplete" | "adjudicator-packet-too-large" | "adjudicator-failed" | "adjudicator-operator-requested" | "uncited-decision" | "cited-unknown-member" | "cited-unread-source" | "inadmissible-citations" | "verdict-contract-failed") | null;
-            /** Reject Invariant */
-            reject_invariant?: string | null;
-        };
-        /**
-         * MinerScreeningCitation
-         * @description One ``path:line`` in the miner's own archive the court relied on.
-         */
-        MinerScreeningCitation: {
-            /** Line */
-            line: number;
-            /** Path */
-            path: string;
-        };
         /** MinerScreeningFailure */
         MinerScreeningFailure: {
-            adjudication?: components["schemas"]["MinerScreeningAdjudication"] | null;
             /**
              * Attempt Id
              * Format: uuid
@@ -22584,8 +22548,7 @@ export interface components {
             public_reason?: string | null;
             /** Reason Code */
             reason_code?: string | null;
-            /** Review Notes */
-            review_notes?: components["schemas"]["MinerScreeningReviewNote"][];
+            review_outcome?: components["schemas"]["MinerScreeningReviewOutcome"] | null;
             /**
              * Started At
              * Format: date-time
@@ -22609,27 +22572,25 @@ export interface components {
             miner_hotkey: string;
         };
         /**
-         * MinerScreeningReviewNote
-         * @description One entry of the owner's digest-verified source-review notes ledger.
+         * MinerScreeningReviewOutcome
+         * @description Bounded source-review outcome for the submitter of one attempt.
          *
-         *     Summaries are reviewer-authored and never contain source text, prompts,
-         *     or challenge values. ``path``/``line`` name a location in the miner's own
-         *     archive. Reviewer confidence and stage are not carried.
+         *     Deliberately two closed enums and nothing else. The notes ledger, cited
+         *     ``path:line`` locations, breached invariant, published clear clause, court
+         *     reason text, and refusal code stay operator-side: together they describe
+         *     what the screener inspects, so they are not part of the miner contract.
          */
-        MinerScreeningReviewNote: {
-            /** Category */
-            category: string;
+        MinerScreeningReviewOutcome: {
             /**
-             * Kind
+             * Next Step
              * @enum {string}
              */
-            kind: "concern" | "cleared" | "observation";
-            /** Line */
-            line?: number | null;
-            /** Path */
-            path?: string | null;
-            /** Summary */
-            summary: string;
+            next_step: "none" | "await_operator_review" | "resubmit_after_fix" | "contact_operators";
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "cleared" | "rejected" | "held_for_operator_review";
         };
         /** MinerSessionView */
         MinerSessionView: {
