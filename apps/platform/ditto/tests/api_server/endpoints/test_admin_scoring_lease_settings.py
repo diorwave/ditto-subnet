@@ -115,9 +115,12 @@ class TestRead:
         body = response.json()
         assert body["effective"]["settings"] == {"scoring_ticket_ttl_minutes": 180}
         assert body["effective"]["revision"] == 2
+        assert body["effective"]["source"] == "default"
+        assert body["effective"]["settings_valid"] is False
         assert [row["revision"] for row in body["history"]] == [2, 1]
         for row in body["current"] + body["history"]:
             assert row["settings"] == {"scoring_ticket_ttl_minutes": 180}
+            assert row["settings_valid"] is False
             assert row["checksum"] == checksums[row["revision"]]
             assert row["actor"] == "backroom:test"
 
@@ -141,6 +144,7 @@ class TestRead:
         assert body["default"] == {"scoring_ticket_ttl_minutes": 180}
         effective = body["effective"]
         assert effective["source"] == "default"
+        assert effective["settings_valid"] is True
         assert effective["revision"] == 0
         assert effective["checksum"] == ""
         assert effective["settings"] == {"scoring_ticket_ttl_minutes": 180}
@@ -172,11 +176,13 @@ class TestWrite:
 
         body = (await client.get(_URL, headers=_HEADERS)).json()
         assert body["effective"]["source"] == "revision"
+        assert body["effective"]["settings_valid"] is True
         assert body["effective"]["revision"] == 2
         assert body["effective"]["settings"] == {"scoring_ticket_ttl_minutes": 200}
         assert len(body["effective"]["checksum"]) == 64
         assert [row["revision"] for row in body["history"]] == [2, 1]
         assert body["history"][1]["actor"] == "backroom:test"
+        assert all(row["settings_valid"] for row in body["history"])
         assert body["history"][1]["reason"].startswith("v11 completions")
 
     async def test_extra_json_is_ignored(

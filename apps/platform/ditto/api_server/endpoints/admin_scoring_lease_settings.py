@@ -16,6 +16,7 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,11 +59,18 @@ def _checksum(settings: ScoringLeaseSettings) -> str:
 
 
 def _revision(row: RevisionRow) -> ScoringLeaseSettingsRevision:
+    try:
+        settings = ScoringLeaseSettings.model_validate(row.settings)
+        settings_valid = True
+    except ValidationError:
+        settings = settings_from_row(row)
+        settings_valid = False
     return ScoringLeaseSettingsRevision(
         revision=row.revision,
         parent_revision=row.parent_revision,
         scope=row.scope,
-        settings=settings_from_row(row),
+        settings=settings,
+        settings_valid=settings_valid,
         reason=row.reason,
         actor=row.actor,
         created_at=row.created_at,
@@ -78,12 +86,16 @@ def _effective(
     latest: RevisionRow | None, *, request: Request
 ) -> EffectiveScoringLeaseSettings:
     resolver = _resolver(request)
+    revision = _revision(latest) if latest is not None else None
     return EffectiveScoringLeaseSettings(
         revision=latest.revision if latest is not None else 0,
         scope=latest.scope if latest is not None else GLOBAL_SCOPE,
-        settings=settings_from_row(latest),
+        settings=revision.settings if revision is not None else DEFAULT_SETTINGS,
         checksum=latest.checksum if latest is not None else "",
-        source="revision" if latest is not None else "default",
+        source="revision"
+        if revision is not None and revision.settings_valid
+        else "default",
+        settings_valid=revision.settings_valid if revision is not None else True,
         max_age_seconds=(
             resolver.ttl_seconds
             if resolver is not None

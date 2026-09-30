@@ -19703,6 +19703,11 @@ export interface components {
             scope: string;
             settings: components["schemas"]["ScoringLeaseSettings"];
             /**
+             * Settings Valid
+             * @default true
+             */
+            settings_valid: boolean;
+            /**
              * Source
              * @enum {string}
              */
@@ -29772,6 +29777,11 @@ export interface components {
             /** Scope */
             scope: string;
             settings: components["schemas"]["ScoringLeaseSettings"];
+            /**
+             * Settings Valid
+             * @default true
+             */
+            settings_valid: boolean;
         };
         /**
          * ScreenEvidenceItem

@@ -2,16 +2,15 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  scoringLeaseConfirmation,
-  type ScoringLeaseSettingsControl,
-} from '../lib/admin.schemas'
+import { scoringLeaseConfirmation, type ScoringLeaseSettingsControl } from '../lib/admin.schemas'
 import { ScoringLeaseControlPanel } from './ScoringLeaseControlPanel'
 
 const getScoringLeaseSettings = vi.fn()
 const updateScoringLeaseSettings = vi.fn()
 
-vi.mock('@tanstack/react-start', () => ({ useServerFn: (value: unknown) => value }))
+vi.mock('@tanstack/react-start', () => ({
+  useServerFn: (value: unknown) => value,
+}))
 vi.mock('../server/admin.functions', () => ({
   getScoringLeaseSettings: () => getScoringLeaseSettings(),
   updateScoringLeaseSettings: (input: unknown) => updateScoringLeaseSettings(input),
@@ -45,6 +44,57 @@ describe('ScoringLeaseControlPanel', () => {
         revision: 1,
         source: 'revision',
         settings: { scoring_ticket_ttl_minutes: 150 },
+      },
+    })
+  })
+
+  it('labels invalid history and allows a confirmed default repair with the stored CAS revision', async () => {
+    const row = {
+      revision: 2,
+      parent_revision: 1,
+      scope: '*',
+      settings: { scoring_ticket_ttl_minutes: 180 },
+      settings_valid: false,
+      reason: 'Original audited reason',
+      actor: 'original:actor',
+      created_at: '2026-09-30T12:00:00Z',
+      checksum: 'a'.repeat(64),
+    }
+    render(
+      <ScoringLeaseControlPanel
+        initialState={{
+          ...initial,
+          current: [row],
+          history: [row],
+          effective: {
+            ...initial.effective,
+            revision: 2,
+            settings_valid: false,
+          },
+        }}
+        readOnly={false}
+      />,
+    )
+    expect(screen.getByRole('alert').textContent).toContain('Stored revision r2 is invalid')
+    expect(screen.getByText('Invalid stored policy; default fallback shown')).toBeTruthy()
+    expect(screen.queryByText('Operator revision')).toBeNull()
+    const action = screen.getByRole('button', { name: 'Apply scoring TTL' })
+    expect((action as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Lease change reason'), {
+      target: { value: 'Repair invalid stored policy' },
+    })
+    fireEvent.change(screen.getByLabelText(new RegExp(scoringLeaseConfirmation(180))), {
+      target: { value: scoringLeaseConfirmation(180) },
+    })
+    fireEvent.click(action)
+    await waitFor(() => expect(updateScoringLeaseSettings).toHaveBeenCalledTimes(1))
+    expect(updateScoringLeaseSettings).toHaveBeenCalledWith({
+      data: {
+        scope: '*',
+        expectedRevision: 2,
+        settings: { scoring_ticket_ttl_minutes: 180 },
+        reason: 'Repair invalid stored policy',
+        confirmation: scoringLeaseConfirmation(180),
       },
     })
   })
@@ -91,7 +141,11 @@ describe('ScoringLeaseControlPanel', () => {
     })
     expect(screen.getByText('Enter a whole number from 60 through 240.')).toBeTruthy()
     expect(
-      (screen.getByRole('button', { name: 'Apply scoring TTL' }) as HTMLButtonElement).disabled,
+      (
+        screen.getByRole('button', {
+          name: 'Apply scoring TTL',
+        }) as HTMLButtonElement
+      ).disabled,
     ).toBe(true)
   })
 
@@ -109,7 +163,11 @@ describe('ScoringLeaseControlPanel', () => {
       target: { value: expected },
     })
     expect(
-      (screen.getByRole('button', { name: 'Apply scoring TTL' }) as HTMLButtonElement).disabled,
+      (
+        screen.getByRole('button', {
+          name: 'Apply scoring TTL',
+        }) as HTMLButtonElement
+      ).disabled,
     ).toBe(true)
   })
 
@@ -146,7 +204,11 @@ describe('ScoringLeaseControlPanel', () => {
       true,
     )
     expect(
-      (screen.getByRole('button', { name: 'Apply scoring TTL' }) as HTMLButtonElement).disabled,
+      (
+        screen.getByRole('button', {
+          name: 'Apply scoring TTL',
+        }) as HTMLButtonElement
+      ).disabled,
     ).toBe(true)
   })
 })

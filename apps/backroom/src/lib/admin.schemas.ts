@@ -4225,6 +4225,7 @@ export const scoringLeaseSettingsRevisionSchema = z.object({
   parent_revision: z.number().int().nonnegative(),
   scope: z.string(),
   settings: scoringLeaseSettingsSchema,
+  settings_valid: z.boolean().optional(),
   reason: z.string(),
   actor: z.string(),
   created_at: z.string(),
@@ -4239,6 +4240,7 @@ export const scoringLeaseSettingsControlSchema = z.object({
     revision: z.number().int().nonnegative(),
     scope: z.string(),
     settings: scoringLeaseSettingsSchema,
+    settings_valid: z.boolean().optional(),
     // Revision 0 is the shipped default and carries no checksum.
     checksum: z.string().regex(/^(?:[0-9a-f]{64})?$/),
     source: z.enum(['revision', 'default']),

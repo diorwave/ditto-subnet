@@ -103,6 +103,11 @@ class ScoringLeaseSettingsRevision(BaseModel):
     actor: str
     created_at: datetime
     checksum: str
+    settings_valid: bool = True
+    """False means settings shows the default fallback, not the stored policy.
+
+    The checksum and audit fields still identify the original stored revision.
+    """
 
 
 class EffectiveScoringLeaseSettings(BaseModel):
@@ -115,6 +120,7 @@ class EffectiveScoringLeaseSettings(BaseModel):
     settings: ScoringLeaseSettings
     checksum: str
     source: Literal["revision", "default"]
+    settings_valid: bool = True
     min_scoring_ticket_ttl_minutes: int = MIN_SCORING_TICKET_TTL_MINUTES
     max_scoring_ticket_ttl_minutes: int = MAX_SCORING_TICKET_TTL_MINUTES
     max_age_seconds: float

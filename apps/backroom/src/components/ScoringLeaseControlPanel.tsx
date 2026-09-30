@@ -6,10 +6,7 @@ import {
   scoringLeaseConfirmation,
   type ScoringLeaseSettingsControl,
 } from '../lib/admin.schemas'
-import {
-  getScoringLeaseSettings,
-  updateScoringLeaseSettings,
-} from '../server/admin.functions'
+import { getScoringLeaseSettings, updateScoringLeaseSettings } from '../server/admin.functions'
 
 function formatWhen(value: string | undefined) {
   if (!value) return 'Shipped default'
@@ -42,10 +39,11 @@ export function ScoringLeaseControlPanel({
   const parsed = Number(minutes)
   const selected = Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : null
   const invalid = minutes.trim() !== '' && selected === null
+  const needsRevision = selected !== current || state.effective.settings_valid === false
   const expectedConfirmation = selected === null ? '' : scoringLeaseConfirmation(selected)
   const ready =
     selected !== null &&
-    selected !== current &&
+    needsRevision &&
     reason.trim().length >= 8 &&
     confirmation === expectedConfirmation
 
@@ -141,11 +139,22 @@ export function ScoringLeaseControlPanel({
             </div>
             <div>
               <dt className="text-[var(--muted)]">Applied</dt>
-              <dd className="mt-1 font-medium">{formatWhen(state.current[0]?.created_at)}</dd>
+              <dd className="mt-1 font-medium">
+                {state.effective.settings_valid === false
+                  ? 'Not applied (invalid revision)'
+                  : formatWhen(state.current[0]?.created_at)}
+              </dd>
             </div>
           </dl>
         </div>
 
+        {state.effective.settings_valid === false ? (
+          <p role="alert" className="mt-4 text-xs text-[var(--amber)]">
+            Stored revision r{state.effective.revision} is invalid. New leases use the shipped
+            180-minute default. Its audit fields and checksum describe the original stored record,
+            not this fallback. Apply a new valid revision to repair the policy.
+          </p>
+        ) : null}
         <div className="mt-5 rounded-lg border border-[var(--amber)]/25 bg-[var(--amber-dim)] px-4 py-3 text-xs leading-5 text-[var(--amber)]">
           <div className="flex items-start gap-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -196,7 +205,7 @@ export function ScoringLeaseControlPanel({
           </label>
         </div>
 
-        {selected !== null && selected !== current ? (
+        {selected !== null && needsRevision ? (
           <label className="mt-4 block text-xs font-medium text-[var(--muted-strong)]">
             Type to confirm
             <code className="ml-2 break-all text-[11px] text-[var(--cyan)]">
@@ -236,7 +245,11 @@ export function ScoringLeaseControlPanel({
             {state.history.slice(0, 5).map((row) => (
               <li key={row.revision} className="flex flex-wrap gap-x-3 gap-y-1">
                 <span className="font-medium">r{row.revision}</span>
-                <span>{row.settings.scoring_ticket_ttl_minutes} minutes</span>
+                <span>
+                  {row.settings_valid === false
+                    ? 'Invalid stored policy; default fallback shown'
+                    : `${row.settings.scoring_ticket_ttl_minutes} minutes`}
+                </span>
                 <span className="text-[var(--muted)]">{row.actor}</span>
                 <span className="text-[var(--muted)]">{formatWhen(row.created_at)}</span>
                 <span className="basis-full text-[var(--muted)]">{row.reason}</span>
