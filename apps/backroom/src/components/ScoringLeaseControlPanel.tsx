@@ -151,8 +151,9 @@ export function ScoringLeaseControlPanel({
         {state.effective.settings_valid === false ? (
           <p role="alert" className="mt-4 text-xs text-[var(--amber)]">
             Stored revision r{state.effective.revision} is invalid. New leases use the shipped
-            180-minute default. Its audit fields and checksum describe the original stored record,
-            not this fallback. Apply a new valid revision to repair the policy.
+            {state.default.scoring_ticket_ttl_minutes}-minute default. Its audit fields and checksum
+            describe the original stored record, not this fallback. Apply a new valid revision to
+            repair the policy.
           </p>
         ) : null}
         <div className="mt-5 rounded-lg border border-[var(--amber)]/25 bg-[var(--amber-dim)] px-4 py-3 text-xs leading-5 text-[var(--amber)]">

@@ -99,6 +99,26 @@ describe('ScoringLeaseControlPanel', () => {
     })
   })
 
+  it('uses the platform-provided default in the invalid-policy warning', () => {
+    render(
+      <ScoringLeaseControlPanel
+        initialState={{
+          ...initial,
+          default: { scoring_ticket_ttl_minutes: 220 },
+          effective: {
+            ...initial.effective,
+            revision: 2,
+            settings_valid: false,
+            settings: { scoring_ticket_ttl_minutes: 220 },
+          },
+        }}
+        readOnly
+      />,
+    )
+    expect(screen.getByRole('alert').textContent).toContain('220-minute default')
+    expect(screen.getByRole('alert').textContent).not.toContain('180-minute')
+  })
+
   it('shows the shipped default and requires reason plus exact confirmation', async () => {
     render(<ScoringLeaseControlPanel initialState={initial} readOnly={false} />)
 
