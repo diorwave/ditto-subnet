@@ -17,6 +17,8 @@ validator-gated ``/scoring/scores`` reads:
   public on-chain identity) and the raw ``seed`` so anyone can reproduce and audit
   a score; because the platform draws the seed after screening, publishing it
   post-hoc never lets a miner pre-overfit. It still omits the per-case answer key.
+  Continual retest seeds are reused across a cohort and are never published;
+  only their score aggregates are public.
   See ``docs/public-telemetry.md``.
 
 Responses are cacheable (``max-age=30``) so a CDN / the dashboard can front this
@@ -224,6 +226,7 @@ from ditto.api_server.benchmark_rollout import rolling_qualification_blockers
 from ditto.api_server.continual_retest_settings import (
     aggregate_is_active,
     crown_incumbent_is_active,
+    statistical_band_cap_is_active,
     tie_weighting_is_active,
 )
 from ditto.api_server.datapipeline import DataPipelineError
@@ -232,6 +235,7 @@ from ditto.api_server.deferred_source_review import (
     deep_review_attempt_id,
     public_deferred_review_triggers,
     public_review_conclusion,
+    public_review_reason,
     verified_review_notes,
 )
 from ditto.api_server.efficiency import (
@@ -576,6 +580,7 @@ _TIE_WEIGHTING_PROTOCOL = 20
 # Protocol 24 caps the KOTH dethrone band at a share of the score a challenger
 # can still gain, so a saturated benchmark cannot freeze the crown.
 _DETHRONE_BAND_CLAMP_PROTOCOL = 24
+_STATISTICAL_BAND_CAP_PROTOCOL = 29
 # Grace after a lease is issued before the validator is expected to report (in a
 # heartbeat) that it has picked the agent up. Within this window an assigned-but-
 # not-yet-reported validator reads as "assigning" rather than a mismatch, so the
@@ -2848,6 +2853,7 @@ def _public_koth_emissions(
     efficiency_curve_versions: dict[UUID, int] | None = None,
     tie_weighting_active: bool = False,
     ceiling_band_clamp: bool = False,
+    statistical_band_cap: bool = False,
     ledger_pin: PublicLedgerPin | None = None,
     crown_incumbent_active: bool = False,
     reward_eligibility: dict | None = None,
@@ -2955,6 +2961,7 @@ def _public_koth_emissions(
         fold_entries,
         distinct_hotkeys=tie_weighting_active,
         ceiling_band_clamp=ceiling_band_clamp,
+        statistical_band_cap=statistical_band_cap,
         incumbent_agent_id=incumbent_id,
     )
     if projection is None:
@@ -2964,6 +2971,7 @@ def _public_koth_emissions(
         projection,
         tie_pooling=tie_weighting_active,
         ceiling_band_clamp=ceiling_band_clamp,
+        statistical_band_cap=statistical_band_cap,
     )
     share_total = sum(allocation.shares)
     normalized_shares = tuple(share / share_total for share in allocation.shares)
@@ -2999,7 +3007,10 @@ def _public_koth_emissions(
     ) and (champion_record is None or champion_record.reward_eligible)
     decision = projection.raw_leader_decision
     defense = champion_defense(
-        fold_entries, projection, ceiling_band_clamp=ceiling_band_clamp
+        fold_entries,
+        projection,
+        ceiling_band_clamp=ceiling_band_clamp,
+        statistical_band_cap=statistical_band_cap,
     )
     return PublicKothEmissions(
         margin=KOTH_MARGIN,
@@ -3445,6 +3456,18 @@ async def build_public_leaderboard(
             bench_version=active_version,
             now=now,
             freshness=_VALIDATOR_STALE_WINDOW,
+        )
+    )
+    statistical_band_cap_active = (
+        bench_version is None
+        and statistical_band_cap_is_active(
+            continual_settings,
+            fleet_protocol_ready=await live_weight_setter_fleet_supports_protocol(
+                session,
+                minimum_protocol=_STATISTICAL_BAND_CAP_PROTOCOL,
+                now=now,
+                freshness=_VALIDATOR_STALE_WINDOW,
+            ),
         )
     )
     crown_incumbent_fleet_ready = await live_validator_fleet_supports_protocol(
@@ -4199,6 +4222,7 @@ async def build_public_leaderboard(
                 efficiency_curve_versions=board_curve_versions,
                 tie_weighting_active=tie_weighting_active,
                 ceiling_band_clamp=ceiling_band_clamp_active,
+                statistical_band_cap=statistical_band_cap_active,
                 ledger_pin=ledger_pin,
                 crown_incumbent_active=crown_incumbent_active,
                 reward_eligibility=projected_reward_eligibility,
@@ -4332,6 +4356,7 @@ async def ledger_epochs(
             fold_entries,
             distinct_hotkeys=served.get("tie_weighting_mode") == "pool",
             ceiling_band_clamp=served.get("dethrone_band_mode") == "headroom_capped",
+            statistical_band_cap=served.get("statistical_band_mode") == "capped",
             incumbent_agent_id=(
                 row.incumbent_agent_id
                 if served.get("crown_mode") == "incumbent"
@@ -4345,6 +4370,7 @@ async def ledger_epochs(
                 tie_pooling=served.get("tie_weighting_mode") == "pool",
                 ceiling_band_clamp=served.get("dethrone_band_mode")
                 == "headroom_capped",
+                statistical_band_cap=served.get("statistical_band_mode") == "capped",
             )
             if projection is not None
             else None
@@ -6147,7 +6173,7 @@ def _public_activity_response(
                 review_reason=(
                     (ath_reviews or {})[row.agent.agent_id].reason
                     if row.agent.agent_id in (ath_reviews or {})
-                    else row.agent.review_reason
+                    else public_review_reason(row.agent.review_reason)
                 ),
                 review_event=(
                     (ath_reviews or {})[row.agent.agent_id].event
@@ -6616,10 +6642,12 @@ async def _ath_review_public_snapshot(
         )
         snapshots[review.agent_id] = _PublicAthReviewSnapshot(
             event=lifecycle.event,
-            reason=lifecycle.reason,
+            reason=public_review_reason(lifecycle.reason),
             event_at=lifecycle.event_at,
             opened_at=lifecycle.opened_at,
-            original_reason=review.original_reason or DEFAULT_OPEN_REASON,
+            original_reason=public_review_reason(
+                review.original_reason or DEFAULT_OPEN_REASON
+            ),
             original_duplicate_of=review.original_duplicate_of,
             deferred_evidence=(
                 review.original_evidence
@@ -7486,7 +7514,11 @@ async def agent_summary(
         duplicate_name=_public_duplicate_name(duplicate, handle_claims, strike=True),
         duplicate_version=duplicate.version if duplicate is not None else None,
         duplicate_hotkey=duplicate.miner_hotkey if duplicate is not None else None,
-        review_reason=review.reason if review is not None else row.agent.review_reason,
+        review_reason=(
+            review.reason
+            if review is not None
+            else public_review_reason(row.agent.review_reason)
+        ),
         review_event=review.event if review is not None else None,
         review_event_at=review.event_at if review is not None else None,
         review_original_reason=(
@@ -7532,6 +7564,7 @@ _ADMISSION_LANE_BY_REASON_CODE: dict[str, PublicAdmissionLane] = {
     "targon-source-review-unavailable": "source_review",
     **dict.fromkeys(_SOURCE_REVIEW_MODEL_TIMEOUT_REASON_CODES, "source_review"),
     "l2-runtime-evidence-unavailable": "source_review",
+    "source-review-adjudicator-key-unavailable": "source_review",
 }
 
 
@@ -7939,6 +7972,17 @@ async def agent_pipeline(
             )
         )
     )
+    # An agent can be absent from the current top-five leaderboard while its
+    # public pipeline still has accepted retests. Keep the display's per-seed
+    # medians available without publishing the reusable seed identifiers or
+    # relying on the leaderboard projection.
+    confirmation_by_seed: dict[int, list[float]] = {}
+    for score in confirmation_scores:
+        if score.bench_version == canonical_version:
+            confirmation_by_seed.setdefault(score.seed, []).append(score.composite)
+    confirmation_sample_composites = sorted(
+        statistics.median(values) for values in confirmation_by_seed.values()
+    )
     # Dataset provenance is PER BENCH VERSION. The agent row carries only the
     # version it was first pinned at, so pairing every score with it published the
     # v2 digest alongside a v3 score -- next to a verification_command that
@@ -8149,13 +8193,13 @@ async def agent_pipeline(
         confirmation_scores=[
             PublicConfirmationScore(
                 composite=score.composite,
-                seed=str(score.seed),
                 validator_hotkey=score.validator_hotkey,
                 bench_version=score.bench_version,
                 accepted_at=score.created_at,
             )
             for score in confirmation_scores
         ],
+        confirmation_sample_composites=confirmation_sample_composites,
         # Same era as ``score_count`` above, or the page contradicts itself: a
         # finalized v6 row would read "3 of 3" with no final score to show for
         # it. The median is over one era's scores either way, so this stays the
@@ -8463,10 +8507,13 @@ async def agent_dataset(
         if row.scores
         else await active_bench_version(session)
     )
-    if dataset_bench_version == 13:
+    if dataset_bench_version >= 13:
         raise HTTPException(
             status_code=409,
-            detail="V13 dataset reveal requires private work-set closure",
+            detail=(
+                f"V{dataset_bench_version} dataset reveal "
+                "requires private work-set closure"
+            ),
             headers={"Cache-Control": "no-store"},
         )
     try:

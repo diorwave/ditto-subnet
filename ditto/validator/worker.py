@@ -196,6 +196,11 @@ def _ledger_ceiling_band_clamp(ledger: LedgerResponse) -> bool:
     return getattr(ledger, "dethrone_band_mode", None) == "headroom_capped"
 
 
+def _ledger_statistical_band_cap(ledger: LedgerResponse) -> bool:
+    """Use the protocol-29 cap only when the served pin activates it."""
+    return getattr(ledger, "statistical_band_mode", None) == "capped"
+
+
 def _ledger_crown_incumbent(ledger: LedgerResponse) -> UUID | None:
     """The served incumbent the fold defends, or ``None`` for the classic walk.
 
@@ -754,6 +759,7 @@ class ValidatorWorker:
         # so their check/set transitions are atomic within this event loop.
         self._scoring_active = False
         self._weights_active = False
+        self._last_weight_attempt_at: float | None = None
         self._last_weights_fold: WeightsFold | None = None
         self._longmem_active = False
         # A failed ticket hand-back is an ambiguous lease transition: local
@@ -2086,6 +2092,7 @@ class ValidatorWorker:
                 dethrone_z=self._config.koth_dethrone_z,
                 tie_pooling=ledger.tie_weighting_mode == "pool",
                 ceiling_band_clamp=_ledger_ceiling_band_clamp(ledger),
+                statistical_band_cap=_ledger_statistical_band_cap(ledger),
                 incumbent_agent_id=_ledger_crown_incumbent(ledger),
                 unpaid_agent_id=(
                     provisional.agent_id if provisional is not None else None
@@ -2158,6 +2165,7 @@ class ValidatorWorker:
             margin=self._config.koth_margin,
             dethrone_z=self._config.koth_dethrone_z,
             ceiling_band_clamp=_ledger_ceiling_band_clamp(ledger),
+            statistical_band_cap=_ledger_statistical_band_cap(ledger),
             incumbent_agent_id=_ledger_crown_incumbent(ledger),
         )
         king_fingerprint = self._king_fingerprint(champion)
@@ -2274,16 +2282,20 @@ class ValidatorWorker:
         """Return ``(available, fingerprint)`` from the weight-authoritative ledger."""
         try:
             ledger = await self._platform.get_ledger()
+            champion = select_champion(
+                _ledger_weight_entries(ledger),
+                margin=self._config.koth_margin,
+                dethrone_z=self._config.koth_dethrone_z,
+                ceiling_band_clamp=_ledger_ceiling_band_clamp(ledger),
+                statistical_band_cap=_ledger_statistical_band_cap(ledger),
+                incumbent_agent_id=_ledger_crown_incumbent(ledger),
+            )
         except PlatformError as e:
             logger.warning("event-driven king check failed: %s", e)
             return False, None
-        champion = select_champion(
-            _ledger_weight_entries(ledger),
-            margin=self._config.koth_margin,
-            dethrone_z=self._config.koth_dethrone_z,
-            ceiling_band_clamp=_ledger_ceiling_band_clamp(ledger),
-            incumbent_agent_id=_ledger_crown_incumbent(ledger),
-        )
+        except Exception:  # noqa: BLE001 - an unreadable ledger must not kill weights
+            logger.exception("event-driven king check could not read the ledger")
+            return False, None
         return True, self._king_fingerprint(champion)
 
     async def _registered_ledger_entries(
@@ -3082,6 +3094,7 @@ class ValidatorWorker:
             tail_size=self._config.koth_tail_size,
             dethrone_z=self._config.koth_dethrone_z,
             ceiling_band_clamp=_ledger_ceiling_band_clamp(ledger),
+            statistical_band_cap=_ledger_statistical_band_cap(ledger),
             incumbent_agent_id=_ledger_crown_incumbent(ledger),
         )
         if not stale:
@@ -3201,6 +3214,7 @@ class ValidatorWorker:
             margin=self._config.koth_margin,
             dethrone_z=self._config.koth_dethrone_z,
             ceiling_band_clamp=_ledger_ceiling_band_clamp(ledger),
+            statistical_band_cap=_ledger_statistical_band_cap(ledger),
             incumbent_agent_id=_ledger_crown_incumbent(ledger),
         )
         if not contested:
@@ -4348,9 +4362,46 @@ class ValidatorWorker:
         *,
         drain_requested: asyncio.Event | None = None,
     ) -> None:
+        """Keep the weight loop alive for the life of the worker.
+
+        Scoring and heartbeats run in a separate task, so a weight loop that
+        dies leaves a validator that looks healthy but never commits again
+        and drops out of consensus once ActivityCutoff passes.
+        """
+        while not stop.is_set():
+            try:
+                await self._run_weight_epochs(stop, drain_requested=drain_requested)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - weights must outlive any one bug
+                delay = await self._weight_restart_delay()
+                logger.exception("weight loop crashed; restarting in %.0fs", delay)
+                await self._sleep_or_stop_or_drain(stop, delay, drain_requested)
+
+    async def _weight_restart_delay(self) -> float:
+        """Seconds to wait before restarting a crashed weight loop.
+
+        A fresh loop trusts ``_seconds_until_weight_window``, which fails open
+        to 0 when ``LastUpdate`` is unreadable, so like a drain resume it waits
+        out the rest of the full epoch since the last attempt.
+        """
+        delay = float(self._config.sweep_seconds)
+        if self._last_weight_attempt_at is None:
+            return delay
+        epoch_seconds = max(
+            float(self._config.epoch_seconds), await self._chain_min_epoch_seconds()
+        )
+        remaining = epoch_seconds - (time.monotonic() - self._last_weight_attempt_at)
+        return max(delay, remaining)
+
+    async def _run_weight_epochs(
+        self,
+        stop: asyncio.Event,
+        *,
+        drain_requested: asyncio.Event | None = None,
+    ) -> None:
         """Submit weights in a chain-safe window, independently of scoring."""
         chain_floor = await self._chain_min_epoch_seconds()
-        last_submit_at: float | None = None
         while not stop.is_set():
             if drain_requested is not None and drain_requested.is_set():
                 # The scoring loop is the sole drain-acknowledgement owner: it
@@ -4358,6 +4409,7 @@ class ValidatorWorker:
                 # ``drained``. The weight loop only remains quiescent here.
                 while drain_requested.is_set() and not stop.is_set():
                     await self._sleep_or_stop(stop, 0.05)
+                last_submit_at = self._last_weight_attempt_at
                 if not stop.is_set() and last_submit_at is not None:
                     # A drain interrupts the cadence sleep. Resume on the
                     # REMAINDER of the interrupted epoch, not a fresh full one:
@@ -4412,7 +4464,7 @@ class ValidatorWorker:
                 logger.exception("weight epoch failed; retrying next epoch")
             finally:
                 self._weights_active = False
-                last_submit_at = time.monotonic()
+                self._last_weight_attempt_at = time.monotonic()
             last_update, observed_block = await self._observe_onchain_weight_state()
             self._telemetry.record_sweep(
                 SweepStats(

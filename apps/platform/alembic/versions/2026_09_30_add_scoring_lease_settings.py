@@ -9,8 +9,8 @@ constant, so an empty table is the exact prior behaviour and the operator
 history contains only operator decisions.
 
 Revision ID: 9c41d7e2b6a3
-Revises: 5e2a8c4f9d17
-Create Date: 2026-09-29
+Revises: 6a7a2a03a65f
+Create Date: 2026-09-30
 """
 
 from collections.abc import Sequence
@@ -21,7 +21,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision: str = "9c41d7e2b6a3"
-down_revision: str | Sequence[str] | None = "5e2a8c4f9d17"
+down_revision: str | Sequence[str] | None = "6a7a2a03a65f"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

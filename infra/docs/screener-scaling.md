@@ -35,8 +35,12 @@ legacy hotkey has no per-instance claim fence. A deferral leaves the managed
 group unchanged while publishing the lower desired target, which blocks new
 claims for a fresh, ready controller. After controller authority expires,
 current-policy emergency fallback can admit claims again; no deletion is in
-progress. It records a `gce_scale_in_deferred` event with
-`GCE_SCALE_IN_DEFERRED` and is not a provider failure. Physical excess capacity
+progress. It publishes `GCE_SCALE_IN_DEFERRED` and is not a provider failure.
+Its `gce_target_changed` and `gce_scale_in_deferred` events are sent when the
+deferral begins, not on every pass. A new desired target or MIG size sends
+both again, as does a lower target that returns after a pass stopped scaling
+in (such as an inventory hold, a routing outage, or a live GCE lease); a new
+deferral reason sends only the deferral event. Physical excess capacity
 requires a durable claim fence or an operator-controlled drain.
 
 `SCREENING=0` (`screening_concurrency=0`) on the primary is an operator closure,
@@ -76,6 +80,14 @@ fenced failing pass records a
 `platform_inventory_hold_expired`. A failed pre-event read or first fenced
 renew leaves the transition pending for the next pass.
 
+Capacity transition events are delivered at least once, not exactly once. The
+controller records an event as sent, in its state file, only after the renew
+that carries it succeeds, and Platform has no event idempotency key. A renew
+whose response is lost, or a crash or failed state write right after a
+successful renew, can send that event once more on the next pass. A state file
+that cannot be written at all stops each pass at its first write, before any
+renew. The best-effort `provider_mutation_failed` event is not retried.
+
 Production uses `['hetzner', 'gcp']` for build, runtime smoke, and source review.
 The second entry means that separate GCE workers may claim still-unclaimed
 submissions when the capacity policy activates them. It does not mean a failed
@@ -96,8 +108,27 @@ Different submissions move through those stages concurrently.
 
 A revisioned write requires compare-and-swap, an audit reason, and an exact
 confirmation string covering all three lists and the overflow policy. Node
-screening, shared sandbox, build, runtime, and review ceilings have a separate
-append-only control. New nodes default to zero capacity.
+screening, shared sandbox, build, runtime, and review ceilings, plus the
+report-only canary cap, have a separate append-only control. New nodes default
+to zero capacity.
+
+`canary_concurrency` (0 through 8, default 1) applies only while the node's
+production admission is open. A report-only L2 canary then waits while a fresh
+upload or an authorized retry is claimable by that worker's production claim,
+and it never takes one of the `screening_concurrency` freshly heartbeating
+workers kept for production. Work the production claim would skip, such as a
+copy deferred behind its earlier owner or a retry pinned to another scope's
+review posture, does not hold canaries. The effective cap is
+`min(canary_concurrency, 4, fresh workers - screening_concurrency)`, so
+`screening_concurrency` at or above the worker count holds canaries entirely.
+With admission closed, canaries keep their legacy cap of `min(4, fresh
+workers)`. Revisions written before the field existed read as 1.
+`get_screener_capacity` reports unexpired canary leases as
+`usage.canary_active` and waiting canaries as `usage.canary_queued`. Platform
+logs `report-only L2 canary held for production` with
+`reason=production-claimable` or `reason=production-reserved` at most once a
+minute per node and reason, and only when a worker could otherwise lease a
+queued canary.
 
 ## Capacity event retention
 
@@ -150,13 +181,13 @@ After `subnet-screener-1` is converged, use Backroom to:
    cold build, smoke, failed-build/no-review, and failed-smoke/no-review probes
    pass (shadow mode);
 3. append the one-lane canary setting
-   `SCREENING=1 SANDBOX=1 BUILD=1 RUNTIME=1 SOURCE_REVIEW=1`;
+   `SCREENING=1 SANDBOX=1 BUILD=1 RUNTIME=1 SOURCE_REVIEW=1 CANARY=1`;
 4. set all three provider lists to `['hetzner', 'gcp']` and enable overflow for
    `subnet-screener-1` at multiplier 3, minimum backlog 12, maximum 6;
 5. prove one production build -> smoke -> source-review sequence and one
    build failure that never obtains a review lease;
 6. raise the 64 GB node to
-   `SCREENING=2 SANDBOX=2 BUILD=2 RUNTIME=2 SOURCE_REVIEW=2`, set the private
+   `SCREENING=2 SANDBOX=2 BUILD=2 RUNTIME=2 SOURCE_REVIEW=2 CANARY=1`, set the private
    inventory to two worker processes, and prove two simultaneous cold
    build/smoke lanes without memory or disk pressure; raise to three only after
    measured sandbox-plus-review memory leaves safe host margin;

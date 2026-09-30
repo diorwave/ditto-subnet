@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ditto.api_models.l2_report_canary import (
@@ -22,11 +24,21 @@ from ditto.api_models.l2_report_canary import (
     L2CanaryClaimResponse,
     L2CanaryCompleteRequest,
     L2CanaryCompleteResponse,
+    L2CanaryPinnedScheduleRequest,
     L2CanaryPreflightView,
+    L2CanaryScheduleBase,
     L2CanaryScheduleRequest,
     L2CanaryView,
 )
+from ditto.api_models.screener_node_settings import ScreenerNodeChannelSettings
+from ditto.api_models.screener_review_settings import (
+    L2_REPORT_CANARY_SCOPE_PREFIX,
+    EffectiveScreenerReviewSettings,
+    ScreenerReviewSettings,
+    is_l2_report_canary_scope,
+)
 from ditto.api_models.system_health import fleet_release_from_heartbeat_envelope
+from ditto.api_server.attestation import expected_netuid
 from ditto.api_server.canonical_starter_control import (
     ARCHIVE_BYTES,
     ARCHIVE_SHA256,
@@ -56,10 +68,19 @@ from ditto.db.models import (
     ScreenerHeartbeat,
     ScreenerL2ReportCanary,
     ScreenerNode,
+    ScreenerReviewSettingsRevision,
     ScreeningAttempt,
     ScreeningReviewEvent,
 )
 from ditto.db.queries.benchmark_rollout import arrival_bench_version
+from ditto.db.queries.screener_node_settings import (
+    resolve_screener_node_channel_settings,
+)
+from ditto.db.queries.screening import (
+    claim_canary_scopes,
+    has_claimable_screening_work,
+)
+from ditto_screening_protocol import ScreenerReviewSettingsOverride
 
 admin_router = APIRouter(prefix="/admin/screener-l2-report-canaries", tags=["admin"])
 screener_router = APIRouter(prefix="/screener/l2-report-canaries", tags=["screener"])
@@ -77,6 +98,13 @@ _FULL_RUNTIME_OVERHEAD = timedelta(minutes=60)
 _FULL_RUNTIME_MIN_RELEASE = (0, 317, 2)
 _MAX_PARALLEL_SOURCE_ONLY = 4
 _WORKER_HEARTBEAT_MAX_AGE = timedelta(minutes=5)
+# Idle workers poll every 30 seconds, so a node that keeps holding queued
+# canaries for production would otherwise log twice a minute per worker.
+_PRODUCTION_HOLD_LOG_INTERVAL_SECONDS = 60.0
+# Monotonic time of the last production-hold log line per (node, reason).
+_production_hold_logged_at: dict[tuple[str, str], float] = {}
+
+logger = logging.getLogger(__name__)
 
 
 def _canary_lease(
@@ -102,6 +130,129 @@ def _utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def _canary_posture(
+    revision: ScreenerReviewSettingsRevision,
+) -> EffectiveScreenerReviewSettings | None:
+    """Return a canary-namespace revision as a posture, or ``None`` if unusable."""
+    if (
+        not is_l2_report_canary_scope(revision.scope)
+        or revision.settings.get("mode") == "inherit"
+    ):
+        return None
+    try:
+        settings = ScreenerReviewSettings.model_validate_json(
+            json.dumps(revision.settings)
+        )
+    except ValueError:
+        return None
+    return EffectiveScreenerReviewSettings(
+        revision=revision.revision,
+        scope=revision.scope,
+        settings=settings,
+        checksum=revision.checksum,
+    )
+
+
+async def _schedulable_review_settings_pin(
+    session: AsyncSession, revision: int
+) -> EffectiveScreenerReviewSettings:
+    """Accept only an isolated canary posture, never one production resolves."""
+    row = await session.get(ScreenerReviewSettingsRevision, revision)
+    if row is None:
+        # 422, not 404: Backroom reads a 404 from ``POST /pinned`` as a
+        # Platform build without that route.
+        raise HTTPException(422, f"review settings revision {revision} not found")
+    if not is_l2_report_canary_scope(row.scope):
+        raise HTTPException(
+            422,
+            "canary review settings must use an "
+            f"{L2_REPORT_CANARY_SCOPE_PREFIX}* scope, not {row.scope!r}",
+        )
+    if row.settings.get("mode") == "inherit":
+        raise HTTPException(422, "canary review settings cannot inherit")
+    # Worker posture resolution already skips canary scopes, so this is not
+    # what isolates the experiment. It refuses the confusing configuration of
+    # a canary scope that is also a node or worker name.
+    if (
+        await session.get(ScreenerNode, row.scope) is not None
+        or await session.scalar(
+            select(ScreenerHeartbeat.instance_id)
+            .where(ScreenerHeartbeat.instance_id == row.scope)
+            .limit(1)
+        )
+        is not None
+    ):
+        raise HTTPException(409, "canary review settings scope names a screener")
+    posture = _canary_posture(row)
+    if posture is None:
+        raise HTTPException(422, "canary review settings revision is invalid")
+    return posture
+
+
+async def _claimable_review_settings_pin(
+    session: AsyncSession, row: ScreenerL2ReportCanary
+) -> EffectiveScreenerReviewSettings | None:
+    """Re-read a stamped pin; ``None`` when the revision no longer matches it."""
+    if row.review_settings_revision is None:
+        return None
+    revision = await session.get(
+        ScreenerReviewSettingsRevision, row.review_settings_revision
+    )
+    if (
+        revision is None
+        or revision.scope != row.review_settings_scope
+        or revision.checksum != row.review_settings_checksum
+    ):
+        return None
+    return _canary_posture(revision)
+
+
+async def _claimable_queue_filters(
+    session: AsyncSession,
+    *,
+    node: ScreenerNode,
+    payload: L2CanaryClaimRequest,
+    node_settings_current: bool,
+    source_only: bool,
+    now: datetime,
+) -> list[ColumnElement[bool]]:
+    """Filters selecting the queued rows on ``node`` this claimant may lease.
+
+    Any check that asks whether a canary is waiting for this claimant must use
+    these same filters, so it never counts a row the claimant cannot take: a
+    pinned row for a worker that does not apply pins, an unpinned row for a
+    worker whose node posture is stale, or a full-runtime or fixture row for a
+    worker not ready for it.
+    """
+    filters: list[ColumnElement[bool]] = [
+        ScreenerL2ReportCanary.target_node_id == node.node_id,
+        ScreenerL2ReportCanary.status == "queued",
+    ]
+    if source_only:
+        filters.append(ScreenerL2ReportCanary.run_mode == "source_only")
+    if not payload.accepts_review_settings_override:
+        # A rolling older worker would run a pinned row under its node posture.
+        filters.append(ScreenerL2ReportCanary.review_settings_revision.is_(None))
+    elif not node_settings_current:
+        # A stale node posture may run only a row that carries its own posture.
+        filters.append(ScreenerL2ReportCanary.review_settings_revision.is_not(None))
+    if not await _full_runtime_worker_ready(
+        session, node=node, now=now, instance_id=payload.instance_id
+    ):
+        # Leave full-runtime rows for an adopted worker rather than returning
+        # nothing: scheduling accepts any adopted worker on the node, so the
+        # oldest row may be one this caller can never take, and it must not
+        # block the source-only rows queued behind it.
+        filters.append(ScreenerL2ReportCanary.run_mode != "full_runtime")
+    if not await _fixture_worker_ready(
+        session, node=node, now=now, instance_id=payload.instance_id
+    ):
+        filters.append(
+            ScreenerL2ReportCanary.source_kind != "canonical_starter_fixture"
+        )
+    return filters
+
+
 def _view(row: ScreenerL2ReportCanary) -> L2CanaryView:
     return L2CanaryView(
         canary_id=row.canary_id,
@@ -119,6 +270,11 @@ def _view(row: ScreenerL2ReportCanary) -> L2CanaryView:
         review_label=row.review_label,
         run_mode=cast(Literal["source_only", "full_runtime"], row.run_mode),
         source_attestation=row.source_attestation,
+        review_settings_revision=row.review_settings_revision,
+        review_settings_scope=row.review_settings_scope,
+        review_settings_checksum=row.review_settings_checksum,
+        settings_revision=row.settings_revision,
+        settings_checksum=row.settings_checksum,
         status=row.status,
         claimed_instance_id=row.claimed_instance_id,
         lease_expires_at=row.lease_expires_at,
@@ -283,6 +439,87 @@ async def _fixture_worker_ready(
         if release is not None and release.source_fixture_v1:
             return True
     return False
+
+
+async def _fresh_worker_ids(
+    session: AsyncSession, *, node: ScreenerNode, now: datetime
+) -> set[str]:
+    """Node worker instances with a fresh polling or screening heartbeat."""
+    return set(
+        await session.scalars(
+            select(ScreenerHeartbeat.instance_id).where(
+                ScreenerHeartbeat.screener_hotkey == node.screener_hotkey,
+                ScreenerHeartbeat.instance_id.like(f"{node.node_id}-worker-%"),
+                ScreenerHeartbeat.seen_at >= now - _WORKER_HEARTBEAT_MAX_AGE,
+                ScreenerHeartbeat.state.in_(("polling", "screening")),
+            )
+        )
+    )
+
+
+async def _canary_yields_to_production(
+    session: AsyncSession,
+    *,
+    node: ScreenerNode,
+    limits: ScreenerNodeChannelSettings,
+    instance_id: str,
+    active: int,
+    review_settings_scopes: frozenset[str] | None,
+    now: datetime,
+) -> bool:
+    """Hold a leasable canary while this node's production admission is open.
+
+    The production claim budget counts only screening attempts, so a canary
+    that takes the worker production needs delays a fresh upload by up to one
+    canary lease. With admission open, a canary therefore waits while fresh
+    production work is claimable by this worker, and it may never occupy one
+    of the ``screening_concurrency`` fresh workers kept for production. The
+    caller holds the node row lock, so ``active`` cannot race another canary
+    claim, and has already selected the row it would lease, so a hold is
+    decided and logged only for a canary this worker could otherwise take.
+    """
+    healthy_workers = await _fresh_worker_ids(session, node=node, now=now)
+    reserve_cap = min(
+        limits.canary_concurrency,
+        _MAX_PARALLEL_SOURCE_ONLY,
+        max(0, len(healthy_workers) - limits.screening_concurrency),
+    )
+    if await has_claimable_screening_work(
+        session,
+        now=now,
+        review_settings_scopes=review_settings_scopes,
+        netuid=expected_netuid(),
+    ):
+        reason = "production-claimable"
+    elif instance_id not in healthy_workers or active >= reserve_cap:
+        # A worker without a fresh heartbeat is not counted in the
+        # reservation, so it cannot prove a production worker stays free.
+        reason = "production-reserved"
+    else:
+        return False
+    key = (node.node_id, reason)
+    logged_at = _production_hold_logged_at.get(key)
+    monotonic_now = time.monotonic()
+    if (
+        logged_at is None
+        or monotonic_now - logged_at >= _PRODUCTION_HOLD_LOG_INTERVAL_SECONDS
+    ):
+        _production_hold_logged_at[key] = monotonic_now
+        logger.info(
+            "report-only L2 canary held for production node_id=%s "
+            "instance_id=%s reason=%s screening_concurrency=%d "
+            "canary_concurrency=%d healthy_workers=%d active=%d "
+            "claimant_fresh=%s",
+            node.node_id,
+            instance_id,
+            reason,
+            limits.screening_concurrency,
+            limits.canary_concurrency,
+            len(healthy_workers),
+            active,
+            instance_id in healthy_workers,
+        )
+    return True
 
 
 async def _score_count(session: AsyncSession, agent_id: UUID) -> int:
@@ -479,7 +716,46 @@ async def schedule_l2_report_canary(
     storage: Annotated[S3StorageClient, Depends(get_storage_client)],
     x_admin_actor: Annotated[str | None, Header()] = None,
 ) -> L2CanaryView:
-    """Queue one exact source once; this never reopens a screening attempt."""
+    """Queue one exact source once under the claiming node's posture.
+
+    This never reopens a screening attempt. The request model refuses a
+    ``review_settings_revision`` key with 422: pinned canaries use
+    ``POST /pinned``, so a Platform build without pin support rejects the
+    route instead of ignoring the field.
+    """
+    return await _schedule_l2_report_canary(
+        payload, None, session, storage, x_admin_actor
+    )
+
+
+@admin_router.post("/pinned", response_model=L2CanaryView)
+async def schedule_pinned_l2_report_canary(
+    payload: L2CanaryPinnedScheduleRequest,
+    _admin: AdminDep,
+    session: SessionDep,
+    storage: Annotated[S3StorageClient, Depends(get_storage_client)],
+    x_admin_actor: Annotated[str | None, Header()] = None,
+) -> L2CanaryView:
+    """Queue one exact source once under a pinned ``l2-report-canary*`` posture.
+
+    The separate route is the capability check. A Platform build that predates
+    pins has no such route and answers 405 or 404 without queueing anything,
+    where the plain route would ignore the unknown field and queue the canary
+    under the node's posture. This route therefore never answers 404 itself:
+    a missing revision is a 422.
+    """
+    return await _schedule_l2_report_canary(
+        payload, payload.review_settings_revision, session, storage, x_admin_actor
+    )
+
+
+async def _schedule_l2_report_canary(
+    payload: L2CanaryScheduleBase,
+    review_settings_revision: int | None,
+    session: AsyncSession,
+    storage: S3StorageClient,
+    x_admin_actor: str | None,
+) -> L2CanaryView:
     async with session.begin():
         existing = await session.scalar(
             select(ScreenerL2ReportCanary).where(
@@ -497,6 +773,7 @@ async def schedule_l2_report_canary(
                 or existing.policy_version != payload.policy_version
                 or existing.expected_agent_status != payload.expected_agent_status
                 or existing.expected_score_count != payload.expected_score_count
+                or existing.review_settings_revision != review_settings_revision
                 or (existing.source_attestation or {}).get("kind")
                 != payload.historical_ruling_kind
                 or (existing.source_attestation or {}).get("ruling_id")
@@ -519,6 +796,11 @@ async def schedule_l2_report_canary(
             session, node=node, now=datetime.now(UTC)
         ):
             raise HTTPException(409, "full-runtime canary worker not adopted")
+        pin = (
+            await _schedulable_review_settings_pin(session, review_settings_revision)
+            if review_settings_revision is not None
+            else None
+        )
         # Serialize two distinct request ids for the same source attempt before
         # the partial unique index supplies its final database backstop.
         await session.scalar(
@@ -549,6 +831,9 @@ async def schedule_l2_report_canary(
             expected_score_count=payload.expected_score_count,
             review_label=payload.review_label,
             run_mode=payload.run_mode,
+            review_settings_revision=pin.revision if pin is not None else None,
+            review_settings_scope=pin.scope if pin is not None else None,
+            review_settings_checksum=pin.checksum if pin is not None else None,
             status="queued",
         )
         if payload.historical_ruling_id is not None:
@@ -820,10 +1105,15 @@ async def claim_l2_report_canary(
         effective = await _resolve_effective_review_settings(
             session, instance_id=payload.instance_id, enrolled_node_id=node_id
         )
-        if (
-            effective.revision != payload.settings_revision
-            or effective.checksum != payload.settings_checksum
-        ):
+        # An unpinned canary runs under the worker's node-effective posture, so
+        # it still requires that posture to be current. A pinned canary carries
+        # its own posture and stays claimable by a worker whose node revision
+        # moved, but only by a worker that declares it applies the pin.
+        node_settings_current = (
+            effective.revision == payload.settings_revision
+            and effective.checksum == payload.settings_checksum
+        )
+        if not node_settings_current and not payload.accepts_review_settings_override:
             raise HTTPException(
                 status_code=409, detail="canary review settings changed"
             )
@@ -852,58 +1142,101 @@ async def claim_l2_report_canary(
                 .with_for_update()
             )
         )
+        claimable = await _claimable_queue_filters(
+            session,
+            node=node,
+            payload=payload,
+            node_settings_current=node_settings_current,
+            source_only=bool(active),
+            now=now,
+        )
+        # A stale pin-capable worker passes only for a pinned row it could
+        # lease; otherwise it gets the refusal that makes it refresh its posture.
+        # Raising also rolls back the lazy expiry above; the next claim on this
+        # node from a current worker redoes it.
+        if not node_settings_current and not await session.scalar(
+            select(exists().where(*claimable))
+        ):
+            raise HTTPException(
+                status_code=409, detail="canary review settings changed"
+            )
         if any(row.claimed_instance_id == payload.instance_id for row in active):
             return None
-        # Keep private-challenge runs isolated. Preserve the legacy first lease
-        # without requiring a heartbeat; additional source-only leases require
-        # fresh worker heartbeats and the node lock serializes their count.
+        # Keep private-challenge runs isolated.
         if any(row.run_mode == "full_runtime" for row in active):
             return None
-        if active:
-            healthy_workers = set(
-                await session.scalars(
-                    select(ScreenerHeartbeat.instance_id).where(
-                        ScreenerHeartbeat.screener_hotkey == node.screener_hotkey,
-                        ScreenerHeartbeat.instance_id.like(f"{node_id}-worker-%"),
-                        ScreenerHeartbeat.seen_at >= now - _WORKER_HEARTBEAT_MAX_AGE,
-                        ScreenerHeartbeat.state.in_(("polling", "screening")),
-                    )
-                )
-            )
+        _, limits = await resolve_screener_node_channel_settings(
+            session, node_id=node_id
+        )
+        admission_open = limits.screening_concurrency > 0
+        if not admission_open and active:
+            # Admission is closed, so canaries may use workers production
+            # cannot. Preserve the legacy first lease without requiring a
+            # heartbeat; additional source-only leases require fresh worker
+            # heartbeats and the node lock serializes their count.
+            healthy_workers = await _fresh_worker_ids(session, node=node, now=now)
             if payload.instance_id not in healthy_workers or len(active) >= min(
                 _MAX_PARALLEL_SOURCE_ONLY, len(healthy_workers)
             ):
                 return None
-        queued = select(ScreenerL2ReportCanary).where(
-            ScreenerL2ReportCanary.target_node_id == node_id,
-            ScreenerL2ReportCanary.status == "queued",
-        )
-        if active:
-            queued = queued.where(ScreenerL2ReportCanary.run_mode == "source_only")
-        if not await _full_runtime_worker_ready(
-            session, node=node, now=now, instance_id=payload.instance_id
-        ):
-            # Leave full-runtime rows for an adopted worker rather than
-            # returning nothing: scheduling accepts any adopted worker on the
-            # node, so the oldest row may be one this caller can never take,
-            # and it must not block the source-only rows queued behind it.
-            queued = queued.where(ScreenerL2ReportCanary.run_mode != "full_runtime")
-        if not await _fixture_worker_ready(
-            session,
-            node=node,
-            now=now,
-            instance_id=payload.instance_id,
-        ):
-            queued = queued.where(
-                ScreenerL2ReportCanary.source_kind != "canonical_starter_fixture"
-            )
         row = await session.scalar(
-            queued.order_by(ScreenerL2ReportCanary.created_at).with_for_update(
-                skip_locked=True
-            )
+            select(ScreenerL2ReportCanary)
+            .where(*claimable)
+            .order_by(ScreenerL2ReportCanary.created_at)
+            .with_for_update(skip_locked=True)
         )
         if row is None:
             return None
+        # Production admission is open: decide the hold on the exact row this
+        # worker would lease, after every queue filter above, so a canary it
+        # cannot take never holds or logs, and before any drift guard spends a
+        # storage read on a row that will wait. Keep new queue filters on
+        # ``queued`` and new per-row lease checks below this point.
+        if admission_open and await _canary_yields_to_production(
+            session,
+            node=node,
+            limits=limits,
+            instance_id=payload.instance_id,
+            active=len(active),
+            # The pinned retries a production claim from this worker could
+            # bind, as ``resolve_claim_binding`` derives them.
+            review_settings_scopes=claim_canary_scopes(
+                (
+                    (
+                        effective.revision,
+                        payload.instance_id,
+                        effective.scope,
+                        effective.checksum,
+                    )
+                    if effective.revision >= 1
+                    else None
+                ),
+                enrolled_node_id=node_id,
+            ),
+            now=now,
+        ):
+            return None
+        bound_revision = payload.settings_revision
+        bound_checksum = payload.settings_checksum
+        lease_settings = effective.settings
+        override: ScreenerReviewSettingsOverride | None = None
+        if row.review_settings_revision is not None:
+            pinned = await _claimable_review_settings_pin(session, row)
+            if pinned is None:
+                # Terminal, like source drift: a 409 would roll back and leave
+                # this row at the head of the node's queue on every claim.
+                row.status = "incomplete"
+                row.error_code = "review-settings-pin-drift"
+                row.completed_at = now
+                return None
+            bound_revision = pinned.revision
+            bound_checksum = pinned.checksum
+            lease_settings = pinned.settings
+            override = ScreenerReviewSettingsOverride(
+                revision=pinned.revision,
+                scope=pinned.scope,
+                checksum=pinned.checksum,
+            )
         agent = None
         if row.source_kind == "canonical_starter_fixture":
             if not _fixture_attestation_valid(row) or not await _fixture_object_matches(
@@ -947,8 +1280,8 @@ async def claim_l2_report_canary(
         token = secrets.token_urlsafe(32)
         row.status = "leased"
         row.claimed_instance_id = payload.instance_id
-        row.settings_revision = payload.settings_revision
-        row.settings_checksum = payload.settings_checksum
+        row.settings_revision = bound_revision
+        row.settings_checksum = bound_checksum
         row.runtime_evidence_sha256 = hashlib.sha256(
             json.dumps(
                 evidence.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
@@ -956,10 +1289,8 @@ async def claim_l2_report_canary(
         ).hexdigest()
         row.lease_token_hash = hashlib.sha256(token.encode()).hexdigest()
         row.lease_expires_at = now + _canary_lease(
-            source_review_timeout_seconds=(
-                effective.settings.source_review_timeout_seconds
-            ),
-            l2_timeout_seconds=effective.settings.timeout_seconds,
+            source_review_timeout_seconds=lease_settings.source_review_timeout_seconds,
+            l2_timeout_seconds=lease_settings.timeout_seconds,
             run_mode=row.run_mode,
             source_kind=row.source_kind,
         )
@@ -993,6 +1324,7 @@ async def claim_l2_report_canary(
             lease_expires_at=row.lease_expires_at,
             download_url=url,
             scored_runtime_evidence=evidence,
+            review_settings_override=override,
         )
 
 
