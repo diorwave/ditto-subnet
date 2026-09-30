@@ -1023,6 +1023,71 @@ async def _seed_ath_clear(
     return ruling_id
 
 
+@pytest.mark.asyncio
+async def test_preflight_clear_guard_rechecks_action_after_attestation_is_built(
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "a" * 64
+    agent_id, attempt_id, _node_id = await _seed_preflight_source(
+        session_maker, agent_sha=sha, attempt_sha=None, status=AgentStatus.SCORED
+    )
+    ruling_id = await _seed_ath_clear(
+        session_maker, agent_id=agent_id, sha=sha, with_clear_action=True
+    )
+    build_attestation = endpoints._ruling_attestation
+    new_action_id = uuid4()
+    pinned_action_id: str | None = None
+
+    async def supersede_after_pin(
+        session: AsyncSession, *, kind: str, ruling_id: UUID, artifact_sha256: str
+    ) -> dict:
+        nonlocal pinned_action_id
+        pinned = await build_attestation(
+            session, kind=kind, ruling_id=ruling_id, artifact_sha256=artifact_sha256
+        )
+        pinned_action_id = pinned["action_id"]
+        async with session_maker() as writer, writer.begin():
+            writer.add(
+                AthReviewAction(
+                    action_id=new_action_id,
+                    review_id=ruling_id,
+                    action="reject",
+                    reason="Superseded the clear before guard evaluation",
+                    actor="independent-reviewer",
+                    evidence={"sha256": sha},
+                    created_at=datetime.now(UTC) + timedelta(seconds=1),
+                )
+            )
+        return pinned
+
+    monkeypatch.setattr(endpoints, "_ruling_attestation", supersede_after_pin)
+    monkeypatch.setattr(endpoints, "arrival_bench_version", AsyncMock(return_value=13))
+    monkeypatch.setattr(
+        endpoints, "scored_runtime_evidence_for_lease", AsyncMock(return_value=None)
+    )
+    async with session_maker() as session:
+        view = await endpoints.get_l2_report_canary_preflight(
+            agent_id,
+            attempt_id,
+            Response(),
+            None,
+            session,
+            artifact_sha256=sha,
+            expected_agent_status="scored",
+            expected_score_count=1,
+            historical_ruling_kind="ath_clear",
+            historical_ruling_id=ruling_id,
+        )
+    guard = next(check for check in view.guards if check.guard == "ath_clear_action")
+    assert guard.passed is False
+    assert guard.current == str(new_action_id)
+    assert guard.expected == pinned_action_id
+    assert guard.conflict_detail == "ATH clear action missing"
+    assert view.guards_pass is False
+    assert view.authority == "none"
+
+
 def _first_refusal(view: L2CanaryPreflightView) -> L2CanaryGuardCheck:
     """The guard scheduling would stop at: the first one not known to pass."""
     return next(check for check in view.guards if check.passed is not True)

@@ -668,16 +668,32 @@ async def _evaluate_exact_source(
         assert isinstance(attestation, dict)
         if attestation.get("kind") == "ath_clear":
             action_id = attestation.get("action_id")
+            ruling_id = _ruling_id(attestation)
+            try:
+                ruling_uuid = UUID(ruling_id) if ruling_id is not None else None
+            except ValueError:
+                ruling_uuid = None
+            latest_action = (
+                await _latest_ath_action(session, ruling_uuid)
+                if ruling_uuid is not None
+                else None
+            )
+            current_clear = bool(
+                isinstance(action_id, str)
+                and latest_action is not None
+                and latest_action.action == "clear"
+                and str(latest_action.action_id) == action_id
+            )
             checks.append(
                 L2CanaryGuardCheck(
                     guard="ath_clear_action",
-                    passed=isinstance(action_id, str),
-                    current=action_id if isinstance(action_id, str) else None,
-                    expected=None,
+                    passed=current_clear,
+                    current=str(latest_action.action_id) if latest_action else None,
+                    expected=action_id if isinstance(action_id, str) else None,
                     conflict_detail=_ATH_ACTION_MISSING,
                     note=None
-                    if isinstance(action_id, str)
-                    else "the ruling's latest ATH action is not a clear",
+                    if current_clear
+                    else "the ruling's latest ATH action is not the pinned clear",
                 )
             )
             if refused():
