@@ -384,7 +384,14 @@ describe("gate notes (#1852)", () => {
   });
 });
 
-describe("screening review notes (#1249)", () => {
+function json(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("screening review outcome (#1249)", () => {
   const session = {
     token: "ditto_ms_abc",
     hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
@@ -392,13 +399,6 @@ describe("screening review notes (#1249)", () => {
     expiresAt: "2099-01-01T00:00:00.000Z",
   };
   const agentId = "5fdadd33-bd0f-492d-ba71-49bef159f069";
-
-  function json(body: unknown): Response {
-    return new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  }
 
   async function openFeedback(attempts: unknown[]) {
     localStorage.setItem("ditto.miner.session.v1", JSON.stringify(session));
@@ -465,72 +465,92 @@ describe("screening review notes (#1249)", () => {
     public_reason: "Submission held for anti-cheat review",
   };
 
-  it("shows the owner's notes ledger and the court's reject basis and citations", async () => {
+  it("shows only the bounded outcome with fixed neutral next-step copy", async () => {
     const fetchMock = await openFeedback([
+      { ...attempt, review_outcome: { outcome: "rejected", next_step: "resubmit_after_fix" } },
       {
         ...attempt,
-        review_notes: [
-          {
-            kind: "concern",
-            category: "answer_lookup",
-            path: "src/router.rs",
-            line: 42,
-            summary: "Routes a benchmark-shaped prompt to a lookup table",
-          },
-          {
-            kind: "cleared",
-            category: "model_invocation",
-            path: "src/main.rs",
-            line: 6,
-            summary: "Served model authors the graded response",
-          },
-        ],
-        adjudication: {
-          decision: "reject",
-          reason: "The lookup at src/router.rs:42 answers without the model.",
-          reject_invariant: "i8_evaluation_independence",
-          clear_clause: null,
-          citations: [{ path: "src/router.rs", line: 42 }],
-          refusal: null,
-        },
+        attempt_id: "0b8c4d1e-0000-4000-8000-000000000002",
+        review_outcome: { outcome: "held_for_operator_review", next_step: "await_operator_review" },
+      },
+      {
+        ...attempt,
+        attempt_id: "0b8c4d1e-0000-4000-8000-000000000003",
+        review_outcome: { outcome: "cleared", next_step: "none" },
+      },
+      {
+        ...attempt,
+        attempt_id: "0b8c4d1e-0000-4000-8000-000000000004",
+        review_outcome: { outcome: "rejected", next_step: "contact_operators" },
       },
     ]);
-    const text = document.body.textContent ?? "";
-    expect(text).toContain("Automated court rejected it · breached i8_evaluation_independence");
-    expect(text).toContain("The lookup at src/router.rs:42 answers without the model.");
-    expect(text).toContain("Cited: src/router.rs:42");
-    expect(text).toContain("Review notes (2)");
-    expect(text).toContain(
-      "concern · answer_lookup · src/router.rs:42 Routes a benchmark-shaped prompt to a lookup table",
+    const outcomes = Array.from(document.querySelectorAll(".account-review-outcome")).map(
+      (node) => node.textContent,
     );
-    expect(text).toContain(
-      "cleared · model_invocation · src/main.rs:6 Served model authors the graded response",
-    );
+    expect(outcomes).toEqual([
+      "Source review rejected this submission. Fix the submission and upload a new one, or appeal from the submission page.",
+      "Source review is holding this submission for an operator. No action needed now; an operator will decide.",
+      "Source review cleared this submission. No action needed.",
+      "Source review rejected this submission. Contact the subnet operators for next steps.",
+    ]);
     const call = fetchMock.mock.calls.find((c) => String(c[0]).endsWith("/screening-feedback"));
     const headers = new Headers((call?.[1] as RequestInit | undefined)?.headers);
     expect(headers.get("authorization")).toBe("Bearer ditto_ms_abc");
   });
 
-  it("names an escalated refusal and shows nothing for an attempt without a review", async () => {
+  it("renders an older cached shape with a line-only note and no citations without leaking it", async () => {
+    // The pre-#1249-rework response carried notes and the court decision.
+    // A line-only note and an adjudication without ``citations`` must neither
+    // crash the panel nor be shown: that evidence is operator-side now.
     await openFeedback([
       {
         ...attempt,
-        review_notes: [],
+        review_notes: [
+          {
+            kind: "observation",
+            category: "prompt_shape_probe",
+            path: null,
+            line: 9191,
+            summary: "Line-only observation about a request classifier",
+          },
+        ],
         adjudication: {
-          decision: "escalate",
-          reason: "Automated adjudication did not complete; held for operator review",
-          citations: [],
-          refusal: "adjudicator-failed",
+          decision: "reject",
+          reason: "The lookup answers without the model.",
+          reject_invariant: "i8_evaluation_independence",
         },
       },
-      { ...attempt, attempt_id: "0b8c4d1e-0000-4000-8000-000000000002", status: "failed" },
+      {
+        ...attempt,
+        attempt_id: "0b8c4d1e-0000-4000-8000-000000000002",
+        status: "failed",
+        review_outcome: { outcome: "cleared", next_step: "none" },
+      },
     ]);
     const text = document.body.textContent ?? "";
-    expect(text).toContain(
-      "Automated court could not decide (adjudicator-failed); an operator is reviewing it",
-    );
-    expect(text).not.toContain("Review notes");
-    expect(text).not.toContain("Cited:");
+    // Both attempts rendered: the first did not abort the list.
+    expect(text).toContain("policy v13 · quarantined");
+    expect(text).toContain("policy v13 · failed");
+    expect(text).toContain("Source review cleared this submission. No action needed.");
+    expect(document.querySelectorAll(".account-review-outcome")).toHaveLength(1);
+    for (const hidden of [
+      "Line-only observation",
+      "prompt_shape_probe",
+      "9191",
+      "The lookup answers without the model.",
+      "i8_evaluation_independence",
+      "Cited",
+    ]) {
+      expect(text).not.toContain(hidden);
+    }
+  });
+
+  it("renders nothing for an outcome value this dashboard does not know", async () => {
+    await openFeedback([
+      { ...attempt, review_outcome: { outcome: "future_value", next_step: "none" } },
+    ]);
+    expect(document.querySelectorAll(".account-review-outcome")).toHaveLength(0);
+    expect(document.body.textContent).toContain("policy v13 · quarantined");
   });
 });
 
