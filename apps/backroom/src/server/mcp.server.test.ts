@@ -6031,6 +6031,195 @@ describe('Backroom MCP tools', () => {
     await server.close()
   })
 
+  it('keeps terminal quarantine ghosts out of the actionable queue (#2038)', async () => {
+    // An active quarantine whose exact agent is already banned under an ATH
+    // ruling is reconciliation work. The list must say so on the row and in
+    // separate counts instead of reading as an old, actionable review.
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const ghost = {
+      quarantine_id: 'e3bb1518-530f-42d7-a50b-b21ac9853798',
+      agent_id: '0ecddb5c-b99b-410d-a380-1e86d1e56b54',
+      attempt_id: '20236f60-c143-43b0-b03e-2cbe51f281d8',
+      miner_hotkey: '5Miner',
+      agent_name: 'TeaCUP',
+      artifact_sha256: 'ab'.repeat(32),
+      policy_version: 13,
+      manifest_digest: '12'.repeat(32),
+      finding_digest: null,
+      screening_reason_code: 'source-review-high-risk',
+      status: 'active',
+      created_at: '2026-09-23T12:00:00Z',
+      resolved_at: null,
+      resolved_by: null,
+      resolution: null,
+      resolution_reason: null,
+      agent_status: 'banned',
+      terminal_ghost: true,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        items: [ghost],
+        count: 1,
+        terminal_ghost_count: 1,
+        actionable_count: 0,
+        oldest_actionable_created_at: null,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    const response = await client.callTool({
+      name: 'list_screening_quarantines',
+      arguments: { status: 'active', sort: 'oldest' },
+    })
+
+    expect(response.isError).not.toBe(true)
+    expect(readJsonResult(response)).toMatchObject({
+      count: 1,
+      terminal_ghost_count: 1,
+      actionable_count: 0,
+      oldest_actionable_created_at: null,
+      items: [
+        {
+          quarantine_id: ghost.quarantine_id,
+          agent_status: 'banned',
+          terminal_ghost: true,
+        },
+      ],
+    })
+
+    await client.close()
+    await server.close()
+  })
+
+  it('reports the orphaned quarantine closed by a terminal ATH reject (#2038)', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const agentId = '0ecddb5c-b99b-410d-a380-1e86d1e56b54'
+    const quarantineId = 'e3bb1518-530f-42d7-a50b-b21ac9853798'
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        review: {
+          review_id: '35b446e0-25ce-4ffb-a1c7-775a7bab1832',
+          agent_id: agentId,
+          miner_hotkey: '5Miner',
+          agent_name: 'TeaCUP',
+          agent_version: 1,
+          submitted_at: '2026-09-20T12:00:00Z',
+          status: 'resolved',
+          opened_at: '2026-09-21T12:00:00Z',
+          resolved_at: '2026-09-22T12:00:00Z',
+          resolved_by: 'peyton@omniaura.ai',
+          resolution: 'reject',
+          resolution_reason: 'Family compiler on served /run',
+          original: {
+            review_kind: 'benchmark_overfit',
+            duplicate_of: null,
+            reason: 'Deterministic benchmark-family routing',
+            policy_version: 13,
+            fingerprint_versions: {},
+            reference_provenance: 'unknown',
+            backfilled: false,
+          },
+          current_comparison: null,
+        },
+        agent_status: 'banned',
+        idempotent: false,
+        reconciled_quarantine_ids: [quarantineId],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+
+    const response = await client.callTool({
+      name: 'resolve_ath_review',
+      arguments: {
+        agentId,
+        resolution: 'reject',
+        reason: 'Family compiler on served /run',
+      },
+    })
+
+    expect(response.isError).not.toBe(true)
+    expect(readJsonResult(response)).toMatchObject({
+      agent_status: 'banned',
+      reconciled_quarantine_ids: [quarantineId],
+    })
+
+    await client.close()
+    await server.close()
+  })
+
+  it('previews a fenced reject that reconciles a terminal quarantine ghost (#2038)', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const decision = {
+      quarantineId: 'e3bb1518-530f-42d7-a50b-b21ac9853798',
+      expectedAgentId: '0ecddb5c-b99b-410d-a380-1e86d1e56b54',
+      expectedArtifactSha256: 'ab'.repeat(32),
+      resolution: 'reject',
+      reason: 'Agent is banned under its ATH ruling; closing the orphaned hold',
+    }
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        preview_token: `1234567890.${'a'.repeat(64)}`,
+        expires_at: '2026-09-29T16:10:00Z',
+        items: [
+          {
+            quarantine_id: decision.quarantineId,
+            agent_id: decision.expectedAgentId,
+            agent_name: 'TeaCUP',
+            artifact_sha256: decision.expectedArtifactSha256,
+            resolution: 'reject',
+            reason: decision.reason,
+            disposition: 'ready',
+            resulting_agent_status: 'banned',
+            public_reason_code: null,
+            public_record_hash: null,
+            terminal_reconciliation: true,
+            terminal_ruling: {
+              agent_status: 'banned',
+              artifact_sha256: decision.expectedArtifactSha256,
+              ath_review_id: '35b446e0-25ce-4ffb-a1c7-775a7bab1832',
+              ath_action_id: '46c557f1-36df-4ffc-b2d8-886b8b8c2943',
+              ath_resolved_at: '2026-09-22T12:00:00Z',
+            },
+            message:
+              'will close the orphaned quarantine; submission stays banned under its terminal ruling',
+          },
+        ],
+        ready_count: 1,
+        already_applied_count: 0,
+        blocked_count: 0,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+
+    const preview = await client.callTool({
+      name: 'preview_screening_quarantine_batch',
+      arguments: { decisions: [decision] },
+    })
+
+    expect(preview.isError).not.toBe(true)
+    expect(readJsonResult(preview)).toMatchObject({
+      ready_count: 1,
+      items: [
+        {
+          quarantine_id: decision.quarantineId,
+          disposition: 'ready',
+          resulting_agent_status: 'banned',
+          terminal_reconciliation: true,
+          // The exact ruling the preview token is fenced to.
+          terminal_ruling: {
+            ath_review_id: '35b446e0-25ce-4ffb-a1c7-775a7bab1832',
+            ath_action_id: '46c557f1-36df-4ffc-b2d8-886b8b8c2943',
+          },
+        },
+      ],
+    })
+
+    await client.close()
+    await server.close()
+  })
+
   it('enumerates the ATH hold queue, not the auto-resolved quarantine queue', async () => {
     // The defect: this tool read /admin/screening-quarantines?status=active,
     // which the platform actor `platform:deferred-source-review` auto-resolves

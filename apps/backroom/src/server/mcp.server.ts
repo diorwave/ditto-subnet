@@ -744,7 +744,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   rotate_v13_scorer_cohort:
     'Rotate the exact pinned V13 cohort to a unanimously signed packet after all V13 tickets drain; preserves pin history.',
   schedule_l2_report_canary:
-    'Queue one isolated exact-artifact report on an enrolled Hetzner node. source_only is the default; full_runtime additionally runs private challenges in a separate Docker namespace. Neither mode changes screening, scoring, or quarantine. reviewSettingsRevision pins an l2-report-canary-* posture; never use node scopes.',
+    'Isolated Hetzner exact-artifact report: source_only default; full_runtime adds private Docker challenges. No screening/scoring/quarantine changes. reviewSettingsRevision: l2-report-canary-* only; never node scopes.',
   get_canonical_starter_fixture_preflight:
     'Read the pinned public starter tree and archive, independent review provenance, object integrity and scheduling readiness.',
   register_canonical_starter_fixture:
@@ -788,7 +788,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_outlier_escalation_dry_run:
     'Replay outlier escalation on the scored ledger: would-trigger count and agents.',
   get_inference_failure_taxonomy:
-    'Group recent chat and embedding outcomes by model, lane, gateway, upstream route, and error code. route_basis says how much of a route is known; an unknown route never names one. rate_limit_bursts is a report-only 5-minute 429 signal with affected tickets.',
+    'Group chat/embedding outcomes by model/lane/gateway/route/code. route_basis preserves unknown routes. rate_limit_bursts: report-only 5-minute 429s and affected tickets.',
   start_runtime_profile:
     'Capture bounded private relay pprof.',
   download_runtime_profile:
@@ -1036,7 +1036,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'List screening quarantines',
       description:
-        'Page active, resolved, or all SN118 screening quarantines. Defaults newest first by created_at then quarantine_id; pass sort=oldest for chronology. detail=summary (default) returns evidence counts/codes and finding summaries; detail=full returns every screener and source-review evidence row. Use exact context before decisions. The review queue remains oldest first for fairness. Every row carries two codes that are never interchangeable: screening_reason_code is why the screener held the submission and is preserved across the resolution, and resolution_reason_code derives from resolution and names the operator ruling. Read screening_reason_code as the lead the operator ruled on, never as the ruling itself or as the miner\'s final outcome.',
+        'Page active, resolved, or all SN118 screening quarantines. Defaults newest first by created_at then quarantine_id; pass sort=oldest for chronology. detail=summary (default) returns evidence counts/codes and finding summaries; detail=full returns every screener and source-review evidence row. Use exact context before decisions. The review queue remains oldest first for fairness. Every row carries two codes that are never interchangeable: screening_reason_code is why the screener held the submission and is preserved across the resolution, and resolution_reason_code derives from resolution and names the operator ruling. Read screening_reason_code as the lead the operator ruled on, never as the ruling itself or as the miner\'s final outcome. An active row with terminal_ghost=true sits behind an agent already banned or rejected (agent_status): historical reconciliation work, not review backlog. terminal_ghost_count, actionable_count and oldest_actionable_created_at keep those rows out of the actionable count and age; close one with a preview/execute_screening_quarantine_batch reject for its exact agent UUID and SHA, which leaves the terminal ruling unchanged.',
       inputSchema: {
         status: z.enum(['active', 'resolved', 'all']).default('active'),
         sort: z.enum(['oldest', 'newest']).default('newest'),
@@ -1221,7 +1221,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Resolve ATH review',
       description:
-        'Clear or reject one ATH hold with an auditable public reason. Clearing restores the status held before a manual benchmark-overfit review; rejecting bans the submission. Requires backroom:write.',
+        'Clear or reject one ATH hold with an auditable public reason. Clearing restores the status held before a manual benchmark-overfit review; rejecting bans the submission and closes its active screening quarantine (reconciled_quarantine_ids). Requires backroom:write.',
       inputSchema: resolveCopyReviewInputSchema,
       annotations: toolAnnotations('write', true),
     },
@@ -1633,7 +1633,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Preview screening quarantine batch',
       description:
-        'Dry-run up to 50 per-item release, rescreen, or reject decisions. Validates exact agent and artifact identities, current actionability, reasons, and idempotent replays. Returns a short-lived actor-bound preview token. This tool cannot change review state.',
+        'Dry-run up to 50 per-item release, rescreen, or reject decisions. Validates exact agent and artifact identities, current actionability, reasons, and idempotent replays. Returns a short-lived actor-bound preview token. A reject on a terminal_ghost row closes it and keeps the terminal agent ruling (terminal_reconciliation); the token is fenced to terminal_ruling. This tool cannot change review state.',
       inputSchema: screeningQuarantineBatchPreviewInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -3168,7 +3168,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get source-review queue-age SLO',
       description:
-        'Read the ordinary (pre-score) source-review queue-age SLO: p50/p95/oldest actionable age in seconds, throughput (completions per hour over a fixed window), and the current backlog broken out by reason -- active_work (a screener is claimed and running), capacity_wait (uploaded, no screener has claimed it yet), infrastructure_backoff (the last attempt ended retryable_infra/inconclusive and is fail-closed parked for an operator-authorized retry), and escalation (an active anti-cheat quarantine hold, which wins regardless of what the underlying attempt itself reports, e.g. a rescreen that then failed). Age is the stable queue-entry clock (the submission\'s own upload time); a retry never resets it, so a long-overdue item stays overdue through every rescreen. Also reports three reconciliation counts that are visible but NEVER folded into the metrics above: stale_running_ghost_count (a screening attempt still looks running though its agent already reached a terminal or later status), resolved_quarantine_ghost_count (an agent stuck at quarantined status with no active quarantine row), and attempt_status_drift_ghost_count (the latest attempt reports a status this SLO\'s reason classification does not cover, e.g. a terminal verdict on an agent whose own status never advanced). overdue_count and p95_exceeds_threshold are null until an operator configures a threshold (there is no shipped default); this tool enforces nothing -- no alert, no operator escalation action. Covers ORDINARY screening review only: stronger top-agent review, copy review, ATH review, and human escalation are separate review classes with their own clocks, not yet built. Requires backroom:read and changes nothing.',
+        'Read the ordinary (pre-score) source-review queue-age SLO: p50/p95/oldest actionable age in seconds, throughput (completions per hour over a fixed window), and the current backlog broken out by reason -- active_work (a screener is claimed and running), capacity_wait (uploaded, no screener has claimed it yet), infrastructure_backoff (the last attempt ended retryable_infra/inconclusive and is fail-closed parked for an operator-authorized retry), and escalation (an active anti-cheat quarantine hold, which wins regardless of what the underlying attempt itself reports, e.g. a rescreen that then failed). Age is the stable queue-entry clock (the submission\'s own upload time); a retry never resets it, so a long-overdue item stays overdue through every rescreen. Also reports four reconciliation counts that are visible but NEVER folded into the metrics above: stale_running_ghost_count (a screening attempt still looks running though its agent already reached a terminal or later status), resolved_quarantine_ghost_count (an agent stuck at quarantined status with no active quarantine row), terminal_quarantine_ghost_count (an active quarantine whose agent is already banned or rejected; close it with a fenced batch reject), and attempt_status_drift_ghost_count (the latest attempt reports a status this SLO\'s reason classification does not cover, e.g. a terminal verdict on an agent whose own status never advanced). overdue_count and p95_exceeds_threshold are null until an operator configures a threshold (there is no shipped default); this tool enforces nothing -- no alert, no operator escalation action. Covers ORDINARY screening review only: stronger top-agent review, copy review, ATH review, and human escalation are separate review classes with their own clocks, not yet built. Requires backroom:read and changes nothing.',
       annotations: toolAnnotations('read'),
     },
     async () => result(await fetchSourceReviewQueueSlo()),
