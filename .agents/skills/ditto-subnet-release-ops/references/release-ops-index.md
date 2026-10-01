@@ -17,6 +17,7 @@
 | Host convergence | `infra/ansible/` |
 | Platform app VM disk | `.agents/skills/ditto-subnet-release-ops/references/platform-host-disk.md`, `app_boot_disk_gb` |
 | Validator updater | `scripts/validator-stack-auto-update.sh` |
+| Subnet liveness (incident triage) | `apps/platform/ditto/api_server/subnet_liveness.py`, Backroom MCP `get_subnet_liveness`, `apps/backroom/docs/mcp.md` |
 
 ## Release graph expectations
 
@@ -57,6 +58,29 @@ Validate shell syntax for every changed operational script and parse every chang
 7. Rollback rehearsal or a bounded, reviewed rollback command.
 
 Do not collapse these into “green” or “deployed.”
+
+## Subnet-wide incident first read
+
+When every miner seems stuck at once, call Backroom MCP `get_subnet_liveness`
+(`GET /api/v1/admin/subnet-liveness`) before reading logs. It turns durable
+Platform state into seven ok/warn/breach signals, each with `since` and a hint
+naming the next read:
+
+- `screening_admission` breach: a node at `screening_concurrency` 0, not
+  ready, or on the wrong policy while uploads wait (#2474). Read
+  `get_screener_capacity` node controls before touching the controller.
+- `scoring_throughput` breach with `v13_scorer_cohort_pin` breach: a stale
+  signed pin declines every member (#2490). Rotate the pin; do not restart
+  validators.
+- `lease_overrun` breach: nothing is polling, so no expiry sweep runs. Check
+  validator heartbeats and the screener fleet, not the lease settings.
+- `source_emission_collector` breach: the finalized-block cursor stopped
+  (#2231), usually after a chain runtime upgrade.
+
+Disk and database headroom (#1745) is not in the read; use
+[`platform-host-disk.md`](platform-host-disk.md). The read pages nobody, and
+alert delivery is a #2600 follow-up. Record the signal values and `since` in
+the incident note so recovery is measured from the same clock.
 
 ## Secret boundary
 

@@ -313,6 +313,7 @@ import {
   inferenceFailureTaxonomySchema,
   inferenceRuntimeMetricsSchema,
   sourceReviewQueueSloSchema,
+  subnetLivenessSchema,
   validatorCapacitySummarySchema,
   outlierEscalationDryRunInputSchema,
   outlierEscalationDryRunSchema,
@@ -373,6 +374,7 @@ import {
   screenerCapacityViewSchema,
   screeningInfraRetryViewSchema,
   type ScreeningInfraRetryOutcome,
+  type SubnetLivenessOutcome,
   createScreenerBootstrapGrantInputSchema,
   screenerBootstrapGrantResponseSchema,
   screenerProviderSettingsControlSchema,
@@ -1610,6 +1612,27 @@ const SOURCE_REVIEW_QUEUE_SLO_PATH = '/api/v1/admin/source-review-queue-slo'
 export async function fetchSourceReviewQueueSlo() {
   const payload = await platformAdminRequest(SOURCE_REVIEW_QUEUE_SLO_PATH)
   return sourceReviewQueueSloSchema.parse(payload)
+}
+
+const SUBNET_LIVENESS_PATH = '/api/v1/admin/subnet-liveness'
+
+export async function fetchSubnetLiveness() {
+  const payload = await platformAdminRequest(SUBNET_LIVENESS_PATH)
+  return subnetLivenessSchema.parse(payload)
+}
+
+// Never throws: the panel reports its own failure so it cannot take the page
+// that hosts it down, or hide why the signals are missing.
+export async function readSubnetLiveness(): Promise<SubnetLivenessOutcome> {
+  try {
+    return { ok: true, view: await fetchSubnetLiveness() }
+  } catch (error) {
+    return {
+      ok: false,
+      status: error instanceof PlatformAdminError ? error.status : null,
+      message: (error instanceof Error ? error.message : 'Unknown error reading subnet liveness.').slice(0, 400),
+    }
+  }
 }
 
 export async function fetchOutlierEscalation(rawInput: unknown = {}) {

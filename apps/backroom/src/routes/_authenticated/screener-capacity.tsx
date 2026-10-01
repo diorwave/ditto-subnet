@@ -3,17 +3,24 @@ import { AlertTriangle, ServerCog } from 'lucide-react'
 import { PageHeader } from '../../components/PageHeader'
 import { ScreenerCapacityPanel } from '../../components/ScreenerCapacityPanel'
 import { ScreeningInfraRetryPanel } from '../../components/ScreeningInfraRetryPanel'
-import { getScreenerCapacity, getScreeningInfraRetries } from '../../server/admin.functions'
+import { SubnetLivenessPanel } from '../../components/SubnetLivenessPanel'
+import {
+  getScreenerCapacity,
+  getScreeningInfraRetries,
+  getSubnetLiveness,
+} from '../../server/admin.functions'
 
 export const Route = createFileRoute('/_authenticated/screener-capacity')({
-  // The retry read reports its own failure (readScreeningInfraRetries never
-  // throws) so it cannot take the capacity page down or hide why it is missing.
+  // The retry and liveness reads report their own failures (neither reader
+  // throws) so they cannot take the capacity page down or hide why they are
+  // missing. This is the signed-in landing page, so liveness is seen first.
   loader: async () => {
-    const [capacity, infraRetries] = await Promise.all([
+    const [capacity, infraRetries, liveness] = await Promise.all([
       getScreenerCapacity(),
       getScreeningInfraRetries(),
+      getSubnetLiveness(),
     ])
-    return { capacity, infraRetries }
+    return { capacity, infraRetries, liveness }
   },
   pendingComponent: Pending,
   errorComponent: ErrorState,
@@ -21,7 +28,7 @@ export const Route = createFileRoute('/_authenticated/screener-capacity')({
 })
 
 function ScreenerCapacityPage() {
-  const { capacity: initialState, infraRetries } = Route.useLoaderData()
+  const { capacity: initialState, infraRetries, liveness } = Route.useLoaderData()
   const { user } = Route.useRouteContext()
   return (
     <div>
@@ -36,6 +43,7 @@ function ScreenerCapacityPage() {
           </div>
         }
       />
+      <SubnetLivenessPanel initialState={liveness} />
       <ScreenerCapacityPanel
         initialState={initialState}
         readOnly={user.accessLevel === 'read'}
