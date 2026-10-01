@@ -172,7 +172,7 @@ def l2_prompt_cache_key(policy_version: int) -> str:
 
 
 L2_STATIC_HOLD_REVISION = "l2-integrity-static-hold-v4"
-L2_DOSSIER_REVISION = "language-neutral-source-v18"
+L2_DOSSIER_REVISION = "language-neutral-source-v19"
 L2_CAUSE_REASONING_EFFORT = "medium"
 L2_SAFETY_ADJUDICATOR_REASONING_EFFORT = "low"
 L2_HARNESS_REVISION = "l2-isolated-coding-harness-v23"
@@ -7886,10 +7886,77 @@ def _l1_evidence(observation: SourceReviewObservation) -> list[dict[str, object]
     return bounded
 
 
+# Model-facing L1 diagnostics are untrusted hypotheses. A reviewer that keeps
+# restating one concern at one site fills the 48-note ledger with paraphrases;
+# presenting every one to L2 spends tokens without adding evidence. Summaries
+# whose normalized content-word sets meet this Jaccard similarity against an
+# earlier diagnostic at the same (path, line, area, category) site are shown
+# once, with every collapsed note index retained. Lower-overlap summaries stay
+# separate, so a distinct mechanism at a shared line is never folded away.
+_L1_PARAPHRASE_SIMILARITY = 0.6
+_L1_SUMMARY_TOKEN = re.compile(r"[a-z0-9]+")
+_L1_SUMMARY_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "may",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "via",
+        "which",
+        "with",
+    }
+)
+
+
+def _l1_summary_terms(summary: str) -> frozenset[str]:
+    """Content-word set used only to recognize same-site paraphrases."""
+    terms: set[str] = set()
+    for token in _L1_SUMMARY_TOKEN.findall(summary.lower()):
+        if token in _L1_SUMMARY_STOPWORDS:
+            continue
+        for suffix in ("ing", "ed", "es", "e", "s"):
+            if len(token) > len(suffix) + 3 and token.endswith(suffix):
+                token = token[: -len(suffix)]
+                break
+        terms.add(token)
+    return frozenset(terms)
+
+
+def _l1_summaries_paraphrase(left: frozenset[str], right: frozenset[str]) -> bool:
+    if not left or not right:
+        return left == right
+    return len(left & right) / len(left | right) >= _L1_PARAPHRASE_SIMILARITY
+
+
 def _l1_lead_packet(
     observation: SourceReviewObservation,
 ) -> tuple[dict[str, object], ...]:
-    """Group repeated L1 locations while retaining every source note index."""
+    """Group repeated L1 locations while retaining every source note index.
+
+    Exact and near-paraphrase summaries at one grouped site collapse into one
+    model-facing diagnostic that lists every collapsed note index. The lead
+    still covers all of its notes, so a clear must resolve the whole site.
+    """
+    diagnostic_terms: dict[tuple[tuple[object, ...], int], frozenset[str]] = {}
     grouped: dict[tuple[object, ...], dict[str, object]] = {}
     for index, note in enumerate(observation.notes):
         if note.get("kind") != "concern":
@@ -7938,7 +8005,17 @@ def _l1_lead_packet(
         bounded_summary = (
             " ".join(summary.split())[:300] if isinstance(summary, str) else ""
         )
-        if not any(item["summary"] == bounded_summary for item in diagnostics):
+        terms = _l1_summary_terms(bounded_summary)
+        for position, item in enumerate(diagnostics):
+            if item["summary"] == bounded_summary or _l1_summaries_paraphrase(
+                diagnostic_terms[(key, position)], terms
+            ):
+                repeated = item.setdefault("repeated_note_indices", [])
+                assert isinstance(repeated, list)
+                repeated.append(index)
+                break
+        else:
+            diagnostic_terms[(key, len(diagnostics))] = terms
             diagnostics.append({"note_index": index, "summary": bounded_summary})
         confidence = note.get("confidence")
         if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
