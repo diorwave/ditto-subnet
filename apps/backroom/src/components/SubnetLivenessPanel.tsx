@@ -38,10 +38,12 @@ export function formatLivenessValue(
 ) {
   if (value === null) return 'n/a'
   if (unit === 'members') return `${value} ${value === 1 ? 'member' : 'members'}`
-  if (value < 60) return `${Math.round(value)} s`
-  if (value < 3600) return `${Math.round(value / 60)} min`
-  if (value < 86_400) return `${(value / 3600).toFixed(1)} h`
-  return `${(value / 86_400).toFixed(1)} d`
+  // Round down, so a value just under a threshold never displays as equal to it.
+  const floorTo = (amount: number, step: number) => Math.floor(amount * step) / step
+  if (value < 60) return `${Math.floor(value)} s`
+  if (value < 3600) return `${Math.floor(value / 60)} min`
+  if (value < 86_400) return `${floorTo(value / 3600, 10).toFixed(1)} h`
+  return `${floorTo(value / 86_400, 10).toFixed(1)} d`
 }
 
 function formatWhen(value: string | null) {

@@ -55,6 +55,9 @@ async def test_rejects_an_invalid_environment(
     _install(app, session_maker)
     response = await client.get(f"{_URL}?environment=Prod;drop", headers=_HEADERS)
     assert response.status_code == 422
+    # A whole-deployment read must not be labelled as another environment.
+    response = await client.get(f"{_URL}?environment=staging", headers=_HEADERS)
+    assert response.status_code == 422
 
 
 async def test_reports_every_signal_without_secrets(

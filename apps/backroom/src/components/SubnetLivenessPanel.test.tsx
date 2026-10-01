@@ -86,6 +86,10 @@ describe('SubnetLivenessPanel', () => {
     expect(formatLivenessValue(45, 'seconds')).toBe('45 s')
     expect(formatLivenessValue(900, 'seconds')).toBe('15 min')
     expect(formatLivenessValue(259_200, 'seconds')).toBe('3.0 d')
+    // Never round up onto a threshold: 899.6 s is under 15 min, 14,399 s under 4 h.
+    expect(formatLivenessValue(899.6, 'seconds')).toBe('14 min')
+    expect(formatLivenessValue(14_399, 'seconds')).toBe('3.9 h')
+    expect(formatLivenessValue(59.6, 'seconds')).toBe('59 s')
     expect(formatLivenessValue(1, 'members')).toBe('1 member')
     expect(formatLivenessValue(3, 'members')).toBe('3 members')
   })

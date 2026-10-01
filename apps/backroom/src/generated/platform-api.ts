@@ -42580,7 +42580,7 @@ export interface operations {
     get_subnet_liveness_api_v1_admin_subnet_liveness_get: {
         parameters: {
             query?: {
-                environment?: string;
+                environment?: "prod";
             };
             header?: {
                 authorization?: string | null;

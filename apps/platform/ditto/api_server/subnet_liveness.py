@@ -15,9 +15,15 @@ undetected for hours or days while every component reported itself healthy:
   (``oldest_actionable_hold``, ``lease_overrun``).
 
 This module is a **read model**: it pages nobody, gates nothing, and runs in a
-``READ ONLY`` transaction with a statement timeout, so a wedged signal can
-neither write nor hold the caller. Paging/alert delivery on top of these
-statuses is an explicit follow-up.
+``READ ONLY`` transaction, so it cannot write. ``statement_timeout`` bounds
+each statement, not the whole read; Backroom bounds the request. During an
+open rollout ``active_bench_version`` runs its own pre-existing score
+aggregates. Paging/alert delivery on top of these statuses is an explicit
+follow-up.
+
+The read covers the whole deployment. Only ``prod`` is accepted, because the
+legacy GCP route, queues, scores, holds, leases and the collector are not
+partitioned by environment.
 
 Every query is bounded by a partial index or a ``LIMIT`` and none touches
 ``inference_requests``:
@@ -48,7 +54,6 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ditto.api_models.screener_node_settings import ScreenerNodeChannelSettings
 from ditto.api_models.subnet_liveness import (
     LivenessSignalName,
     LivenessStatus,
@@ -65,15 +70,22 @@ from ditto.api_server.screener_node_identity import (
 from ditto.api_server.screener_policy_activation import (
     resolve_screener_policy_activation,
 )
-from ditto.api_server.v13_scorer_cohort import current_pin, packet_for_heartbeat
+from ditto.api_server.v13_scorer_cohort import (
+    PinMemberState,
+    current_pin,
+    packet_for_heartbeat,
+    pin_member_state,
+)
 from ditto.db.models import (
+    BenchmarkRollout,
     ScreenerHeartbeat,
     ScreenerNode,
-    ScreenerNodeChannelSettingsRevision,
     SourceEmissionCollectorCursor,
     ValidatorHeartbeat,
 )
+from ditto.db.queries.benchmark_admission import admission_rollout_for_active_version
 from ditto.db.queries.benchmark_rollout import active_bench_version, open_rollout
+from ditto.db.queries.queue_order import scoring_queue_backlog
 from ditto.db.queries.scores import SCORING_QUORUM
 from ditto.db.queries.screener_capacity import legacy_gcp_claim_authorized
 from ditto.db.queries.screener_node_settings import (
@@ -112,9 +124,11 @@ deadline: holds still have no published terminal clock (#2100)."""
 
 LEASE_OVERRUN_WARN_SECONDS = 5 * 60
 LEASE_OVERRUN_BREACH_SECONDS = 30 * 60
-"""A lease still open past its deadline means no sweep has run: no validator
-is polling (validator tickets) or no screener claim/controller heartbeat has
-arrived (screening attempts)."""
+"""A lease still open past its deadline means no sweep has run. Overdue
+validator tickets are expired only when a ``/job`` poll reaches ticket
+issuance, so either no validator polls or every poll is declined before
+issuance (pin, pause, allocator, provider outage). Screening attempts expire
+on screener claims and controller capacity heartbeats."""
 
 COLLECTOR_CURSOR_WARN_SECONDS = 15 * 60
 COLLECTOR_CURSOR_BREACH_SECONDS = 60 * 60
@@ -124,7 +138,6 @@ V13_SCORER_BENCH_VERSION = 13
 V13_PIN_MEMBERS = 3
 """``v13_scorer_pin_three_hotkeys_check`` pins exactly three members."""
 STATEMENT_TIMEOUT_MS = 5000
-SETTINGS_REVISION_SCAN_LIMIT = 50
 
 _EXCEPTION_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,63}$")
 
@@ -216,37 +229,68 @@ class AdmissionState:
     zero_since: datetime | None
 
 
-async def _concurrency_zero_since(
-    session: AsyncSession, *, node: ScreenerNode
-) -> datetime | None:
-    """Start of the node's current ``screening_concurrency == 0`` streak.
+_CONCURRENCY_SQL = (
+    "COALESCE((settings->>'screening_concurrency')::int, 0)"  # model default 0
+)
 
-    Settings revisions are append-only, so the streak starts at the first
-    zero revision after the newest nonzero one. With no revision at all the
-    node has run on the default (closed) settings since it enrolled.
-    """
-    rows = list(
-        await session.scalars(
-            select(ScreenerNodeChannelSettingsRevision)
-            .where(ScreenerNodeChannelSettingsRevision.node_id == node.node_id)
-            .order_by(ScreenerNodeChannelSettingsRevision.revision.desc())
-            .limit(SETTINGS_REVISION_SCAN_LIMIT)
-        )
+_ZERO_STREAK_SQL = text(
+    f"""
+    WITH last_open AS (
+        SELECT max(revision) AS revision
+          FROM screener_node_channel_settings_revisions
+         WHERE node_id = :node_id AND {_CONCURRENCY_SQL} > 0
     )
-    if not rows:
-        return _aware(node.registered_at)
-    streak_start: datetime | None = None
-    for row in rows:
-        try:
-            concurrency = ScreenerNodeChannelSettings.model_validate(
-                row.settings
-            ).screening_concurrency
-        except ValueError:
-            break
-        if concurrency > 0:
-            break
-        streak_start = _aware(row.created_at)
-    return streak_start
+    SELECT last_open.revision AS last_open_revision,
+           (SELECT min(r.created_at)
+              FROM screener_node_channel_settings_revisions r
+             WHERE r.node_id = :node_id
+               AND r.revision > last_open.revision) AS closed_at
+      FROM last_open
+    """
+)
+
+_REVOKED_WHILE_OPEN_SQL = text(
+    f"""
+    SELECT max(n.revoked_at)
+      FROM (
+        SELECT node_id, revoked_at FROM screener_nodes
+         WHERE environment = :environment
+           AND status = 'revoked'
+           AND revoked_at IS NOT NULL
+         ORDER BY revoked_at DESC
+         LIMIT :limit
+      ) n
+     WHERE COALESCE((
+        SELECT {_CONCURRENCY_SQL}
+          FROM screener_node_channel_settings_revisions r
+         WHERE r.node_id = n.node_id AND r.created_at <= n.revoked_at
+         ORDER BY r.revision DESC
+         LIMIT 1
+     ), 0) > 0
+    """
+)
+
+REVOKED_NODE_SCAN_LIMIT = 50
+"""Newest revocations considered when dating a zero; older ones cannot be the
+most recent closure an operator is looking for."""
+
+
+async def _zero_streak(
+    session: AsyncSession, *, node_id: str
+) -> tuple[bool, datetime | None]:
+    """Whether the node was ever opened, and when its current zero began.
+
+    Revisions are append-only, so the current zero streak starts at the first
+    revision after the newest nonzero one: two indexed reads, exact however
+    many zero revisions followed. A node that was never opened never
+    contributed admission and must not date when admission became zero.
+    """
+    row = (
+        (await session.execute(_ZERO_STREAK_SQL, {"node_id": node_id})).mappings().one()
+    )
+    if row["last_open_revision"] is None:
+        return False, None
+    return True, _aware(row["closed_at"])
 
 
 async def load_admission_state(
@@ -264,10 +308,12 @@ async def load_admission_state(
     add one slot each while the legacy route is authorized
     (:func:`legacy_gcp_claim_authorized`, read without a row lock).
 
-    ``zero_since`` is when admission last became zero, when every closed
-    node's closure time is recorded: the latest of the per-node closure
-    times. It is null while admission is open or any closure is unrecorded
-    (a status change or a policy mismatch carries no timestamp).
+    ``zero_since`` is when admission last became zero: the latest closure
+    among nodes that once admitted work (a never-opened or never-heartbeating
+    node contributed nothing, so it dates nothing; a revoked node counts only
+    if it was open when revoked). It is null while admission is open or any
+    contributing closure is unrecorded (a status change or a policy mismatch
+    carries no timestamp).
     """
     nodes = list(
         await session.scalars(
@@ -279,13 +325,11 @@ async def load_admission_state(
             .order_by(ScreenerNode.node_id)
         )
     )
+    # A revocation dates the zero only if the node was open when revoked.
     revoked_at = _aware(
         await session.scalar(
-            text(
-                "SELECT max(revoked_at) FROM screener_nodes "
-                "WHERE environment = :environment AND status = 'revoked'"
-            ),
-            {"environment": environment},
+            _REVOKED_WHILE_OPEN_SQL,
+            {"environment": environment, "limit": REVOKED_NODE_SCAN_LIMIT},
         )
     )
     heartbeats: list[ScreenerHeartbeat] = (
@@ -335,14 +379,16 @@ async def load_admission_state(
         if ready and concurrency > 0:
             effective += concurrency
             continue
+        # Only a node that once admitted work can date when admission became
+        # zero. Enrolling a replacement or configuring a never-opened node must
+        # not move ``since`` forward on a live breach.
+        ever_opened, streak_start = await _zero_streak(session, node_id=node.node_id)
+        if not ever_opened or seen_at is None:
+            continue
         known: list[datetime] = []
-        if concurrency == 0:
-            streak_start = await _concurrency_zero_since(session, node=node)
-            if streak_start is not None:
-                known.append(streak_start)
-        if seen_at is None:
-            known.append(_aware(node.registered_at) or now)
-        elif now - seen_at > timedelta(seconds=CONTROLLER_HEARTBEAT_READY_SECONDS):
+        if concurrency == 0 and streak_start is not None:
+            known.append(streak_start)
+        if now - seen_at > timedelta(seconds=CONTROLLER_HEARTBEAT_READY_SECONDS):
             known.append(
                 seen_at + timedelta(seconds=CONTROLLER_HEARTBEAT_READY_SECONDS)
             )
@@ -463,34 +509,25 @@ _SCORE_EVENTS_SQL = text(
     """
 )
 
-# GREATEST ignores NULLs: an evaluating agent entered the queue at its upload,
-# its last screening finish, or its last quarantine release, whichever is last.
-_SCORING_QUEUE_SQL = text(
-    """
-    SELECT count(*) AS queued, min(entered_at) AS queued_since
-      FROM (
-        SELECT GREATEST(
-                 a.created_at,
-                 (SELECT max(sa.finished_at) FROM screening_attempts sa
-                   WHERE sa.agent_id = a.agent_id),
-                 (SELECT max(q.resolved_at) FROM screening_quarantines q
-                   WHERE q.agent_id = a.agent_id)
-               ) AS entered_at
-          FROM agents a
-         WHERE a.status = 'evaluating'
-      ) queue
-    """
-)
-
 _OPEN_LEASES_SQL = text(
     "SELECT count(*) FROM validator_tickets WHERE status = 'issued' AND deadline > :now"
 )
 
 
 async def scoring_signal(
-    session: AsyncSession, *, now: datetime
+    session: AsyncSession,
+    *,
+    now: datetime,
+    active_version: int,
+    rollout: BenchmarkRollout | None,
 ) -> SubnetLivenessSignal:
-    """Seconds without an accepted validator score while work is queued."""
+    """Seconds without an accepted validator score while scoring work waits.
+
+    Work is what a validator could lease (:func:`scoring_queue_backlog`, the
+    allocator's own fleet-wide candidate filter) in the active era and, during
+    an open rollout, the desired era. Withdrawn, retired or closed-era
+    ``evaluating`` rows are not work, so an idle subnet stays ``ok``.
+    """
     events = (
         (
             await session.execute(
@@ -504,11 +541,28 @@ async def scoring_signal(
         .mappings()
         .one()
     )
-    queue = (await session.execute(_SCORING_QUEUE_SQL)).mappings().one()
+    eras: list[tuple[int, BenchmarkRollout | None]] = [
+        (
+            active_version,
+            await admission_rollout_for_active_version(
+                session, bench_version=active_version
+            ),
+        )
+    ]
+    if rollout is not None and rollout.desired_version != active_version:
+        eras.append((rollout.desired_version, rollout))
+    queued = 0
+    queued_since: datetime | None = None
+    for bench_version, era_rollout in eras:
+        count, entered = await scoring_queue_backlog(
+            session, bench_version=bench_version, rollout=era_rollout
+        )
+        queued += count
+        entered = _aware(entered)
+        if entered is not None and (queued_since is None or entered < queued_since):
+            queued_since = entered
     open_leases = int(await session.scalar(_OPEN_LEASES_SQL, {"now": now}) or 0)
-    queued = int(queue["queued"] or 0)
     last_score_at = _aware(events["last_score_at"])
-    queued_since = _aware(queue["queued_since"])
     since: datetime | None = None
     if queued:
         candidates = [t for t in (last_score_at, queued_since) if t is not None]
@@ -522,15 +576,16 @@ async def scoring_signal(
         breach=SCORING_STALL_BREACH_SECONDS,
         since=since,
         hint=(
-            "No accepted score while agents wait. Open leases with no scores is "
-            "an execution fault; no leases is dispatch (check the v13 pin, "
-            "get_validator_capacity, agent_scoring_readiness)."
+            "No accepted score while leaseable work waits. Open leases with no "
+            "scores is an execution fault; no leases is dispatch (check the v13 "
+            "pin, get_validator_capacity, agent_scoring_readiness)."
         ),
         detail={
             "scores_last_hour": int(events["last_window"] or 0),
             "last_accepted_score_at": _iso(last_score_at),
-            "evaluating_agents": queued,
+            "scoring_queue": queued,
             "open_validator_leases": open_leases,
+            "active_bench_version": active_version,
         },
     )
 
@@ -538,19 +593,47 @@ async def scoring_signal(
 # ─── V13 scorer cohort pin ──────────────────────────────────────────────────
 
 
-async def scorer_pin_signal(
-    session: AsyncSession, *, now: datetime
-) -> SubnetLivenessSignal:
-    """Pinned members whose live signed packet no longer matches the pin.
+def _pin_hint(*, no_fresh: int, different: int, fresh_agree: bool) -> str:
+    if no_fresh:
+        return (
+            "Pinned members have no fresh signed v13 packet: offline, restarting "
+            "or not reporting a managed scorer. Check those validators' "
+            "heartbeats; rotating cannot fix this and is refused."
+        )
+    if different and fresh_agree:
+        return (
+            "Every pinned member reports the same newer signed packet than the "
+            "pin, so each is declined v13 work (#2490). Confirm with "
+            "get_v13_report_only_current_packet, then rotate_v13_scorer_cohort."
+        )
+    if different:
+        return (
+            "Fresh pinned members disagree on their signed scorer packet. "
+            "Converge their validator releases before rotating the pin."
+        )
+    return "Every pinned member matches the signed pin."
 
-    The same comparison
-    :func:`~ditto.api_server.v13_scorer_cohort.pinned_validator_allowed`
-    makes on every v13 dispatch: a mismatched member is declined. A pin is as
-    large as the scoring quorum, so one stale member stops v13 finalization.
+
+async def scorer_pin_signal(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    active_version: int,
+    rollout: BenchmarkRollout | None,
+) -> SubnetLivenessSignal:
+    """Pinned members declined v13 work, split by why.
+
+    Each member is classified by
+    :func:`~ditto.api_server.v13_scorer_cohort.pin_member_state`, the exact
+    check :func:`~ditto.api_server.v13_scorer_cohort.pinned_validator_allowed`
+    runs on every v13 dispatch. A pin is as large as the scoring quorum, so one
+    declined member stops v13 finalization. The hint separates a member with
+    no fresh packet (bring the validator back) from a fresh member on another
+    release (rotate, but only when fresh members agree).
     """
-    rollout = await open_rollout(session)
-    active = await active_bench_version(session, open_transition=rollout)
-    targets = {active} | ({rollout.desired_version} if rollout is not None else set())
+    targets = {active_version} | (
+        {rollout.desired_version} if rollout is not None else set()
+    )
     pin = await current_pin(session)
     # Breach once fewer members match than a quorum needs. The pin table
     # enforces exactly three members, so with quorum 3 one stale member breaches.
@@ -565,33 +648,39 @@ async def scorer_pin_signal(
             breach=breach,
             since=None,
             hint="No v13 scorer pin governs dispatch right now.",
-            detail={"active_bench_version": active, "pin_active": pin is not None},
+            detail={
+                "active_bench_version": active_version,
+                "pin_active": pin is not None,
+            },
         )
     hotkeys: Sequence[str] = list(pin.hotkeys)
-    matching = 0
+    states: list[PinMemberState] = []
+    fresh_packets: set[str] = set()
     for hotkey in hotkeys:
         heartbeat = await session.get(ValidatorHeartbeat, hotkey)
+        states.append(pin_member_state(heartbeat, pin_packet=pin.packet, now=now))
         packet = packet_for_heartbeat(heartbeat, now=now)
-        if packet is not None and packet.model_dump(mode="json") == pin.packet:
-            matching += 1
-    stale = len(hotkeys) - matching
+        if packet is not None:
+            fresh_packets.add(packet.model_dump_json())
+    no_fresh = states.count("no_fresh_packet")
+    different = states.count("different_packet")
+    fresh_agree = len(fresh_packets) <= 1
     return _signal(
         "v13_scorer_cohort_pin",
-        value=float(stale),
+        value=float(no_fresh + different),
         unit="members",
         warn=None,
         breach=breach,
         since=None,
-        hint=(
-            "Pinned members report a different signed scorer packet and are "
-            "declined v13 work (#2490). Compare get_v13_scorer_cohort_preflight "
-            "and rotate the pin."
-        ),
+        hint=_pin_hint(no_fresh=no_fresh, different=different, fresh_agree=fresh_agree),
         detail={
             "pinned_members": len(hotkeys),
-            "matching_members": matching,
+            "matching_members": states.count("match"),
+            "members_without_fresh_packet": no_fresh,
+            "members_with_different_packet": different,
+            "fresh_packets_agree": fresh_agree,
             "pin_created_at": _iso(_aware(pin.created_at)),
-            "active_bench_version": active,
+            "active_bench_version": active_version,
         },
     )
 
@@ -753,9 +842,12 @@ async def lease_signal(session: AsyncSession, *, now: datetime) -> SubnetLivenes
         breach=LEASE_OVERRUN_BREACH_SECONDS,
         since=worst[2] if worst is not None and overrun > 0 else None,
         hint=(
-            "A lease is open past its deadline, so no expiry sweep ran: no "
-            "validator is polling or no screener claim/controller heartbeat "
-            "arrived. Check get_validator_capacity and get_screener_capacity."
+            "A lease is open past its deadline. Validator tickets expire only "
+            "when a /job poll reaches ticket issuance, so either nothing polls "
+            "or every poll is declined first (pin, pause, allocator, provider "
+            "outage); screening attempts expire on screener claims and "
+            "controller heartbeats. Check get_validator_capacity, the v13 pin "
+            "and get_screener_capacity."
         ),
         detail=detail,
     )
@@ -839,6 +931,8 @@ async def load_subnet_liveness(
         await session.execute(
             text(f"SET LOCAL statement_timeout = {int(STATEMENT_TIMEOUT_MS)}")
         )
+        rollout = await open_rollout(session)
+        active = await active_bench_version(session, open_transition=rollout)
         policy = await resolve_screener_policy_activation(session)
         admission = await load_admission_state(
             session,
@@ -860,8 +954,12 @@ async def load_subnet_liveness(
             oldest_upload_signal(
                 claimable_uploads=uploads, oldest_upload_at=oldest_upload_at, now=now
             ),
-            await scoring_signal(session, now=now),
-            await scorer_pin_signal(session, now=now),
+            await scoring_signal(
+                session, now=now, active_version=active, rollout=rollout
+            ),
+            await scorer_pin_signal(
+                session, now=now, active_version=active, rollout=rollout
+            ),
             await hold_signal(session, now=now),
             await lease_signal(session, now=now),
             await collector_signal(session, now=now, netuid=netuid),

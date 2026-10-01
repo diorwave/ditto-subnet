@@ -1617,7 +1617,9 @@ export async function fetchSourceReviewQueueSlo() {
 const SUBNET_LIVENESS_PATH = '/api/v1/admin/subnet-liveness'
 
 export async function fetchSubnetLiveness() {
-  const payload = await platformAdminRequest(SUBNET_LIVENESS_PATH)
+  // Each Platform statement is bounded at 5 s; bound the whole read too so the
+  // landing page never waits on it for the default request timeout.
+  const payload = await platformAdminRequest(SUBNET_LIVENESS_PATH, { timeoutMs: 10_000 })
   return subnetLivenessSchema.parse(payload)
 }
 

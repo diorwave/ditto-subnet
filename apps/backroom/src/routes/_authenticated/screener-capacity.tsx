@@ -13,10 +13,18 @@ import {
 export const Route = createFileRoute('/_authenticated/screener-capacity')({
   // The retry and liveness reads report their own failures (neither reader
   // throws) so they cannot take the capacity page down or hide why they are
-  // missing. This is the signed-in landing page, so liveness is seen first.
+  // missing. This is the signed-in landing page, so liveness is seen first,
+  // and a failed capacity read must not discard a liveness verdict either:
+  // capacity failing is exactly when the verdict matters most.
   loader: async () => {
     const [capacity, infraRetries, liveness] = await Promise.all([
-      getScreenerCapacity(),
+      getScreenerCapacity().then(
+        (view) => ({ ok: true as const, view }),
+        (error: unknown) => ({
+          ok: false as const,
+          message: error instanceof Error ? error.message : 'Unknown error reading screener capacity.',
+        }),
+      ),
       getScreeningInfraRetries(),
       getSubnetLiveness(),
     ])
@@ -28,7 +36,7 @@ export const Route = createFileRoute('/_authenticated/screener-capacity')({
 })
 
 function ScreenerCapacityPage() {
-  const { capacity: initialState, infraRetries, liveness } = Route.useLoaderData()
+  const { capacity, infraRetries, liveness } = Route.useLoaderData()
   const { user } = Route.useRouteContext()
   return (
     <div>
@@ -44,10 +52,14 @@ function ScreenerCapacityPage() {
         }
       />
       <SubnetLivenessPanel initialState={liveness} />
-      <ScreenerCapacityPanel
-        initialState={initialState}
-        readOnly={user.accessLevel === 'read'}
-      />
+      {capacity.ok ? (
+        <ScreenerCapacityPanel
+          initialState={capacity.view}
+          readOnly={user.accessLevel === 'read'}
+        />
+      ) : (
+        <ErrorState error={new Error(capacity.message)} />
+      )}
       <ScreeningInfraRetryPanel initialState={infraRetries} />
     </div>
   )

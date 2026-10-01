@@ -9519,11 +9519,23 @@ const subnetLivenessUnavailableSignalSchema = z.object({
   reason: z.string(),
 } satisfies PlatformResponseShape<GeneratedSubnetLivenessUnavailableSignal>)
 
+// A Platform that ships a new signal (or unit) before this Backroom must not
+// cost the operator the signals it does know: unknown entries are dropped, not
+// a whole-read parse failure. Platform and Backroom deploy independently.
+const knownSubnetLivenessSignalsSchema = z
+  .array(z.unknown())
+  .transform((items) =>
+    items.flatMap((item) => {
+      const parsed = subnetLivenessSignalSchema.safeParse(item)
+      return parsed.success ? [parsed.data] : []
+    }),
+  )
+
 export const subnetLivenessSchema = z.object({
   generated_at: z.string(),
   environment: z.string(),
   status: livenessStatusSchema,
-  signals: z.array(subnetLivenessSignalSchema),
+  signals: knownSubnetLivenessSignalsSchema,
   unavailable: z.array(subnetLivenessUnavailableSignalSchema),
 } satisfies PlatformResponseShape<GeneratedSubnetLiveness>)
 

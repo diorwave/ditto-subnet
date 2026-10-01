@@ -3857,6 +3857,8 @@ describe('Backroom MCP tools', () => {
           signal('oldest_actionable_hold', 'ok', 600),
           signal('lease_overrun', 'ok', 0),
           signal('source_emission_collector', 'ok', 30),
+          // A signal from a newer Platform is dropped, not a failed read.
+          signal('db_headroom', 'breach', 99),
         ],
         unavailable: [{ name: 'disk_and_db_headroom', reason: 'host metrics' }],
         admin_token_echo: 'must-not-escape',
@@ -3885,6 +3887,9 @@ describe('Backroom MCP tools', () => {
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
       expect(url).toContain('/api/v1/admin/subnet-liveness')
       expect(init.method ?? 'GET').toBe('GET')
+      const body = readJsonResult(response) as { signals: Array<{ name: string }> }
+      expect(body.signals).toHaveLength(7)
+      expect(body.signals.map((item) => item.name)).not.toContain('db_headroom')
       const text = JSON.stringify(readTextResult(response))
       expect(text).not.toContain('platform-admin-token')
       expect(text).not.toContain('must-not-escape')

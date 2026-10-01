@@ -9,7 +9,7 @@ should consume this read rather than re-derive it.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +29,9 @@ async def get_subnet_liveness(
     request: Request,
     _admin: AdminDep,
     session: SessionDep,
-    environment: Annotated[str, Query(pattern=r"^[a-z][a-z0-9-]{0,31}$")] = "prod",
+    # Whole-deployment read: queues, scores, holds and the legacy GCP route are
+    # not partitioned by environment, so only prod is honest to label.
+    environment: Annotated[Literal["prod"], Query()] = "prod",
 ) -> SubnetLiveness:
     """Screening admission, scoring throughput, pin, hold, lease and collector."""
     return await load_subnet_liveness(

@@ -33,9 +33,17 @@ from ditto.db.models import (
     ScreeningAttempt,
     ScreeningQuarantine,
     SourceEmissionCollectorCursor,
+    SubmissionRetirement,
     V13ScorerCohortPin,
     ValidatorHeartbeat,
+    ValidatorQueueWithdrawal,
     ValidatorTicket,
+)
+from ditto.tests.api_server.endpoints.test_admin_validator_capacity import (
+    _BENCH as _ACTIVE_BENCH,
+)
+from ditto.tests.api_server.endpoints.test_admin_validator_capacity import (
+    _seed_agent as _seed_leaseable_agent,
 )
 from ditto.tests.db.queries.test_benchmark_rollout import _heartbeat
 from ditto_screening_protocol import SCREENING_FLOOR_POLICY_VERSION
@@ -102,42 +110,49 @@ async def _node(
     session_maker: async_sessionmaker[AsyncSession],
     *,
     now: datetime,
-    concurrency: int,
-    revision_at: datetime,
+    revisions: list[tuple[int, datetime]],
     heartbeat_at: datetime | None,
+    index: int = 1,
+    status: str = "active",
+    revoked_at: datetime | None = None,
 ) -> None:
+    """One enrolled node with ``(screening_concurrency, created_at)`` revisions."""
+    node_id = f"subnet-screener-{index}"
+    hotkey = _NODE_HOTKEY if index == 1 else f"5Node{index}".ljust(48, "X")
     async with session_maker() as session, session.begin():
         session.add(
             ScreenerNode(
                 environment="prod",
-                node_id="subnet-screener-1",
+                node_id=node_id,
                 provider="hetzner",
-                provider_resource_id="test-resource-1",
-                screener_hotkey=_NODE_HOTKEY,
-                token_hash=hashlib.sha256(b"node-token").hexdigest(),
+                provider_resource_id=f"test-resource-{index}",
+                screener_hotkey=hotkey,
+                token_hash=hashlib.sha256(node_id.encode()).hexdigest(),
                 token_expires_at=now + timedelta(hours=1),
-                status="active",
+                status=status,
                 capacity=4,
-                registered_at=revision_at - timedelta(days=1),
+                registered_at=now - timedelta(days=3),
+                revoked_at=revoked_at,
             )
         )
     async with session_maker() as session, session.begin():
-        session.add(
-            ScreenerNodeChannelSettingsRevision(
-                environment="prod",
-                node_id="subnet-screener-1",
-                parent_revision=0,
-                settings={"screening_concurrency": concurrency},
-                reason="liveness test admission",
-                actor="test",
-                created_at=revision_at,
+        for parent, (concurrency, created_at) in enumerate(revisions):
+            session.add(
+                ScreenerNodeChannelSettingsRevision(
+                    environment="prod",
+                    node_id=node_id,
+                    parent_revision=parent,
+                    settings={"screening_concurrency": concurrency},
+                    reason="liveness test admission",
+                    actor="test",
+                    created_at=created_at,
+                )
             )
-        )
         if heartbeat_at is not None:
             session.add(
                 ScreenerHeartbeat(
-                    screener_hotkey=_NODE_HOTKEY,
-                    instance_id="subnet-screener-1",
+                    screener_hotkey=hotkey,
+                    instance_id=node_id,
                     software_version="0.21.0",
                     protocol_version=4,
                     policy_version=SCREENING_POLICY_VERSION,
@@ -158,8 +173,7 @@ class TestScreeningAdmission:
         await _node(
             session_maker,
             now=now,
-            concurrency=2,
-            revision_at=now - timedelta(hours=3),
+            revisions=[(2, now - timedelta(hours=3))],
             heartbeat_at=now - timedelta(seconds=10),
         )
         await _agent(
@@ -185,8 +199,7 @@ class TestScreeningAdmission:
         await _node(
             session_maker,
             now=now,
-            concurrency=0,
-            revision_at=now - timedelta(hours=2),
+            revisions=[(2, now - timedelta(hours=5)), (0, now - timedelta(hours=2))],
             heartbeat_at=now - timedelta(seconds=10),
         )
         oldest = now - timedelta(hours=1)
@@ -205,6 +218,110 @@ class TestScreeningAdmission:
         assert admission.value == pytest.approx(3600)
         assert liveness.status == "breach"
 
+    async def test_a_short_zero_warns_before_it_breaches(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        now = _now()
+        await _node(
+            session_maker,
+            now=now,
+            revisions=[(2, now - timedelta(hours=5)), (0, now - timedelta(minutes=8))],
+            heartbeat_at=now - timedelta(seconds=10),
+        )
+        await _agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            created_at=now - timedelta(hours=1),
+        )
+
+        admission = _signal(await _read(session_maker, now), "screening_admission")
+        assert admission.status == "warn"
+        assert admission.value == pytest.approx(480)
+
+    async def test_idle_node_changes_do_not_reset_a_live_breach(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Enrolling a never-opened node or revoking a closed one dates nothing."""
+        now = _now()
+        await _node(
+            session_maker,
+            now=now,
+            revisions=[(2, now - timedelta(hours=5)), (0, now - timedelta(hours=2))],
+            heartbeat_at=now - timedelta(seconds=10),
+        )
+        # A replacement node enrolled a minute ago on all-zero settings.
+        await _node(
+            session_maker,
+            now=now,
+            index=2,
+            revisions=[(0, now - timedelta(minutes=1))],
+            heartbeat_at=now - timedelta(seconds=5),
+        )
+        # A dead node revoked 30 s ago, closed since long before.
+        await _node(
+            session_maker,
+            now=now,
+            index=3,
+            status="revoked",
+            revoked_at=now - timedelta(seconds=30),
+            revisions=[(1, now - timedelta(days=2)), (0, now - timedelta(days=1))],
+            heartbeat_at=None,
+        )
+        oldest = now - timedelta(hours=1)
+        await _agent(session_maker, status=AgentStatus.UPLOADED, created_at=oldest)
+
+        admission = _signal(await _read(session_maker, now), "screening_admission")
+        assert admission.status == "breach"
+        assert admission.detail["enrolled_nodes"] == 2
+        assert admission.detail["zero_since"] == (now - timedelta(hours=2)).isoformat()
+        assert admission.since == oldest
+
+    async def test_revoking_the_last_open_node_dates_the_zero(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        now = _now()
+        revoked = now - timedelta(minutes=20)
+        await _node(
+            session_maker,
+            now=now,
+            status="revoked",
+            revoked_at=revoked,
+            revisions=[(2, now - timedelta(days=1))],
+            heartbeat_at=now - timedelta(minutes=21),
+        )
+        await _agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            created_at=now - timedelta(hours=2),
+        )
+
+        admission = _signal(await _read(session_maker, now), "screening_admission")
+        assert admission.status == "breach"
+        assert admission.since == revoked
+
+    async def test_long_zero_streak_dates_from_its_first_revision(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """More than fifty zero revisions still date the zero exactly."""
+        now = _now()
+        closed = now - timedelta(hours=3)
+        await _node(
+            session_maker,
+            now=now,
+            revisions=[(2, now - timedelta(hours=5))]
+            + [(0, closed + timedelta(minutes=minute)) for minute in range(51)],
+            heartbeat_at=now - timedelta(seconds=10),
+        )
+        await _agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            created_at=now - timedelta(hours=4),
+        )
+
+        admission = _signal(await _read(session_maker, now), "screening_admission")
+        assert admission.status == "breach"
+        assert admission.since == closed
+
     async def test_closed_admission_with_nothing_waiting_is_ok(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
@@ -212,8 +329,7 @@ class TestScreeningAdmission:
         await _node(
             session_maker,
             now=now,
-            concurrency=0,
-            revision_at=now - timedelta(hours=2),
+            revisions=[(2, now - timedelta(hours=5)), (0, now - timedelta(hours=2))],
             heartbeat_at=now - timedelta(seconds=10),
         )
 
@@ -229,8 +345,7 @@ class TestScreeningAdmission:
         await _node(
             session_maker,
             now=now,
-            concurrency=2,
-            revision_at=now - timedelta(days=2),
+            revisions=[(2, now - timedelta(days=2))],
             heartbeat_at=now - timedelta(hours=5),
         )
         await _agent(
@@ -326,16 +441,22 @@ async def _score_event(
         )
 
 
+async def _leaseable(
+    session_maker: async_sessionmaker[AsyncSession], *, created_at: datetime
+) -> UUID:
+    """One evaluating submission the allocator's fleet-wide filter admits."""
+    async with session_maker() as session, session.begin():
+        return await _seed_leaseable_agent(
+            session, name=f"leaseable-{uuid4().hex[:8]}", created_at=created_at
+        )
+
+
 class TestScoringThroughput:
     async def test_recent_score_while_queued_is_ok(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
         now = _now()
-        agent_id = await _agent(
-            session_maker,
-            status=AgentStatus.EVALUATING,
-            created_at=now - timedelta(days=1),
-        )
+        agent_id = await _leaseable(session_maker, created_at=now - timedelta(days=1))
         await _score_event(
             session_maker, agent_id=agent_id, recorded_at=now - timedelta(minutes=20)
         )
@@ -343,19 +464,27 @@ class TestScoringThroughput:
         signal = _signal(await _read(session_maker, now), "scoring_throughput")
         assert signal.status == "ok"
         assert signal.detail["scores_last_hour"] == 1
-        assert signal.detail["evaluating_agents"] == 1
+        assert signal.detail["scoring_queue"] == 1
         assert signal.value == pytest.approx(1200)
+
+    async def test_no_score_for_an_hour_warns(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        now = _now()
+        agent_id = await _leaseable(session_maker, created_at=now - timedelta(days=1))
+        await _score_event(
+            session_maker, agent_id=agent_id, recorded_at=now - timedelta(minutes=90)
+        )
+
+        signal = _signal(await _read(session_maker, now), "scoring_throughput")
+        assert signal.status == "warn"
 
     async def test_no_score_for_hours_while_queued_breaches(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
         """The #2490 shape: work queued, nothing accepted for hours."""
         now = _now()
-        agent_id = await _agent(
-            session_maker,
-            status=AgentStatus.EVALUATING,
-            created_at=now - timedelta(days=2),
-        )
+        agent_id = await _leaseable(session_maker, created_at=now - timedelta(days=2))
         last = now - timedelta(hours=5)
         await _score_event(session_maker, agent_id=agent_id, recorded_at=last)
         # A newer finalization event is not an accepted validator score.
@@ -389,16 +518,65 @@ class TestScoringThroughput:
         assert signal.status == "ok"
         assert signal.value == 0
 
+    async def test_unleaseable_evaluating_rows_are_not_scoring_work(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Withdrawn, retired and dataset-less ``evaluating`` rows stay idle."""
+        now = _now()
+        scored = await _agent(
+            session_maker,
+            status=AgentStatus.SCORED,
+            created_at=now - timedelta(days=3),
+        )
+        await _score_event(
+            session_maker, agent_id=scored, recorded_at=now - timedelta(hours=6)
+        )
+        withdrawn = await _leaseable(session_maker, created_at=now - timedelta(days=2))
+        retired = await _leaseable(session_maker, created_at=now - timedelta(days=2))
+        # Closed-era shape: evaluating, but no dataset for the active era.
+        await _agent(
+            session_maker,
+            status=AgentStatus.EVALUATING,
+            created_at=now - timedelta(days=2),
+        )
+        async with session_maker() as session, session.begin():
+            session.add(
+                ValidatorQueueWithdrawal(
+                    withdrawal_id=uuid4(),
+                    agent_id=withdrawn,
+                    bench_version=_ACTIVE_BENCH,
+                    actor="operator@example.com",
+                    reason="liveness test withdrawal",
+                    expected_snapshot="a" * 64,
+                    score_count=0,
+                    ticket_snapshot=[],
+                )
+            )
+            session.add(
+                SubmissionRetirement(
+                    retirement_id=uuid4(),
+                    agent_id=retired,
+                    bench_version=_ACTIVE_BENCH,
+                    superseded_by_version=_ACTIVE_BENCH + 1,
+                    actor="operator@example.com",
+                    reason="liveness test retirement",
+                    expected_snapshot="b" * 64,
+                    score_count=0,
+                    ticket_snapshot=[],
+                )
+            )
+
+        signal = _signal(await _read(session_maker, now), "scoring_throughput")
+        assert signal.status == "ok"
+        assert signal.value == 0
+        assert signal.detail["scoring_queue"] == 0
+
     async def test_queue_clock_starts_when_the_agent_entered_scoring(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
         """An old upload that only just passed screening is not a stall."""
         now = _now()
-        agent_id = await _agent(
-            session_maker,
-            status=AgentStatus.EVALUATING,
-            created_at=now - timedelta(days=3),
-        )
+        agent_id = await _leaseable(session_maker, created_at=now - timedelta(days=3))
         async with session_maker() as session, session.begin():
             session.add(
                 ScreeningAttempt(
@@ -472,12 +650,19 @@ class TestV13ScorerCohortPin:
         *,
         now: datetime,
         live_packets: list[dict[str, Any]],
+        offline: frozenset[str] = frozenset(),
     ) -> None:
         pinned = _packet("a" * 40)
         async with session_maker() as session, session.begin():
             session.add_all(
                 [
-                    _managed(hotkey, now, packet)
+                    # An offline member's last heartbeat is past the freshness
+                    # window, so it carries no fresh signed packet.
+                    _managed(
+                        hotkey,
+                        now - timedelta(minutes=10) if hotkey in offline else now,
+                        packet,
+                    )
                     for hotkey, packet in zip(_PIN_HOTKEYS, live_packets, strict=True)
                 ]
             )
@@ -515,6 +700,9 @@ class TestV13ScorerCohortPin:
         assert signal.status == "breach"
         assert signal.value == 3
         assert signal.detail["matching_members"] == 0
+        assert signal.detail["members_with_different_packet"] == 3
+        assert signal.detail["fresh_packets_agree"] is True
+        assert "rotate_v13_scorer_cohort" in signal.hint
 
     async def test_one_stale_member_breaches_the_quorum(
         self, session_maker: async_sessionmaker[AsyncSession]
@@ -529,6 +717,28 @@ class TestV13ScorerCohortPin:
         signal = _signal(await _read(session_maker, now), "v13_scorer_cohort_pin")
         assert signal.status == "breach"
         assert signal.value == 1
+        assert signal.detail["fresh_packets_agree"] is False
+        assert "Converge" in signal.hint
+
+    async def test_offline_member_is_not_reported_as_a_rotatable_pin(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """No fresh packet means bring the validator back; rotation is refused."""
+        now = _now()
+        await self._seed(
+            session_maker,
+            now=now,
+            live_packets=[_packet("a" * 40)] * 3,
+            offline=frozenset({_PIN_HOTKEYS[0]}),
+        )
+
+        signal = _signal(await _read(session_maker, now), "v13_scorer_cohort_pin")
+        assert signal.status == "breach"
+        assert signal.value == 1
+        assert signal.detail["members_without_fresh_packet"] == 1
+        assert signal.detail["members_with_different_packet"] == 0
+        assert "heartbeats" in signal.hint
+        assert "rotate_v13_scorer_cohort" not in signal.hint
 
     async def test_no_pin_is_not_applicable(
         self, session_maker: async_sessionmaker[AsyncSession]
@@ -698,6 +908,40 @@ class TestLeaseOverrun:
         assert signal.status == "breach"
         assert signal.since == deadline
         assert signal.detail["worst_kind"] == "validator_ticket"
+
+    async def test_screening_attempt_past_its_deadline_warns_then_breaches(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        now = _now()
+        agent_id = await _agent(
+            session_maker,
+            status=AgentStatus.SCREENING,
+            created_at=now - timedelta(hours=2),
+        )
+        deadline = now - timedelta(minutes=10)
+        attempt_id = uuid4()
+        async with session_maker() as session, session.begin():
+            session.add(
+                ScreeningAttempt(
+                    attempt_id=attempt_id,
+                    agent_id=agent_id,
+                    screener_hotkey=_NODE_HOTKEY,
+                    policy_version=SCREENING_POLICY_VERSION,
+                    status="running",
+                    started_at=now - timedelta(hours=1),
+                    deadline=deadline,
+                )
+            )
+
+        signal = _signal(await _read(session_maker, now), "lease_overrun")
+        assert signal.status == "warn"
+        assert signal.since == deadline
+        assert signal.detail["worst_kind"] == "screening_attempt"
+        assert signal.detail["running_screening_attempts"] == 1
+
+        later = now + timedelta(minutes=30)
+        signal = _signal(await _read(session_maker, later), "lease_overrun")
+        assert signal.status == "breach"
 
 
 class TestSourceEmissionCollector:
