@@ -780,6 +780,16 @@ no payable generation, only its best withheld one -- the pin serves it as
 `provisional_incumbent`, with `crown_incumbent_agent_id` set to its id. It is
 the only withheld entry that can reach the fold.
 
+Being unpaid does not exempt it from score proofs. It still decides who holds
+the crown and the tail, so the validator verifies it exactly like a payable
+row: at least three signed quorum receipts from distinct validators, each
+bound to this agent, its lease and its benchmark version, with the row equal
+to the lower-median receipt, plus the same v9 confirmation checks. If any of
+that fails, the validator rejects the whole ledger and leaves its weights
+unchanged for the epoch, as it would for an unverifiable entry. It never drops
+the field and folds the rest, because that would quietly crown and pay the
+runner-up.
+
 The fold adds it to the pool as the crown incumbent and derives the champion,
 tail, tie pooling and score-ceiling cohort exactly as above. Every share it is
 allocated then burns: a challenger that clears the band over it is crowned and

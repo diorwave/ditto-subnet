@@ -2000,22 +2000,30 @@ class PlatformClient:
                 f"ledger rejected ({resp.status_code}): {resp.text[:200]}"
             )
         ledger = LedgerResponse.model_validate(resp.json())
+        # Every row the fold can read must carry its own verifiable quorum
+        # receipts. The protocol-28 provisional incumbent is deliberately kept
+        # out of ``entries`` (it is crowned but never paid), yet it still
+        # decides the champion, tail and score-ceiling cohort, so it is held to
+        # exactly the same proof contract as a payable row.
+        served = (
+            [*ledger.entries, ledger.provisional_incumbent]
+            if ledger.provisional_incumbent is not None
+            else ledger.entries
+        )
         if ledger.v9_confirmation_mode == "enforce" and any(
             entry.bench_version == 9 and entry.v9_confirmation is None
-            for entry in ledger.entries
+            for entry in served
         ):
             raise PlatformError(
                 "v9 enforce ledger contained a row without full confirmation"
             )
         if ledger.v9_confirmation_mode is None and any(
-            entry.v9_confirmation is not None for entry in ledger.entries
+            entry.v9_confirmation is not None for entry in served
         ):
             raise PlatformError(
                 "ledger carried v9 confirmation receipts without enforce marker"
             )
-        invalid = [
-            entry.agent_id for entry in ledger.entries if not verify_ledger_entry(entry)
-        ]
+        invalid = [entry.agent_id for entry in served if not verify_ledger_entry(entry)]
         if invalid:
             sample = ", ".join(str(agent_id) for agent_id in invalid[:3])
             raise PlatformError(

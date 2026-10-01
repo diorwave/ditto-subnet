@@ -62,9 +62,13 @@ from ditto.api_models.validator import (
     JobRequest,
     JobResponse,
     LedgerEntry,
+    LedgerResponse,
     LedgerScoreProof,
     ScoreReport,
     ValidatorHeartbeatRequest,
+)
+from ditto.tests.validator.test_v9_reward_projection import (
+    _entry as _v9_confirmed_entry,
 )
 from ditto.validator.errors import PlatformError, PlatformInfrastructureError
 from ditto.validator.platform import PlatformClient
@@ -2092,6 +2096,186 @@ async def test_ledger_rejects_entry_without_verifiable_quorum_receipts(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(PlatformError, match="score proof verification failed"):
             await PlatformClient(config, http, keypair).get_ledger()  # type: ignore[arg-type]
+
+
+_HELD_ID = UUID("00000000-0000-4000-8000-0000000000a1")
+_RUNNER_UP_ID = UUID("00000000-0000-4000-8000-0000000000b2")
+
+
+def _provisional_ledger_payload(provisional: dict[str, Any]) -> dict[str, Any]:
+    """A protocol-28 epoch pin: one verified payable runner-up plus a held
+    crown incumbent served only as ``provisional_incumbent``."""
+    runner_up = _signed_ledger_payload(
+        bench_version=12, agent_id=_RUNNER_UP_ID, miner_hotkey="5Runner" + "x" * 41
+    )
+    return {
+        "entries": [runner_up],
+        "count": 1,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "stale": False,
+        "age_seconds": 0,
+        "active_bench_version": 12,
+        "epoch_index": 25029,
+        "pinned_block": 9033831,
+        "crown_mode": "incumbent",
+        "crown_incumbent_agent_id": str(provisional["agent_id"]),
+        "provisional_incumbent": provisional,
+        "reward_eligibility_mode": "enforce",
+    }
+
+
+def _held() -> dict[str, Any]:
+    return _signed_ledger_payload(
+        bench_version=12, agent_id=_HELD_ID, miner_hotkey="5Held" + "x" * 43
+    )
+
+
+async def _get_ledger(payload: dict[str, Any]) -> LedgerResponse:
+    keypair = bittensor.Keypair.create_from_uri("//Alice")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    config = SimpleNamespace(
+        platform_api_url="https://platform.test",
+        validator_hotkey=keypair.ss58_address,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        return await PlatformClient(config, http, keypair).get_ledger()  # type: ignore[arg-type]
+
+
+def _without_proofs(held: dict[str, Any]) -> None:
+    held["score_proofs"] = []
+
+
+def _below_receipt_contract(held: dict[str, Any]) -> None:
+    held["score_proofs"] = []
+    held["bench_version"] = None
+
+
+def _below_quorum(held: dict[str, Any]) -> None:
+    held["score_proofs"] = held["score_proofs"][:2]
+
+
+def _forged_signature(held: dict[str, Any]) -> None:
+    # The served row still matches its median receipt field for field; only
+    # the signature over that receipt is not the validator's.
+    held["score_proofs"][1]["signature"] = "cd" * 64
+    held["signature"] = "cd" * 64
+
+
+def _inflated_composite(held: dict[str, Any]) -> None:
+    held["composite"] = 0.99
+
+
+def _bound_to_another_row(held: dict[str, Any]) -> None:
+    # Genuine receipts, but signed for a different agent on the same ledger.
+    other = _signed_ledger_payload(
+        bench_version=12, agent_id=_RUNNER_UP_ID, miner_hotkey=held["miner_hotkey"]
+    )
+    held.update({**other, "agent_id": held["agent_id"]})
+
+
+def _bound_to_another_lease(held: dict[str, Any]) -> None:
+    # Each receipt is signed over its exact ticket deadline, the lease the
+    # score was produced under; replaying it under another epoch's lease must
+    # break the signature.
+    for proof in held["score_proofs"]:
+        deadline = datetime.fromisoformat(proof["ticket_deadline"])
+        proof["ticket_deadline"] = (deadline + timedelta(days=1)).isoformat()
+
+
+def _bound_to_another_validator(held: dict[str, Any]) -> None:
+    # The median receipt claims a validator hotkey that did not sign it.
+    impostor = bittensor.Keypair.create_from_uri("//PlatformLedgerImpostor")
+    held["score_proofs"][1]["validator_hotkey"] = impostor.ss58_address
+    held["validator_hotkey"] = impostor.ss58_address
+
+
+def _duplicate_validator(held: dict[str, Any]) -> None:
+    held["score_proofs"][0] = dict(held["score_proofs"][1])
+
+
+def _relabelled_bench_version(held: dict[str, Any]) -> None:
+    # Genuine v12 receipts relabelled as another benchmark contract.
+    held["bench_version"] = 11
+    for proof in held["score_proofs"]:
+        proof["bench_version"] = 11
+
+
+async def test_ledger_accepts_verified_provisional_incumbent() -> None:
+    ledger = await _get_ledger(_provisional_ledger_payload(_held()))
+
+    assert ledger.provisional_incumbent is not None
+    assert ledger.provisional_incumbent.agent_id == _HELD_ID
+    assert ledger.crown_incumbent_agent_id == _HELD_ID
+    assert [entry.agent_id for entry in ledger.entries] == [_RUNNER_UP_ID]
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        _without_proofs,
+        _below_receipt_contract,
+        _below_quorum,
+        _forged_signature,
+        _inflated_composite,
+        _bound_to_another_row,
+        _bound_to_another_lease,
+        _bound_to_another_validator,
+        _duplicate_validator,
+        _relabelled_bench_version,
+    ],
+)
+async def test_ledger_rejects_provisional_incumbent_without_verifiable_proof(
+    tamper: Any,
+) -> None:
+    """#2576: the held incumbent is never paid but still decides the crown,
+    tail and score-ceiling cohort, so an unverifiable one rejects the whole
+    ledger exactly as an unverifiable payable row does."""
+    held = _held()
+    tamper(held)
+
+    with pytest.raises(PlatformError, match="score proof verification failed") as exc:
+        await _get_ledger(_provisional_ledger_payload(held))
+    assert str(_HELD_ID) in str(exc.value)
+
+
+async def test_v9_enforce_ledger_accepts_confirmed_provisional_incumbent() -> None:
+    held = _v9_confirmed_entry().model_dump(mode="json")
+    payload = {
+        **_provisional_ledger_payload(held),
+        "entries": [],
+        "count": 0,
+        "v9_confirmation_mode": "enforce",
+    }
+
+    ledger = await _get_ledger(payload)
+
+    assert ledger.provisional_incumbent is not None
+    assert ledger.provisional_incumbent.v9_confirmation is not None
+
+
+async def test_v9_enforce_ledger_rejects_unconfirmed_provisional_incumbent() -> None:
+    held = _v9_confirmed_entry().model_dump(mode="json")
+    del held["v9_confirmation"]
+    payload = {
+        **_provisional_ledger_payload(held),
+        "entries": [],
+        "count": 0,
+        "v9_confirmation_mode": "enforce",
+    }
+
+    with pytest.raises(PlatformError, match="without full confirmation"):
+        await _get_ledger(payload)
+
+
+async def test_ledger_rejects_provisional_v9_receipt_without_enforce_marker() -> None:
+    held = _v9_confirmed_entry().model_dump(mode="json")
+    payload = {**_provisional_ledger_payload(held), "entries": [], "count": 0}
+
+    with pytest.raises(PlatformError, match="without enforce marker"):
+        await _get_ledger(payload)
 
 
 _HOTKEY = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
