@@ -69,6 +69,7 @@ from ditto_screening_protocol.models import (
     source_review_invariants_for_policy,
     source_review_pass_clauses_for_policy,
 )
+from ditto_screening_protocol.reason_codes import SOURCE_REVIEW_MODEL_TIMEOUT
 from ditto_screening_protocol.review_ledger import (
     MULTI_LOCATION_CATEGORIES,
     concern_threshold_reached,
@@ -4212,7 +4213,7 @@ def _source_review_failure_code(error: BaseException) -> str:
     if isinstance(error, (TimeoutError, httpx.TimeoutException)):
         # A model turn timed out while the lease still had time; lease expiry
         # is raised as ``SourceReviewBudgetExhausted`` instead.
-        return "source-review-model-timeout"
+        return SOURCE_REVIEW_MODEL_TIMEOUT
     message = str(error).strip()
     suffix = _SOURCE_REVIEW_FAILURE_CODES.get(message)
     if suffix is None and message.startswith("source review category "):

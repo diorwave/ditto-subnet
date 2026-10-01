@@ -69,6 +69,7 @@ from ditto_screening_protocol.models import (
     source_review_invariants_for_policy,
     source_review_pass_clauses_for_policy,
 )
+from ditto_screening_protocol.reason_codes import L2_RUNTIME_EVIDENCE_UNAVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -2957,7 +2958,7 @@ class TerraSolSourceReviewAgent:
             )
             result = L2RunResult(
                 observation=_failure(
-                    "l2-runtime-evidence-unavailable",
+                    L2_RUNTIME_EVIDENCE_UNAVAILABLE,
                     "retryable_infra"
                     if _missing_lease_is_fleet_owned(
                         lease_rejection,
@@ -3022,7 +3023,7 @@ class TerraSolSourceReviewAgent:
                 logger.warning("L2 scorer runtime evidence unavailable: %s", error)
                 result = L2RunResult(
                     observation=_failure(
-                        "l2-runtime-evidence-unavailable", "pass_inconclusive"
+                        L2_RUNTIME_EVIDENCE_UNAVAILABLE, "pass_inconclusive"
                     ),
                     analyzed_files=(),
                     causal_path=(),
@@ -5792,10 +5793,10 @@ class LayeredSourceReviewAgent:
             # The pinned scorer cohort was unavailable at claim. Nothing
             # reviewed the artifact and no paid stage ran, so retry it as fleet
             # infrastructure instead of parking the submission as inconclusive.
-            return _failure("l2-runtime-evidence-unavailable", "retryable_infra")
+            return _failure(L2_RUNTIME_EVIDENCE_UNAVAILABLE, "retryable_infra")
         audit = ScreenReviewAudit(
             stage="l2",
-            reason_code="l2-runtime-evidence-unavailable",
+            reason_code=L2_RUNTIME_EVIDENCE_UNAVAILABLE,
             prompt_revision=l2_prompt_revision(policy_version),
             harness_revision=L2_HARNESS_REVISION,
             max_steps=self._l2._max_steps,
@@ -5817,7 +5818,7 @@ class LayeredSourceReviewAgent:
             elapsed_ms=0,
         )
         return replace(
-            _failure("l2-runtime-evidence-unavailable", "pass_inconclusive"),
+            _failure(L2_RUNTIME_EVIDENCE_UNAVAILABLE, "pass_inconclusive"),
             review_audit=audit.model_dump(mode="json"),
         )
 

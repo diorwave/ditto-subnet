@@ -33,6 +33,9 @@ from ditto_screening_protocol import (
     SCREENING_POLICY_VERSION,
     STRICT_TWO_OUTCOME_POLICY_VERSION,
 )
+from ditto_screening_protocol.reason_codes import (
+    SOURCE_REVIEW_ADJUDICATOR_KEY_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -619,7 +622,7 @@ _COURT_KEY_UNAVAILABLE = "adjudicator-key-unavailable"
 # ``source-review-unavailable``, which an archive the court cannot open or read,
 # or a screen whose source reviewer never started, also produces and which
 # therefore stays on the operator retry.
-SOURCE_REVIEW_KEY_UNAVAILABLE_CODE = "source-review-adjudicator-key-unavailable"
+SOURCE_REVIEW_KEY_UNAVAILABLE_CODE = SOURCE_REVIEW_ADJUDICATOR_KEY_UNAVAILABLE
 
 
 def _court_unavailable(adjudication: Mapping[str, object]) -> bool:

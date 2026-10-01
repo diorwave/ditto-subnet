@@ -122,6 +122,7 @@ from ditto_screening_protocol import (
     STRICT_TWO_OUTCOME_POLICY_VERSION,
     ScoredRuntimeEvidenceLease,
 )
+from ditto_screening_protocol.reason_codes import DOCKER_BUILD_INFRASTRUCTURE
 
 if TYPE_CHECKING:
     from ditto_screener.config import ScreenerConfig
@@ -1709,9 +1710,7 @@ class BuildGate:
                     ScreeningOutcome.RETRYABLE_INFRA
                     if retryable
                     else ScreeningOutcome.DETERMINISTIC_REJECT,
-                    code=(
-                        "docker-build-infrastructure" if retryable else "docker-build"
-                    ),
+                    code=DOCKER_BUILD_INFRASTRUCTURE if retryable else "docker-build",
                     summary=(
                         "Docker build infrastructure failed"
                         if retryable

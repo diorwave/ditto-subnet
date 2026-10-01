@@ -462,6 +462,7 @@ from ditto.db.queries.tickets import (
 from ditto.db.queries.transcript_mirror_settings import transcript_mirror_enabled
 from ditto.score_order import score_order_key
 from ditto.screener_policy_state import effective_screening_policy_version
+from ditto_screening_protocol import reason_codes
 from ditto_screening_protocol.bench_v9 import V9EvidenceBenchVersion
 
 logger = logging.getLogger(__name__)
@@ -7547,25 +7548,16 @@ async def agent_summary(
 # it reports parked rather than stuck. ``source-review-retryable-infra`` is the
 # code's historical spelling, kept so older rows still render (#2458).
 _SOURCE_REVIEW_MODEL_TIMEOUT_REASON_CODES = (
-    "source-review-model-timeout",
-    "source-review-retryable-infra",
+    reason_codes.SOURCE_REVIEW_MODEL_TIMEOUT,
+    reason_codes.SOURCE_REVIEW_RETRYABLE_INFRA,
 )
 
-# The lane each Ditto-side admission failure stopped in. Any other reason code
-# names no lane the public pipeline can vouch for.
-_ADMISSION_LANE_BY_REASON_CODE: dict[str, PublicAdmissionLane] = {
-    "docker-build-infrastructure": "build",
-    # Settled before the artifact was fetched; the retry starts at the build.
-    "worker-claim-not-started": "build",
-    "targon-build-unavailable": "build",
-    "cloudrun-build-unavailable": "build",
-    "targon-runtime-unavailable": "runtime_smoke",
-    "cloudrun-runtime-unavailable": "runtime_smoke",
-    "targon-source-review-unavailable": "source_review",
-    **dict.fromkeys(_SOURCE_REVIEW_MODEL_TIMEOUT_REASON_CODES, "source_review"),
-    "l2-runtime-evidence-unavailable": "source_review",
-    "source-review-adjudicator-key-unavailable": "source_review",
-}
+# The lane each Ditto-side admission failure stopped in, from the shared
+# screening registry (``ditto_screening_protocol.reason_codes``). Any other
+# reason code names no lane the public pipeline can vouch for.
+_ADMISSION_LANE_BY_REASON_CODE: dict[str, PublicAdmissionLane] = dict(
+    reason_codes.ADMISSION_LANE_BY_REASON_CODE
+)
 
 
 async def _admission_lane(

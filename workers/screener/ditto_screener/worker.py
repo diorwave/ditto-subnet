@@ -86,6 +86,7 @@ from ditto_screening_protocol.private_failure import (
     PRIVATE_FAILURE_LOG_TAIL_LIMIT,
     private_failure_text,
 )
+from ditto_screening_protocol.reason_codes import WORKER_CLAIM_NOT_STARTED
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -102,7 +103,7 @@ logger = logging.getLogger(__name__)
 EXACT_CROSS_MINER_DUPLICATE = "exact-cross-miner-duplicate"
 # A durable claim this worker settled before fetching or running anything of
 # the artifact. Platform retries it automatically (INFRA_AUTO_RETRY_REASON_CODES).
-CLAIM_NOT_STARTED_REASON_CODE = "worker-claim-not-started"
+CLAIM_NOT_STARTED_REASON_CODE = WORKER_CLAIM_NOT_STARTED
 
 
 # Shadow mode appends this after the deciding evidence. It records sandbox

@@ -73,6 +73,7 @@ from ditto.screener_policy_state import (
     effective_scored_rescreen_policy_version,
     effective_screening_policy_version,
 )
+from ditto_screening_protocol import reason_codes
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -115,7 +116,7 @@ _ADJUDICATED_NEGATIVE_OWNER_STATUSES = (
 # A platform-raised quarantine has no screener finding, but the row's
 # manifest_digest is NOT NULL and shown verbatim in the operator console. This
 # stable sentinel marks the origin as "platform, attempts exhausted".
-EXHAUSTED_REASON_CODE = "repeatedly-inconclusive"
+EXHAUSTED_REASON_CODE = reason_codes.REPEATEDLY_INCONCLUSIVE
 """Public alias: the emission-eligibility gate
 (:mod:`ditto.api_server.emission_eligibility`) classifies this code as
 inconclusive, and must not carry its own copy of the string."""
@@ -125,31 +126,24 @@ _EXHAUSTED_PUBLIC_REASON = (
 )
 _DEFERRED_MECHANICAL_REASON = "deferred-mechanical-admission"
 POLICY_ONLY_RESCREEN_REASON = "policy-only-rescreen"
-_ORPHANED_ATTEMPT_REASON_CODE = "worker-lease-orphaned"
+_ORPHANED_ATTEMPT_REASON_CODE = reason_codes.WORKER_LEASE_ORPHANED
 _ORPHANED_ATTEMPT_REASON = (
     "Screening worker stopped reporting this attempt; manual retry required"
 )
 # Unlike an orphan, an expiry still counts toward ``MAX_SCREENING_EXPIRIES`` and
 # backs off by status, so this code joins no retry or backoff set.
-LEASE_EXPIRED_REASON_CODE = "screening-lease-expired"
+LEASE_EXPIRED_REASON_CODE = reason_codes.SCREENING_LEASE_EXPIRED
 _LEASE_EXPIRED_REASON = "Screening lease expired"
 # Provider/reviewer failures held on reclaim for ``FAILED_ATTEMPT_RETRY_BACKOFF`` and,
 # with peer-pass evidence, counted toward ``MAX_SCREENING_EXPIRIES``
 # (``_inconclusive_attempt_count``). Do not add a code that should retry
 # automatically WITHOUT counting: those live in
 # ``screening_infra_retry.INFRA_AUTO_RETRY_REASON_CODES``, which has its own
-# backoff/breaker and never feeds the park cap.
-PROVIDER_BACKOFF_REASON_CODES = (
-    "targon-build-unavailable",
-    "targon-runtime-unavailable",
-    "targon-source-review-unavailable",
-    "cloudrun-build-unavailable",
-    "cloudrun-runtime-unavailable",
-    # An L1 model turn timed out while the lease still had time (lease expiry
-    # reports source-review-lease-budget-exhausted instead); immediate reclaim
-    # would hot-loop against the same broken court, so hold the retry briefly
-    # before re-queueing.
-    "source-review-model-timeout",
+# backoff/breaker and never feeds the park cap. The codes are the
+# ``PROVIDER_BACKOFF`` class of the shared screening registry
+# (``ditto_screening_protocol.reason_codes``), which records why each is here.
+PROVIDER_BACKOFF_REASON_CODES: tuple[str, ...] = (
+    reason_codes.PROVIDER_BACKOFF_REASON_CODES
 )
 # How long a provider-backoff failure waits after its FAILURE before the agent
 # is claimable again, capped by the attempt deadline. Backing off to the full

@@ -250,6 +250,12 @@ from ditto_screening_protocol.private_failure import (
     PRIVATE_FAILURE_LOG_TAIL_LIMIT,
     private_failure_text,
 )
+from ditto_screening_protocol.reason_codes import (
+    DOCKER_BUILD_INFRASTRUCTURE,
+    L2_RUNTIME_EVIDENCE_UNAVAILABLE,
+    SOURCE_REVIEW_ADJUDICATOR_KEY_UNAVAILABLE,
+    WORKER_CLAIM_NOT_STARTED,
+)
 
 if TYPE_CHECKING:
     from ditto.chain import ChainClient
@@ -4455,27 +4461,27 @@ def _public_screening_reason(detail: str, reason_code: str | None = None) -> str
             f"Docker image build exceeded the {limit} build time limit. "
             "Reduce build time by caching dependencies or simplifying the Dockerfile."
         )
-    if reason_code == "docker-build-infrastructure":
+    if reason_code == DOCKER_BUILD_INFRASTRUCTURE:
         return (
             "Docker build infrastructure failed before screening completed. This "
             "is operator-owned and is retried automatically with backoff for a "
             "limited time, then held for an operator retry."
         )
-    if reason_code == "l2-runtime-evidence-unavailable":
+    if reason_code == L2_RUNTIME_EVIDENCE_UNAVAILABLE:
         return (
             "The scorer runtime evidence source review needs was unavailable "
             "before screening completed. This is operator-owned and is retried "
             "automatically with backoff for a limited time, then held for an "
             "operator retry."
         )
-    if reason_code == "source-review-adjudicator-key-unavailable":
+    if reason_code == SOURCE_REVIEW_ADJUDICATOR_KEY_UNAVAILABLE:
         return (
             "Source review was unavailable on the screening node before "
             "screening completed. This is operator-owned and is retried "
             "automatically with backoff for a limited time, then held for an "
             "operator retry."
         )
-    if reason_code == "worker-claim-not-started":
+    if reason_code == WORKER_CLAIM_NOT_STARTED:
         return (
             "The screening worker released this submission before starting it. "
             "This is operator-owned and is retried automatically with backoff for "
