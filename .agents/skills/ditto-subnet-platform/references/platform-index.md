@@ -77,3 +77,4 @@ git diff --check
 - Authenticated Worker responses are `no-store`; writes require same-origin protection.
 - API changes mark `platform_api`, `platform`, and `backroom` affected. Dashboard changes mark `platform_dashboard` and `platform` only.
 - A guarded admin write and its Backroom preflight read call one shared predicate (for example `_evaluate_exact_source` behind `schedule_l2_report_canary` and `get_l2_report_canary_preflight`), so an operator sees the exact guard, current and expected values, and 409 detail instead of a generic conflict.
+- Backroom MCP input schemas stay portable: no `z.tuple` (draft-07 array-form `items`) or `prefixItems`, or some clients silently omit the tool even though `tools/list` and `get_backroom_tool_help` show it (#2559). See `apps/backroom/docs/mcp.md`.

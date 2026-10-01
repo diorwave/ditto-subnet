@@ -272,6 +272,17 @@ call, so a new capability is one `registerTool` entry:
 4. Add it to the expected catalog list in `mcp.server.test.ts`. That list is
    exhaustive on purpose: a tool that is not named there fails the suite.
 
+Keep input schemas portable. A client that cannot parse one tool's JSON
+Schema drops that tool from its imported catalog without an error, even after
+a fresh connect, while the server's `tools/list` and `get_backroom_tool_help`
+still show it. Do not use `z.tuple`: it serializes to draft-07 array-form
+`items`, which is what kept `activate_v13_scorer_cohort` and
+`rotate_v13_scorer_cohort` out of refreshed Codex catalogs (#2490, #2559). Use
+a bounded array such as `z.array(z.string()).length(3)` instead. The catalog
+test fails on any array-form `items`, `prefixItems`, or `additionalItems`.
+The catalog itself does not depend on scope: a read-only connection lists the
+write tools too, and the scope check refuses the call.
+
 Keep the catalog description in `MCP_CATALOG_DESCRIPTIONS` short — the whole
 catalog is loaded into model context before any call, and the test bounds both
 the total and the per-description length. Long-form operational notes belong in

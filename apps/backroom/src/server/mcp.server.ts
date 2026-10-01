@@ -944,6 +944,11 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read source range (max 400 lines); locate via search_screening_source or finding citations. Artifact scope.',
 }
 
+// Exactly three scorer hotkeys as a plain bounded array. z.tuple serializes to
+// draft-07 array-form `items`, which some MCP clients (Codex) cannot import, so
+// they silently drop the whole tool from a refreshed catalog (#2490, #2559).
+const v13ScorerCohortHotkeysSchema = z.array(z.string()).length(3)
+
 export function createBackroomMcpServer(props: McpGrantProps) {
   if (!hasReadAccess(props)) {
     throw new Error('The OAuth grant does not include Backroom read access')
@@ -3037,7 +3042,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       title: 'Activate V13 scorer cohort pin',
       description: 'One-way pin of three sorted exact managed validator hotkeys and their signed scorer packet. The Platform refuses unless all other fresh V13 validators are issuance-paused and all nonmember V13 tickets have drained. Requires current validator slot settings revision/checksum and confirmation PIN V13 SCORER COHORT. Requires backroom:write.',
       inputSchema: z.object({
-        hotkeys: z.tuple([z.string(), z.string(), z.string()]),
+        hotkeys: v13ScorerCohortHotkeysSchema,
         packet: z.object({
           source_revision: z.string().regex(/^[0-9a-f]{40}$/),
           release_descriptor_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
@@ -3061,7 +3066,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       title: 'Rotate V13 scorer cohort packet',
       description: 'Append one guarded scorer packet rotation for the same three sorted validators. Requires exact current packet and rotation ID, fresh unanimous signed target packet, current slot settings, accepting members, paused nonmembers, zero live V13 tickets, and confirmation ROTATE V13 SCORER PACKET. Requires backroom:write.',
       inputSchema: z.object({
-        hotkeys: z.tuple([z.string(), z.string(), z.string()]),
+        hotkeys: v13ScorerCohortHotkeysSchema,
         packet: z.object({
           source_revision: z.string().regex(/^[0-9a-f]{40}$/),
           release_descriptor_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),

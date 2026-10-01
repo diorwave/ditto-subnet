@@ -480,6 +480,8 @@ describe('Backroom MCP tools', () => {
     // 179,468 bytes before the optional review-posture pin, node cap and
     // expected-value canary guard inputs. Keep operational tutorials in help
     // and retain the existing catalog budget as these inputs evolve.
+    // Portable bounded hotkey arrays on the scorer-cohort writers (#2559)
+    // measure 179,521 bytes.
     expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(180_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
@@ -1327,6 +1329,130 @@ describe('Backroom MCP tools', () => {
 
     await client.close()
     await server.close()
+  })
+
+  it('publishes only portable input schemas so a freshly connected client imports every tool (#2559)', async () => {
+    // A connector that cannot parse one tool's input schema drops that tool
+    // from its imported catalog without failing the rest. The two V13 scorer
+    // cohort writers were the only tools using z.tuple, whose draft-07
+    // array-form `items` kept them out of refreshed Codex catalogs even
+    // after the four fixture tools appeared (#2490, #2559).
+    const fresh = await connect([BACKROOM_READ_SCOPE])
+    const full = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE, BACKROOM_ARTIFACT_SCOPE])
+    try {
+      const { tools } = await fresh.client.listTools()
+      const names = tools.map((tool) => tool.name)
+      // The catalog does not depend on scope; calls are gated, discovery is not.
+      expect((await full.client.listTools()).tools.map((tool) => tool.name)).toEqual(names)
+      expect(names).toEqual(expect.arrayContaining([
+        'get_canonical_starter_fixture_preflight',
+        'register_canonical_starter_fixture',
+        'review_canonical_starter_fixture',
+        'schedule_canonical_starter_fixture',
+        'activate_v13_scorer_cohort',
+        'rotate_v13_scorer_cohort',
+      ]))
+
+      const unportable: Array<string> = []
+      const visit = (node: unknown, path: string) => {
+        if (Array.isArray(node)) {
+          node.forEach((item, index) => visit(item, `${path}[${index}]`))
+          return
+        }
+        if (!node || typeof node !== 'object') return
+        for (const [key, value] of Object.entries(node)) {
+          if ((key === 'items' && Array.isArray(value)) || key === 'prefixItems' || key === 'additionalItems') {
+            unportable.push(`${path}/${key}`)
+          }
+          visit(value, `${path}/${key}`)
+        }
+      }
+      for (const tool of tools) visit(tool.inputSchema, tool.name)
+      expect(unportable).toEqual([])
+
+      for (const name of ['activate_v13_scorer_cohort', 'rotate_v13_scorer_cohort']) {
+        const schema = tools.find((tool) => tool.name === name)?.inputSchema as {
+          properties: Record<string, unknown>
+        }
+        expect(schema.properties.hotkeys).toEqual({
+          type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 3,
+        })
+      }
+    } finally {
+      await fresh.client.close()
+      await fresh.server.close()
+      await full.client.close()
+      await full.server.close()
+    }
+  })
+
+  it('keeps the V13 scorer cohort writers write-scoped and forwards exactly three hotkeys', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const packet = {
+      source_revision: 'b'.repeat(40),
+      release_descriptor_digest: `sha256:${'d'.repeat(64)}`,
+      scorer_image_digest: `sha256:${'e'.repeat(64)}`,
+      scorer_env_sha256: 'f'.repeat(64),
+      injected_keys: ['OPENROUTER_API_KEY'],
+    }
+    const hotkeys = ['5Alpha', '5Bravo', '5Charlie']
+    const rotate = {
+      hotkeys, packet, expectedCurrentPacket: { ...packet, source_revision: 'a'.repeat(40) },
+      expectedCurrentRotationId: 3, expectedSlotSettingsRevision: 15,
+      expectedSlotSettingsChecksum: 'c'.repeat(64), reason: 'Rotate to the unanimous signed packet',
+      confirmation: 'ROTATE V13 SCORER PACKET',
+    }
+    const activate = {
+      hotkeys, packet, expectedSlotSettingsRevision: 15,
+      expectedSlotSettingsChecksum: 'c'.repeat(64), reason: 'Pin the managed scorer cohort',
+      confirmation: 'PIN V13 SCORER COHORT',
+    }
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({ rotation_id: 4 }))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(TOOL_SCOPE_REQUIREMENTS.get('activate_v13_scorer_cohort')).toBe(BACKROOM_WRITE_SCOPE)
+    expect(TOOL_SCOPE_REQUIREMENTS.get('rotate_v13_scorer_cohort')).toBe(BACKROOM_WRITE_SCOPE)
+
+    const readOnly = await connect([BACKROOM_READ_SCOPE])
+    try {
+      for (const [name, args] of [
+        ['activate_v13_scorer_cohort', activate],
+        ['rotate_v13_scorer_cohort', rotate],
+      ] as const) {
+        const response = await readOnly.client.callTool({ name, arguments: args })
+        expect(response.isError).toBe(true)
+        expect(readTextResult(response)).toContain('read-only')
+      }
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      await readOnly.client.close()
+      await readOnly.server.close()
+    }
+
+    const writer = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    try {
+      for (const count of [2, 4]) {
+        const response = await writer.client.callTool({
+          name: 'rotate_v13_scorer_cohort',
+          arguments: { ...rotate, hotkeys: [...hotkeys, '5Delta'].slice(0, count) },
+        })
+        expect(response.isError).toBe(true)
+      }
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      const response = await writer.client.callTool({ name: 'rotate_v13_scorer_cohort', arguments: rotate })
+      expect(response.isError).not.toBe(true)
+      expect(fetchMock).toHaveBeenCalledOnce()
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toContain('/api/v1/admin/v13-scorer-cohort/rotate')
+      expect(init.method).toBe('POST')
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        hotkeys, packet, expected_current_rotation_id: 3, actor: session.email,
+      })
+      expect(readTextResult(response)).not.toContain('platform-admin-token')
+    } finally {
+      await writer.client.close()
+      await writer.server.close()
+    }
   })
 
   it('publishes bounded pagination inputs for every MCP collection page', async () => {

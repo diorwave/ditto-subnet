@@ -31,6 +31,16 @@ describe('MCP scope challenges', () => {
     expect(await requiredScopesForRequest(request)).toEqual([BACKROOM_WRITE_SCOPE])
   })
 
+  it('requires write scope for V13 scorer cohort activation and rotation', async () => {
+    for (const name of ['activate_v13_scorer_cohort', 'rotate_v13_scorer_cohort']) {
+      const request = new Request('https://backroom.dittobench.ai/mcp', {
+        method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name, arguments: { hotkeys: ['5A', '5B', '5C'] } } }),
+      })
+      expect(await requiredScopesForRequest(request)).toEqual([BACKROOM_WRITE_SCOPE])
+    }
+  })
+
   it('does not challenge read tools', async () => {
     const request = new Request('https://backroom.dittobench.ai/mcp', {
       method: 'POST',
