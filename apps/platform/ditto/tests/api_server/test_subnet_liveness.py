@@ -728,7 +728,7 @@ class TestSourceEmissionCollector:
     ) -> None:
         """The #2231 shape; the stored message may carry a provider URL."""
         now = _now()
-        secret_url = "wss://archive.example/ws?apikey=sk-live-0123456789"
+        secret_url = "wss://archive.example/ws/provider-marker-not-for-responses"
         async with session_maker() as session, session.begin():
             session.add(
                 SourceEmissionCollectorCursor(
@@ -745,7 +745,7 @@ class TestSourceEmissionCollector:
         assert signal.status == "breach"
         assert signal.detail["blocked"] is True
         assert signal.detail["blocked_reason_class"] == "SubstrateRequestException"
-        assert "apikey" not in liveness.model_dump_json()
+        assert "provider-marker" not in liveness.model_dump_json()
 
 
 class TestReadOnlyBoundary:

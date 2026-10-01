@@ -65,7 +65,7 @@ async def test_reports_every_signal_without_secrets(
     _install(app, session_maker)
     now = datetime.now(UTC)
     node_token_hash = hashlib.sha256(b"node-bearer-token").hexdigest()
-    provider_secret = "sk-live-provider-secret-0123456789"
+    provider_secret = "provider-marker-not-for-responses"
     async with session_maker() as session, session.begin():
         session.add(
             ScreenerNode(
@@ -88,7 +88,7 @@ async def test_reports_every_signal_without_secrets(
                 block_hash="0x" + "2" * 64,
                 updated_at=now - timedelta(minutes=1),
                 last_blocked_reason=(
-                    f"ConnectionError: wss://rpc.example/?key={provider_secret}"
+                    f"ConnectionError: wss://rpc.example/{provider_secret}"
                 ),
             )
         )
