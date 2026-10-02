@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.346.0 (2026-10-02)
+
+### Features
+
+- **screener**: Lead on v13 I7 executor/router and I5 argument-grammar shapes
+  ([#2671](https://github.com/ditto-assistant/ditto-subnet/pull/2671),
+  [`3728a06`](https://github.com/ditto-assistant/ditto-subnet/commit/3728a0636c6f59c9cbf0b78abb1731f312a31a26))
+
+
 ## v0.345.0 (2026-10-02)
 
 ### Features
