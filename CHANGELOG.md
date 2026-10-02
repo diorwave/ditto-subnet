@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v0.343.3 (2026-10-02)
+
+### Bug Fixes
+
+- **infra**: Lock collector delegate generation permissions
+  ([#2648](https://github.com/ditto-assistant/ditto-subnet/pull/2648),
+  [`6ba27fd`](https://github.com/ditto-assistant/ditto-subnet/commit/6ba27fdffda370a56738f76ebc6e9a36230cb957))
+
+- **infra**: Review the screener fleet through OpenRouter again
+  ([#2659](https://github.com/ditto-assistant/ditto-subnet/pull/2659),
+  [`29fad4a`](https://github.com/ditto-assistant/ditto-subnet/commit/29fad4acc71e0b1d553e1ee900b0f4cbe92e56c9))
+
+- **infra**: Seal collector delegate first-version access
+  ([#2649](https://github.com/ditto-assistant/ditto-subnet/pull/2649),
+  [`2b4bd9a`](https://github.com/ditto-assistant/ditto-subnet/commit/2b4bd9a5fa862d564c66f0153dbf2ba9aafb936a))
+
+- **validator**: Commit a fresh weight request for each chain epoch of…
+  ([#2662](https://github.com/ditto-assistant/ditto-subnet/pull/2662),
+  [`1ef22c0`](https://github.com/ditto-assistant/ditto-subnet/commit/1ef22c042180eb9e3d17c0183e145b3bfd1a58bc))
+
+### Chores
+
+- Stage verified collector delegate arming
+  ([#2647](https://github.com/ditto-assistant/ditto-subnet/pull/2647),
+  [`d69a7e0`](https://github.com/ditto-assistant/ditto-subnet/commit/d69a7e048e81f2538b4219e7ddc52136811c8612))
+
+
 ## v0.343.2 (2026-10-02)
 
 ### Bug Fixes
