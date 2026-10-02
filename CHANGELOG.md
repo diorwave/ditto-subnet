@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.344.2 (2026-10-02)
+
+### Bug Fixes
+
+- **screener**: Name a relayed provider outage a provider fault
+  ([#2669](https://github.com/ditto-assistant/ditto-subnet/pull/2669),
+  [`9af9364`](https://github.com/ditto-assistant/ditto-subnet/commit/9af9364fddb188498e0a0f5a010020bcba3dac11))
+
+
 ## v0.344.1 (2026-10-02)
 
 ### Bug Fixes
