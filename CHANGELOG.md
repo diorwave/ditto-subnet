@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.344.1 (2026-10-02)
+
+### Bug Fixes
+
+- **dashboard**: Stop labeling every held submission as deferred source review
+  ([#2668](https://github.com/ditto-assistant/ditto-subnet/pull/2668),
+  [`afdc5dc`](https://github.com/ditto-assistant/ditto-subnet/commit/afdc5dca48648e263440fb980842b490c738fa0f))
+
+
 ## v0.344.0 (2026-10-02)
 
 ### Features
