@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.345.0 (2026-10-02)
+
+### Features
+
+- **screener**: Reject a v13 breach the independent L3 adjudicator confirmed
+  ([#2670](https://github.com/ditto-assistant/ditto-subnet/pull/2670),
+  [`d45e55f`](https://github.com/ditto-assistant/ditto-subnet/commit/d45e55f035ab565d56a55767f10b8a97c96386a2))
+
+
 ## v0.344.2 (2026-10-02)
 
 ### Bug Fixes
