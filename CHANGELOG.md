@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.344.0 (2026-10-02)
+
+### Features
+
+- **screening**: Finalize repeated static-inconclusive reviews as policy v13 V2
+  ([#2667](https://github.com/ditto-assistant/ditto-subnet/pull/2667),
+  [`3d2ffe5`](https://github.com/ditto-assistant/ditto-subnet/commit/3d2ffe5cbe4a019368aa7d9ff87886b1b639377c))
+
+
 ## v0.343.3 (2026-10-02)
 
 ### Bug Fixes
