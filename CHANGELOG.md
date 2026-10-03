@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.346.1 (2026-10-03)
+
+### Bug Fixes
+
+- **screener**: Survive transient provider faults and lost image completions
+  ([#2675](https://github.com/ditto-assistant/ditto-subnet/pull/2675),
+  [`de11000`](https://github.com/ditto-assistant/ditto-subnet/commit/de11000d6ef8a483b43435519e6ff73fd361dec5))
+
+
 ## v0.346.0 (2026-10-02)
 
 ### Features
