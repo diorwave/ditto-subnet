@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.347.0 (2026-10-03)
+
+### Features
+
+- **platform**: Hold module-split copies on a line-level anti-copy channel
+  ([#2676](https://github.com/ditto-assistant/ditto-subnet/pull/2676),
+  [`3667aac`](https://github.com/ditto-assistant/ditto-subnet/commit/3667aac36f889e949bfefef53d7ac91ac55b3317))
+
+
 ## v0.346.1 (2026-10-03)
 
 ### Bug Fixes
