@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.348.5 (2026-10-03)
+
+### Bug Fixes
+
+- **screener**: Back off provider body faults instead of parking the review
+  ([#2687](https://github.com/ditto-assistant/ditto-subnet/pull/2687),
+  [`231d878`](https://github.com/ditto-assistant/ditto-subnet/commit/231d8788ec92c8686d67428fa61982eec8218f6d))
+
+
 ## v0.348.4 (2026-10-03)
 
 ### Bug Fixes
