@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v0.348.0 (2026-10-03)
+
+### Bug Fixes
+
+- **platform**: Commit the line bundle on reference refresh and add a protected fingerprint backfill
+  ([#2678](https://github.com/ditto-assistant/ditto-subnet/pull/2678),
+  [`520c807`](https://github.com/ditto-assistant/ditto-subnet/commit/520c807d225b19db4fd66ad57fb2f3335bbdb940))
+
+- **treasury**: Audit Finney v472 and accept empty collector positions
+  ([#2680](https://github.com/ditto-assistant/ditto-subnet/pull/2680),
+  [`5291d62`](https://github.com/ditto-assistant/ditto-subnet/commit/5291d62cc80329021a36a423dc50fa8fc94f4365))
+
+- **treasury**: Bootstrap unowned collector registration
+  ([#2677](https://github.com/ditto-assistant/ditto-subnet/pull/2677),
+  [`abe59d8`](https://github.com/ditto-assistant/ditto-subnet/commit/abe59d8b896ca5a2bb0b4f95f80319e590d79ca6))
+
+- **treasury**: Make collector RPC plan enablement explicit
+  ([#2681](https://github.com/ditto-assistant/ditto-subnet/pull/2681),
+  [`20e4abf`](https://github.com/ditto-assistant/ditto-subnet/commit/20e4abf5b3f7d0d788c92595a2a43b2b32ca65b0))
+
+### Features
+
+- **treasury**: Prepare sealed collector Finney RPC egress
+  ([#2679](https://github.com/ditto-assistant/ditto-subnet/pull/2679),
+  [`193f177`](https://github.com/ditto-assistant/ditto-subnet/commit/193f177edb632040f7730b7c83075bcf617bfb47))
+
+
 ## v0.347.0 (2026-10-03)
 
 ### Features
