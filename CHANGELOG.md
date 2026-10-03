@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.348.4 (2026-10-03)
+
+### Bug Fixes
+
+- **validator**: Replay a finished score through transient Platform 502s
+  ([#2686](https://github.com/ditto-assistant/ditto-subnet/pull/2686),
+  [`598022d`](https://github.com/ditto-assistant/ditto-subnet/commit/598022d695455c59e0a5d49ea1162aeb107f3a1f))
+
+
 ## v0.348.3 (2026-10-03)
 
 ### Bug Fixes
