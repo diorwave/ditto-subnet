@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.348.2 (2026-10-03)
+
+### Bug Fixes
+
+- **screener**: Roll fleet releases without draining every worker
+  ([#2617](https://github.com/ditto-assistant/ditto-subnet/pull/2617),
+  [`8ad92b7`](https://github.com/ditto-assistant/ditto-subnet/commit/8ad92b736e13c61cbd72364a0bc09eb0c06e83f4))
+
+
 ## v0.348.1 (2026-10-03)
 
 ### Bug Fixes
