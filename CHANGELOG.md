@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.348.3 (2026-10-03)
+
+### Bug Fixes
+
+- **backroom**: Keep exclusive observer scope out of discovery
+  ([#2685](https://github.com/ditto-assistant/ditto-subnet/pull/2685),
+  [`07b3996`](https://github.com/ditto-assistant/ditto-subnet/commit/07b3996308825a9079a1d393209d2bcae3656801))
+
+
 ## v0.348.2 (2026-10-03)
 
 ### Bug Fixes
