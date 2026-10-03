@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.348.1 (2026-10-03)
+
+### Bug Fixes
+
+- **platform**: Report fingerprint backfill progress per batch and bound its memory
+  ([#2684](https://github.com/ditto-assistant/ditto-subnet/pull/2684),
+  [`7989e33`](https://github.com/ditto-assistant/ditto-subnet/commit/7989e338aa97cd0ed9cb424e8927df4fe5f61066))
+
+- **treasury**: Skip only proven inactive collector history
+  ([#2682](https://github.com/ditto-assistant/ditto-subnet/pull/2682),
+  [`b3f15bf`](https://github.com/ditto-assistant/ditto-subnet/commit/b3f15bf8446024733cdc2516d415e56d40940109))
+
+
 ## v0.348.0 (2026-10-03)
 
 ### Bug Fixes
