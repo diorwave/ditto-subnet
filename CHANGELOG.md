@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.348.6 (2026-10-04)
+
+### Bug Fixes
+
+- **platform**: Retry review non-verdicts automatically instead of parking
+  ([#2688](https://github.com/ditto-assistant/ditto-subnet/pull/2688),
+  [`5637cfb`](https://github.com/ditto-assistant/ditto-subnet/commit/5637cfba86e583a9de736d82b68f9d056f935866))
+
+
 ## v0.348.5 (2026-10-03)
 
 ### Bug Fixes
