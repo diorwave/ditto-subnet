@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.351.0 (2026-10-05)
+
+### Bug Fixes
+
+- **treasury**: Persist one-transfer canary ceiling
+  ([#2705](https://github.com/ditto-assistant/ditto-subnet/pull/2705),
+  [`5da08c5`](https://github.com/ditto-assistant/ditto-subnet/commit/5da08c56467c76fc11d959c1b502c1b0e65c05b2))
+
+### Features
+
+- **backroom**: Preflight exact Gamma policy and full weight setter fleet
+  ([`4931b74`](https://github.com/ditto-assistant/ditto-subnet/commit/4931b74fdd7c349711b845c1580bf5b00beb6827))
+
+
 ## v0.350.0 (2026-10-05)
 
 ### Bug Fixes
