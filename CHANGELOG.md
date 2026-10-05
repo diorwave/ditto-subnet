@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v0.348.7 (2026-10-05)
+
+### Bug Fixes
+
+- **preview**: Reclaim stranded snapshot dumps on the database VM
+  ([#2689](https://github.com/ditto-assistant/ditto-subnet/pull/2689),
+  [`5684704`](https://github.com/ditto-assistant/ditto-subnet/commit/5684704d9e25730d593e247bf5caaf2b87902b2b))
+
+- **treasury**: Decode pinned SDK registration fee quotes
+  ([#2691](https://github.com/ditto-assistant/ditto-subnet/pull/2691),
+  [`ad2cc24`](https://github.com/ditto-assistant/ditto-subnet/commit/ad2cc24247c0af1e4699a902282697017583e665))
+
+- **treasury**: Reconcile SCALE unit proxy receipts
+  ([#2692](https://github.com/ditto-assistant/ditto-subnet/pull/2692),
+  [`118a9b3`](https://github.com/ditto-assistant/ditto-subnet/commit/118a9b36e43e0720314a55972d8d7982afe979fc))
+
+
 ## v0.348.6 (2026-10-04)
 
 ### Bug Fixes
