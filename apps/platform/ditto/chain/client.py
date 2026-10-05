@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager, nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, urlsplit
 
 from ditto.chain.errors import (
@@ -15,6 +15,7 @@ from ditto.chain.errors import (
     ChainEmissionReceiptUnavailable,
     ChainError,
     ChainTimeoutError,
+    ChainTreasuryActivationReadError,
     ChainTreasuryReadTimeoutError,
     ExtrinsicNotFoundError,
 )
@@ -404,6 +405,55 @@ class ChainClient:
 
         async with self._treasury_reader() as substrate:
             return await read_treasury_dispatch_observation(substrate, policy)
+
+    async def get_treasury_activation_observation(self, policy: TreasuryEmissionPolicy):
+        """One request-local connection and exact hash; two unchanged read windows."""
+        from async_substrate_interface import AsyncSubstrateInterface
+
+        from ditto_screening_protocol.treasury_identity import (
+            read_finalized_weight_setters,
+            read_treasury_dispatch_observation,
+        )
+
+        trace = TreasuryReadTrace()
+        stage: Literal["identity", "setter_roster"] = "identity"
+        try:
+            async with (
+                asyncio.timeout(8) as deadline,
+                AsyncSubstrateInterface(url=self._substrate_url()) as substrate,
+            ):
+                trace.client = substrate
+                observed = await read_treasury_dispatch_observation(trace, policy)
+                # Validate the same policy binding before any authorization read.
+                TreasuryLedgerPin(
+                    policy=policy,
+                    policy_digest=policy.digest,
+                    identity=observed.identity,
+                )
+                now = asyncio.get_running_loop().time()
+                expires = deadline.when()
+                # A synchronous decode may have crossed the first deadline
+                # before its cancellation callback could run. Never renew an
+                # already elapsed identity window into authorization reads.
+                if expires is not None and now >= expires:
+                    raise TimeoutError()
+                stage = "setter_roster"
+                trace.setters = True
+                # The old path opened a second SDK connection with its own
+                # eight-second deadline. Keep that window, but reuse only this
+                # request's exact-hash metadata/transport, never permissions.
+                deadline.reschedule(now + 8)
+                keys = await read_finalized_weight_setters(
+                    trace, policy, block_hash=observed.finalized_block_hash
+                )
+                trace.step = "connection_close"
+                return observed, keys
+        except TimeoutError as error:
+            raise ChainTreasuryActivationReadError(
+                stage, ChainTreasuryReadTimeoutError(trace.step)
+            ) from error
+        except Exception as error:
+            raise ChainTreasuryActivationReadError(stage, error) from error
 
     async def get_treasury_receipt_proof(
         self,
