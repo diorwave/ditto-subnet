@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.349.0 (2026-10-05)
+
+### Bug Fixes
+
+- **infra**: Preserve typed Gamma custody phase inputs
+  ([#2696](https://github.com/ditto-assistant/ditto-subnet/pull/2696),
+  [`7c92d60`](https://github.com/ditto-assistant/ditto-subnet/commit/7c92d600e08028f84f4775e604e2fb1c67f22b27))
+
+- **treasury**: Bind tuple registration receipt fields
+  ([#2693](https://github.com/ditto-assistant/ditto-subnet/pull/2693),
+  [`862e7a7`](https://github.com/ditto-assistant/ditto-subnet/commit/862e7a7e2c383b4497edbefe9591dc2c9dcdfdaf))
+
+- **treasury**: Retain collector history through Finney archive reads
+  ([#2694](https://github.com/ditto-assistant/ditto-subnet/pull/2694),
+  [`5a4430e`](https://github.com/ditto-assistant/ditto-subnet/commit/5a4430ee323061297899d6a5d1a26e5f428fab4d))
+
+### Features
+
+- **infra**: Isolate Gamma delegate custody in its own project
+  ([#2695](https://github.com/ditto-assistant/ditto-subnet/pull/2695),
+  [`14cf8fb`](https://github.com/ditto-assistant/ditto-subnet/commit/14cf8fbcd959517d0170c147c6f8081f68d74ad6))
+
+
 ## v0.348.7 (2026-10-05)
 
 ### Bug Fixes
