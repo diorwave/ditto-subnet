@@ -87,8 +87,8 @@ def test_unowned_bootstrap_cannot_use_subnet_owner_coldkey():
 def test_first_registration_observation_reaches_bounded_register_path():
     p = policy()
     c, _, _, _ = identity_adapter(owner="default-zero")
-    c.guard_runtime = lambda *_: None
-    c.assert_no_sponsor = lambda *_: None
+    c.guard_runtime = lambda *_, **_kwargs: AUDITED_CODE_HASH
+    c.assert_no_sponsor = lambda *_, **_kwargs: AUDITED_CODE_HASH
     c.alpha = lambda *_: 0
     c.substrate.get_chain_finalised_head = lambda: "finalized"
     c.substrate.get_block_number = lambda _: 100
@@ -131,7 +131,7 @@ def adapter(substrate):
     chain = PublicCollectorChain.__new__(PublicCollectorChain)
     chain.substrate = substrate
     chain.role = "transfer"
-    chain.guard_runtime = lambda *_: None
+    chain.guard_runtime = lambda *_, **_kwargs: AUDITED_CODE_HASH
     chain.identity = lambda _, h, **_kwargs: None if h == "b100" else 14
     chain.alpha = lambda *_: 100
     return chain
@@ -538,7 +538,7 @@ def registration_preparation(info):
     key = SimpleNamespace(ss58_address=p.registration_delegate)
     c = PublicCollectorChain.__new__(PublicCollectorChain)
     c.role = "registration"
-    c.guard_runtime = lambda *_: None
+    c.guard_runtime = lambda *_, **_kwargs: AUDITED_CODE_HASH
     c.observe = lambda *_: observed
     c.key = lambda *_: key
     c.substrate = SimpleNamespace(
@@ -719,3 +719,186 @@ def test_registration_boolean_uid_cannot_equal_integer_one():
     ]
     with pytest.raises(ValueError, match="registration effect"):
         c.reconcile(p, op, observed)
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_stale_v472_policy_cannot_authorize_any_runtime_read_or_signing(historical):
+    from ditto_screening_protocol.collector_receipts import (
+        HISTORICAL_COLLECTOR_CODE_HASH,
+    )
+
+    c = PublicCollectorChain.__new__(PublicCollectorChain)
+    c.substrate = SimpleNamespace(
+        get_block_hash=lambda _: pytest.fail("stale approval must stop before RPC")
+    )
+    with pytest.raises(ValueError, match="runtime policy"):
+        c.guard_runtime(
+            policy(runtime_code_hash=HISTORICAL_COLLECTOR_CODE_HASH),
+            "finalized",
+            historical=historical,
+        )
+
+
+def runtime_adapter(code):
+    expected = {
+        "Registration": [
+            ("SubtensorModule", "register"),
+            ("SubtensorModule", "register_limit"),
+            ("SubtensorModule", "burned_register"),
+        ],
+        "Transfer": [
+            ("Balances", "transfer_keep_alive"),
+            ("Balances", "transfer_allow_death"),
+            ("Balances", "transfer_all"),
+            ("SubtensorModule", "transfer_stake"),
+            ("SubtensorModule", "transfer_stake_and_hotkey"),
+        ],
+    }
+    filters = [
+        {
+            "name": name,
+            "deprecated": False,
+            "filter_mode": {
+                "Allow": [
+                    {"pallet_name": pallet, "call_name": call, "constraint": None}
+                    for pallet, call in calls
+                ]
+            },
+        }
+        for name, calls in expected.items()
+    ]
+    c = PublicCollectorChain.__new__(PublicCollectorChain)
+    c.substrate = SimpleNamespace(
+        get_block_hash=lambda _: FINNEY_GENESIS,
+        rpc_request=lambda *_: {"result": code},
+        runtime_call=lambda *_args, **_kwargs: filters,
+    )
+    return c, filters
+
+
+def test_historical_v472_is_receipt_only_and_still_checks_native_scope():
+    from ditto_screening_protocol.collector_receipts import (
+        HISTORICAL_COLLECTOR_CODE_HASH,
+    )
+
+    c, filters = runtime_adapter(HISTORICAL_COLLECTOR_CODE_HASH)
+    p = policy(runtime_code_hash=AUDITED_CODE_HASH)
+    with pytest.raises(ValueError, match="runtime changed"):
+        c.guard_runtime(p, "finalized")
+    assert (
+        c.guard_runtime(p, "historic", historical=True)
+        == HISTORICAL_COLLECTOR_CODE_HASH
+    )
+    filters[0]["filter_mode"]["Allow"].append(
+        {"pallet_name": "Utility", "call_name": "batch", "constraint": None}
+    )
+    with pytest.raises(ValueError, match="scope"):
+        c.guard_runtime(p, "historic", historical=True)
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_future_runtime_refuses_before_signer_access(historical):
+    c, _ = runtime_adapter("0x" + "aa" * 32)
+    with pytest.raises(ValueError, match="runtime changed"):
+        c.guard_runtime(
+            policy(runtime_code_hash=AUDITED_CODE_HASH),
+            "finalized",
+            historical=historical,
+        )
+
+
+def test_upgrade_boundary_uses_same_exact_liquid_credit_not_balance_change():
+    from ditto_screening_protocol.collector_receipts import (
+        HISTORICAL_COLLECTOR_CODE_HASH,
+    )
+
+    p, c, events = income_fixture()
+    c.guard_runtime = lambda _p, h, **_kwargs: (
+        HISTORICAL_COLLECTOR_CODE_HASH if h == "b100" else AUDITED_CODE_HASH
+    )
+    assert c.earnings(p, 101).amount_rao == 20
+    events.pop()  # A migration refund or principal change is not AutoStakeAdded.
+    assert c.earnings(p, 101) is None
+    c.guard_runtime = lambda _p, h, **_kwargs: (
+        AUDITED_CODE_HASH if h == "b100" else HISTORICAL_COLLECTOR_CODE_HASH
+    )
+    with pytest.raises(ValueError, match="transition"):
+        c.earnings(p, 101)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_reconciliation_checks_runtime_direction_before_settlement(reverse):
+    from ditto_screening_protocol.collector_receipts import (
+        HISTORICAL_COLLECTOR_CODE_HASH,
+    )
+
+    p, c, op, observed, _ = receipt_fixture()
+    before, after = HISTORICAL_COLLECTOR_CODE_HASH, AUDITED_CODE_HASH
+    if reverse:
+        before, after = after, before
+    c.guard_runtime = lambda _p, h, **_kwargs: before if h == "b100" else after
+    if reverse:
+        with pytest.raises(ValueError, match="transition"):
+            c.reconcile(p, op, observed)
+    else:
+        assert c.reconcile(p, op, observed).status == "finalized"
+
+
+@pytest.mark.parametrize(
+    "parent,post,allowed",
+    [
+        ("historic", "historic", True),
+        ("historic", "current", True),
+        ("current", "historic", False),
+    ],
+)
+def test_activity_and_epoch_readers_use_historical_guards_only(parent, post, allowed):
+    import runpy
+    from pathlib import Path
+
+    from ditto_screening_protocol.collector_receipts import (
+        HISTORICAL_COLLECTOR_CODE_HASH,
+    )
+
+    hashes = {"historic": HISTORICAL_COLLECTOR_CODE_HASH, "current": AUDITED_CODE_HASH}
+    c, _ = runtime_adapter(hashes[post])
+    s = c.substrate
+    s.get_block_hash = lambda n: FINNEY_GENESIS if n == 0 else f"b{n}"
+    s.get_chain_finalised_head = lambda: "b200"
+    s.get_block_number = lambda _: 200
+
+    def rpc(method, params):
+        if method == "state_getStorageHash":
+            return {"result": hashes[parent] if params[-1] == "b100" else hashes[post]}
+        assert method == "chain_getBlock"
+        return {"result": {"block": {"extrinsics": []}}}
+
+    s.rpc_request = rpc
+    s.get_events = lambda _: []
+    c.query = lambda *_: 7
+    p = policy(runtime_code_hash=AUDITED_CODE_HASH)
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    cls = runpy.run_path(str(scripts / "treasury_activity_observer.py"))[
+        "FinalizedActivityReader"
+    ]
+    reader = cls.__new__(cls)
+    reader.substrate = s
+    reader.policy = p
+    reader.adapter = c
+    assert reader.epoch_at(101) == 7
+    if allowed:
+        assert reader.finalized_payment_block(101) == ("b101", 7, [], [])
+    else:
+        with pytest.raises(ValueError, match="transition"):
+            reader.finalized_payment_block(101)
+    cls = runpy.run_path(str(scripts / "treasury_selector_publisher.py"))[
+        "PublicEpochReader"
+    ]
+    selector = cls.__new__(cls)
+    selector.policy = p
+    selector.subtensor = SimpleNamespace(substrate=s)
+    selector.chain = c
+    assert selector.epoch_at(101) == 7
+    if post == "historic":
+        with pytest.raises(ValueError, match="runtime changed"):
+            c.guard_runtime(p, "b101")  # Default signing guard did not widen.
