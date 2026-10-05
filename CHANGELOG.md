@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.353.1 (2026-10-05)
+
+### Bug Fixes
+
+- **infra**: Isolate recovery CI custody and repair snapshot attachment
+  ([#2719](https://github.com/ditto-assistant/ditto-subnet/pull/2719),
+  [`de92806`](https://github.com/ditto-assistant/ditto-subnet/commit/de928061367c91ad1a3a21f0206673cc940bfc3b))
+
+- **platform**: Expose bounded gamma chain-read checkpoints
+  ([#2720](https://github.com/ditto-assistant/ditto-subnet/pull/2720),
+  [`2201cf5`](https://github.com/ditto-assistant/ditto-subnet/commit/2201cf56222aeec2d53ee4a804beae6362e781d6))
+
+### Performance Improvements
+
+- **treasury**: Reuse validated adjacent receipt parent proofs
+  ([#2718](https://github.com/ditto-assistant/ditto-subnet/pull/2718),
+  [`ba982aa`](https://github.com/ditto-assistant/ditto-subnet/commit/ba982aa389e5336cc90768297136e19570187c3e))
+
+
 ## v0.353.0 (2026-10-05)
 
 ### Bug Fixes
