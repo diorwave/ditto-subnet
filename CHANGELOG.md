@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.350.0 (2026-10-05)
+
+### Bug Fixes
+
+- **infra**: Allow custody plan to inspect IAP policy metadata
+  ([#2699](https://github.com/ditto-assistant/ditto-subnet/pull/2699),
+  [`550babf`](https://github.com/ditto-assistant/ditto-subnet/commit/550babf0cb82cf62dc555d5013943a9def7796fc))
+
+- **infra**: Permit custody workspace metadata enumeration
+  ([#2697](https://github.com/ditto-assistant/ditto-subnet/pull/2697),
+  [`c0f530e`](https://github.com/ditto-assistant/ditto-subnet/commit/c0f530e8ad36a2b1bf4520bf31c473655b9ff84c))
+
+- **treasury**: Pin v473 without resetting collector history
+  ([#2702](https://github.com/ditto-assistant/ditto-subnet/pull/2702),
+  [`0ad11bb`](https://github.com/ditto-assistant/ditto-subnet/commit/0ad11bb5a0779d0885403207e6842a651622c396))
+
+### Features
+
+- **treasury**: Preserve used collector history during isolated custody transfer
+  ([#2698](https://github.com/ditto-assistant/ditto-subnet/pull/2698),
+  [`50fecc2`](https://github.com/ditto-assistant/ditto-subnet/commit/50fecc2ef001bdb5163daaa7c12a0fa21a831a40))
+
+
 ## v0.349.0 (2026-10-05)
 
 ### Bug Fixes
