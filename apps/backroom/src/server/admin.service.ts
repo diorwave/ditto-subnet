@@ -13,6 +13,7 @@ export async function fetchTreasuryReceipts() {
   return treasuryReceiptPageSchema.parse(await platformAdminRequest('/api/v1/admin/treasury-receipts?limit=100'))
 }
 import { publicTreasuryApprovalSchema, treasuryActivationPreflightInputSchema, treasuryActivationPreflightSchema, treasuryLedgerReadinessSchema } from '../lib/treasury-ledger.schemas'
+import { recordTreasuryRuntimeInputSchema, treasuryRuntimeControlSchema, treasuryRuntimeRevisionSchema } from '../lib/treasury-ledger.schemas'
 import { recordTreasurySettingsInputSchema, treasuryControlSchema, treasuryPreviewInputSchema, treasuryQuoteInputSchema, treasuryQuoteSchema, treasuryRevisionSchema, treasuryRouteImpactBps } from '../lib/treasury.schemas'
 
 export async function previewTreasuryTopup(rawInput: unknown) {
@@ -70,6 +71,31 @@ export async function fetchTreasuryLedgerReadiness() {
   )
 }
 
+export async function fetchTreasuryRuntime() {
+  return treasuryRuntimeControlSchema.parse(await platformAdminRequest('/api/v1/admin/treasury-runtime'))
+}
+
+export async function recordTreasuryRuntime(rawInput: unknown, actor: string) {
+  const input = z.object(recordTreasuryRuntimeInputSchema).parse(rawInput)
+  if (input.confirmation !== `GAMMA ${input.mode.toUpperCase()} ${input.expectedPolicyDigest}`
+    || (input.mode === 'enforce') !== (input.activationEpoch !== null)) {
+    throw new Error('Exact Gamma mode, policy confirmation and epoch required')
+  }
+  const approval = publicTreasuryApprovalSchema.parse(JSON.parse(input.approvalJson))
+  const settings = { version: 1 as const, mode: input.mode, approval,
+    approved_policy_digest: input.expectedPolicyDigest,
+    collector_policy_digest: input.expectedCollectorPolicyDigest,
+    managed_validator_hotkeys: input.managedValidatorHotkeys,
+    activation_epoch: input.activationEpoch }
+  const result = treasuryRuntimeRevisionSchema.parse(await platformAdminRequest('/api/v1/admin/treasury-runtime', {
+    method: 'POST', actor, timeoutMs: 120_000,
+    body: { expected_revision: input.expectedRevision, settings, reason: input.reason, confirmation: input.confirmation },
+  }))
+  if (JSON.stringify(result.settings) !== JSON.stringify(settings)
+    || result.parent_revision !== input.expectedRevision) throw new Error('Gamma control response mismatch')
+  return result
+}
+
 export async function fetchTreasuryActivationPreflight(rawInput: unknown) {
   const input = treasuryActivationPreflightInputSchema.parse(rawInput)
   const approval = publicTreasuryApprovalSchema.parse(JSON.parse(input.approvalJson))
@@ -79,11 +105,14 @@ export async function fetchTreasuryActivationPreflight(rawInput: unknown) {
       approval,
       expected_policy_digest: input.expectedPolicyDigest,
       expected_collector_policy_digest: input.expectedCollectorPolicyDigest,
+      managed_validator_hotkeys: input.managedValidatorHotkeys ?? [],
     },
   })
   const result = treasuryActivationPreflightSchema.parse(payload)
   if (result.proposed_policy_digest !== input.expectedPolicyDigest
-    || result.proposed_collector_policy_digest !== input.expectedCollectorPolicyDigest) {
+    || result.proposed_collector_policy_digest !== input.expectedCollectorPolicyDigest
+    || (input.managedValidatorHotkeys !== undefined
+      && JSON.stringify([...result.managed_validator_hotkeys].sort()) !== JSON.stringify([...input.managedValidatorHotkeys].sort()))) {
     throw new Error('Treasury preflight response differs from requested policy')
   }
   return result

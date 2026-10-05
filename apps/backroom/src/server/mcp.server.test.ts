@@ -62,6 +62,51 @@ afterEach(() => {
 })
 
 describe('Backroom MCP tools', () => {
+  it('guards Gamma runtime changes with exact confirmation, write scope and actor', async () => {
+    const { readFileSync } = await import('node:fs')
+    const pin = JSON.parse(readFileSync(new URL(
+      '../../../../packages/ditto-screening-protocol/tests/fixtures/treasury_enforcing_pin_v2.json', import.meta.url,
+    ), 'utf8'))
+    process.env.DITTO_ADMIN_API_TOKEN = 'synthetic-token'
+    const input = { mode: 'observe', expectedRevision: 0, activationEpoch: null, managedValidatorHotkeys: pin.fleet.map((member: { validator_hotkey: string }) => member.validator_hotkey),
+      approvalJson: JSON.stringify({ ...pin.approval, actor: 'FORGED' }),
+      expectedPolicyDigest: pin.policy_digest, expectedCollectorPolicyDigest: pin.policy.collector_policy_digest,
+      reason: 'Configure public proof only', confirmation: `GAMMA OBSERVE ${pin.policy_digest}` }
+    const settings = { version: 1, mode: 'observe', approval: pin.approval,
+      approved_policy_digest: pin.policy_digest, collector_policy_digest: pin.policy.collector_policy_digest,
+      managed_validator_hotkeys: input.managedValidatorHotkeys, activation_epoch: null }
+    const row = { revision: 1, parent_revision: 0, settings, checksum: 'a'.repeat(64),
+      actor: 'platform_admin_token', reason: input.reason, created_at: '2026-10-05T18:00:00Z' }
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(row))
+    vi.stubGlobal('fetch', fetchMock)
+    const readonly = await connect([BACKROOM_READ_SCOPE])
+    try {
+      expect((await readonly.client.callTool({ name: 'record_treasury_runtime', arguments: input })).isError).toBe(true)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally { await readonly.client.close(); await readonly.server.close() }
+    const writer = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    try {
+      expect((await writer.client.callTool({ name: 'record_treasury_runtime', arguments: { ...input, confirmation: 'ACTIVATE' } })).isError).toBe(true)
+      expect(fetchMock).not.toHaveBeenCalled()
+      const response = await writer.client.callTool({ name: 'record_treasury_runtime', arguments: input })
+      expect(response.isError).not.toBe(true)
+      expect(readJsonResult(response)).toEqual(row)
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+      expect(url).toContain('/api/v1/admin/treasury-runtime')
+      expect(new Headers(init.headers).get('X-Admin-Actor')).toBe(session.email)
+      expect(JSON.parse(String(init.body))).toEqual({ expected_revision: 0, settings, reason: input.reason, confirmation: input.confirmation })
+      // Zod canonicalizes known object fields before the equality check.
+      const reversed = Object.fromEntries(Object.entries(settings).reverse())
+      fetchMock.mockResolvedValue(Response.json({ ...row, settings: reversed }))
+      expect((await writer.client.callTool({ name: 'record_treasury_runtime', arguments: input })).isError).not.toBe(true)
+      const { activation_epoch: _epoch, ...omittedEpoch } = reversed
+      fetchMock.mockResolvedValue(Response.json({ ...row, settings: omittedEpoch }))
+      expect((await writer.client.callTool({ name: 'record_treasury_runtime', arguments: input })).isError).not.toBe(true)
+      fetchMock.mockResolvedValue(Response.json({ ...row, parent_revision: 9 }))
+      expect((await writer.client.callTool({ name: 'record_treasury_runtime', arguments: input })).isError).toBe(true)
+    } finally { await writer.client.close(); await writer.server.close() }
+  })
+
   it('records a verified receipt with signed actor and refuses read-only, imprecise or unconfirmed writes', async () => {
     process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
     const selection = {
@@ -121,6 +166,8 @@ describe('Backroom MCP tools', () => {
       proposed_collector_policy_digest: pin.policy.collector_policy_digest,
       proposal_signature_verified: true, configured_policy_matches: false,
       configured_collector_matches: false, chain_status: 'unavailable', observation: null,
+      chain_failure_stage: null, chain_failure_kind: null,
+      gate_scope: 'managed_validators', managed_validator_hotkeys: [], chain_permitted_setter_count: null,
       required_setter_count: null, setters: [], truncated: false,
       fleet_ready_for_proposed_policy: false, blocking_reasons: ['chain_unavailable'],
       weight_effect: 'none', can_enforce_weights: false, copy_behavior_verified: false,
@@ -139,11 +186,15 @@ describe('Backroom MCP tools', () => {
       expect(url).toContain('/api/v1/admin/treasury-settings/activation-preflight')
       expect(init.method).toBe('POST')
       expect(JSON.parse(String(init.body))).toEqual({ approval: pin.approval,
-        expected_policy_digest: pin.policy_digest, expected_collector_policy_digest: pin.policy.collector_policy_digest })
+        expected_policy_digest: pin.policy_digest, expected_collector_policy_digest: pin.policy.collector_policy_digest,
+        managed_validator_hotkeys: [] })
       expect(new Headers(init.headers).has('X-Admin-Actor')).toBe(false)
+      const managed = pin.fleet.map((m: { validator_hotkey: string }) => m.validator_hotkey)
+      const wrongRoster = await client.callTool({ name: 'get_treasury_activation_preflight', arguments: { ...args, managedValidatorHotkeys: managed } })
+      expect(wrongRoster.isError).toBe(true)
       const invalid = await client.callTool({ name: 'get_treasury_activation_preflight', arguments: { ...args, approvalJson: 'x'.repeat(8193) } })
       expect(invalid.isError).toBe(true)
-      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
       fetchMock.mockResolvedValue(Response.json({ ...report, can_enforce_weights: true }))
       expect((await client.callTool({ name: 'get_treasury_activation_preflight', arguments: args })).isError).toBe(true)
       fetchMock.mockResolvedValue(Response.json({ ...report, proposed_policy_digest: 'f'.repeat(64) }))
@@ -430,6 +481,8 @@ describe('Backroom MCP tools', () => {
         'read_screening_source_file',
         'record_v13_benign_approval',
         'record_treasury_settings',
+        'record_treasury_runtime',
+        'get_treasury_runtime',
         'record_treasury_receipt',
         'record_v13_replay_private_group',
         'search_screening_source',
@@ -578,9 +631,8 @@ describe('Backroom MCP tools', () => {
     // 179,468 bytes before the optional review-posture pin, node cap and
     // expected-value canary guard inputs. Keep operational tutorials in help
     // and retain the existing catalog budget as these inputs evolve.
-    // Portable bounded hotkey arrays on the scorer-cohort writers (#2559)
-    // measure 179,521 bytes.
-    expect(JSON.stringify(response.tools).length).toBeLessThanOrEqual(180_000)
+    // Measure the serialized UTF-8 catalog, including guarded Gamma controls.
+    expect(Buffer.byteLength(JSON.stringify(response.tools), 'utf8')).toBeLessThanOrEqual(180_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener

@@ -20,7 +20,7 @@ was performed during these checks.
 
 | Runtime | Implemented | Remaining gate |
 | --- | --- | --- |
-| Platform/Pylon/validator | Offline approval, immutable V2 epoch policy/identity/fleet, service-before-burn weights, queued-dispatch fence | Deployment mounts/bindings, complete finalized setter roster, drain/adoption, financial activation |
+| Platform/Pylon/validator | Offline approval, immutable V2 epoch policy/identity/fleet, service-before-burn weights, queued-dispatch fence | Deployment mounts/bindings, audited managed setter roster with current finalized permission, drain/adoption, financial activation |
 | Registration signer | Bounded `register_limit`, separate delegate, durable budget/finality claims | Identity/custody/IAM/reserves, exact installed runtime/policy and action-time authorization |
 | Transfer signer | Attributed liquid earnings and same-hotkey SN118 bucket transfers with durable claims | Self auto-stake route, limits/reserves, durable journals and separate activation |
 | Receipt ingress | Independent historical policy/ledger/finalized chain/effect verification and atomic publication | Exact deployed ingress and bounded accepted receipt |
@@ -54,7 +54,7 @@ The pending inputs remain the existing question; do not repeat or invent them.
 - Separate GCE signer hosts/service accounts and fixed numerical delegate
   secret versions; exact collector policy/digest/offline approval and historical
   Platform revision/checksum/emission approval/digest.
-- Complete finalized permitted setter roster, every validator/Pylon runtime,
+- Explicit operator-selected managed setter roster, each managed validator/Pylon runtime,
   immutable descriptor/image pins, drain owner and rollback epoch boundary.
 
 ### Reserves and custody
@@ -93,7 +93,7 @@ No users/hosts/keys/secrets/grants/timers are created by preparing this package.
 | Registration | `/opt/sn118-collector`, role policy/digest, `sn118-collector@registration.service`/timer | Own journal and own fixed Secret Manager delegate version |
 | Transfer | Same exact runtime, transfer policy/digest, `sn118-collector@transfer.service`/timer | Own journal and own delegate version |
 | Observer | `/opt/sn118-treasury-observer`, `/etc/sn118-treasury-observer/config.json`, root-owned activation.env with `CONFIG_SHA256`, proposed unit | Private queue; separately approved exclusive OAuth credential via `LoadCredential` |
-| Platform/every validator/Pylon | Read-only public approval file and independently pinned digests | Existing identity only; no collector/holding keys |
+| Platform/each managed validator/Pylon | Read-only public approval file and independently pinned digests | Existing identity only; no collector/holding keys |
 
 The observer unit takes only the mounted credential **path** in `--token-file`.
 No token goes in arguments, environment file, unit, packet, screenshot or log.
@@ -295,7 +295,7 @@ These are prepared actions, each requiring separate action-time approval.
 1. Set exact public identities/buckets/payee rules via normal Backroom CAS.
    Retain returned historical revision/checksum. Obtain separate offline
    collector/emission signatures and independently compare all fields/digests.
-2. Install exact public proof/digests on Platform and **every** validator/Pylon.
+2. Install exact public proof/digests on Platform and each configured managed validator/Pylon.
    Config seams: `DITTO_TREASURY_SHADOW_APPROVAL_FILE`,
    `DITTO_TREASURY_APPROVED_POLICY_DIGEST`,
    `DITTO_TREASURY_COLLECTOR_POLICY_DIGEST`; Platform also resolves
@@ -304,13 +304,15 @@ These are prepared actions, each requiring separate action-time approval.
 3. Drain legacy weight work at the agreed epoch boundary. Arm each Pylon
    `DITTO_TREASURY_WEIGHT_ENFORCEMENT=true` fence; cached/new/queued V1 refuses.
    Verify matching capability and fresh signed protocol-30 heartbeats for the
-   complete finalized permitted roster, including stale/rejoining setters.
+   audited managed roster with current finalized permission. Missing or stale
+   managed members refuse; independent validators do not expand this gate.
 4. Only then authorize Platform enforcing producer/new immutable V2 epoch pin.
    Require signed receipt and normalized vectors bound to that pin. No V1
-   fallback, existing shadow epoch rewrite, burn/admission change or subset gate.
+   fallback, existing shadow epoch rewrite or burn/admission change. The immutable
+   pin binds the selected managed roster; this is not a whole-chain adoption claim.
 5. Rollback stops new work, drains/reconciles tasks/claims and preserves journals.
    Never disarm a Pylon fence while V2 epoch/queued V2 work remains. Review next
-   epoch/complete roster; no silent legacy reinterpretation. Drift halts until
+   epoch/configured managed roster; no silent legacy reinterpretation. Drift halts until
    audited rebind, not operator override.
 
 ## Shortest path to visible finalized earnings/distribution/payment

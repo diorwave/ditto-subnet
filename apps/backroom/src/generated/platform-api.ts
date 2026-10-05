@@ -3407,6 +3407,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/treasury-runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Treasury Runtime */
+        get: operations["get_treasury_runtime_api_v1_admin_treasury_runtime_get"];
+        put?: never;
+        /** Record Treasury Runtime */
+        post: operations["record_treasury_runtime_api_v1_admin_treasury_runtime_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/treasury-settings": {
         parameters: {
             query?: never;
@@ -12962,6 +12980,16 @@ export interface components {
             expected_registration_sha256: string;
             /** Reason */
             reason: string;
+        };
+        /** AdminTreasuryRuntimeRequest */
+        AdminTreasuryRuntimeRequest: {
+            /** Confirmation */
+            confirmation: string;
+            /** Expected Revision */
+            expected_revision: number;
+            /** Reason */
+            reason: string;
+            settings: components["schemas"]["TreasuryRuntimeSettings"];
         };
         /** AdminTreasurySettingsRequest */
         AdminTreasurySettingsRequest: {
@@ -33131,13 +33159,19 @@ export interface components {
         /** TreasuryActivationPreflight */
         TreasuryActivationPreflight: {
             /** Blocking Reasons */
-            blocking_reasons: ("chain_unavailable" | "inventory_truncated" | "setter_proof_missing")[];
+            blocking_reasons: ("chain_unavailable" | "inventory_truncated" | "setter_proof_missing" | "managed_roster_missing" | "managed_setter_not_permitted")[];
             /**
              * Can Enforce Weights
              * @default false
              * @constant
              */
             can_enforce_weights: false;
+            /** Chain Failure Kind */
+            chain_failure_kind?: ("timeout" | "connection" | "invalid_evidence" | "reader_unavailable" | "unavailable") | null;
+            /** Chain Failure Stage */
+            chain_failure_stage?: ("identity" | "setter_roster") | null;
+            /** Chain Permitted Setter Count */
+            chain_permitted_setter_count?: number | null;
             /**
              * Chain Status
              * @enum {string}
@@ -33160,6 +33194,17 @@ export interface components {
             copy_behavior_verified: false;
             /** Fleet Ready For Proposed Policy */
             fleet_ready_for_proposed_policy: boolean;
+            /**
+             * Gate Scope
+             * @default managed_validators
+             * @constant
+             */
+            gate_scope: "managed_validators";
+            /**
+             * Managed Validator Hotkeys
+             * @default []
+             */
+            managed_validator_hotkeys: string[];
             observation: components["schemas"]["TreasuryDispatchObservation"] | null;
             /**
              * Proposal Signature Verified
@@ -33191,6 +33236,11 @@ export interface components {
             expected_collector_policy_digest: string;
             /** Expected Policy Digest */
             expected_policy_digest: string;
+            /**
+             * Managed Validator Hotkeys
+             * @default []
+             */
+            managed_validator_hotkeys: string[];
         };
         /**
          * TreasuryCollectorIdentity
@@ -33509,6 +33559,66 @@ export interface components {
              * @enum {string}
              */
             stage: "service_distribution" | "vendor_payment" | "provider_credit";
+        };
+        /** TreasuryRuntimeControl */
+        TreasuryRuntimeControl: {
+            /**
+             * Can Enforce Weights
+             * @default false
+             * @constant
+             */
+            can_enforce_weights: false;
+            latest: components["schemas"]["TreasuryRuntimeRevision"] | null;
+            /** Revision */
+            revision: number;
+            /**
+             * Transfers Enabled
+             * @default false
+             * @constant
+             */
+            transfers_enabled: false;
+        };
+        /** TreasuryRuntimeRevision */
+        TreasuryRuntimeRevision: {
+            /** Actor */
+            actor: string;
+            /** Checksum */
+            checksum: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Parent Revision */
+            parent_revision: number;
+            /** Reason */
+            reason: string;
+            /** Revision */
+            revision: number;
+            settings: components["schemas"]["TreasuryRuntimeSettings"];
+        };
+        /** TreasuryRuntimeSettings */
+        TreasuryRuntimeSettings: {
+            /** Activation Epoch */
+            activation_epoch?: number | null;
+            approval: components["schemas"]["TreasuryPolicyApproval"];
+            /** Approved Policy Digest */
+            approved_policy_digest: string;
+            /** Collector Policy Digest */
+            collector_policy_digest: string;
+            /** Managed Validator Hotkeys */
+            managed_validator_hotkeys: string[];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "observe" | "enforce" | "pause";
+            /**
+             * Version
+             * @default 1
+             * @constant
+             */
+            version: 1;
         };
         /** TreasuryServiceBucket */
         TreasuryServiceBucket: {
@@ -42999,6 +43109,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TreasuryReceiptResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_treasury_runtime_api_v1_admin_treasury_runtime_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TreasuryRuntimeControl"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_treasury_runtime_api_v1_admin_treasury_runtime_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminTreasuryRuntimeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TreasuryRuntimeRevision"];
                 };
             };
             /** @description Validation Error */
