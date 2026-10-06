@@ -659,8 +659,9 @@ async def test_v467_transition_recovers_on_the_second_archive(
         )
 
 
-async def test_pending_payout_resolves_before_failing_block_scan(
-    app, client, session_maker, monkeypatch
+@pytest.mark.parametrize("finalized", [202, 15000])
+async def test_pending_payout_resolves_despite_failing_block_scan(
+    app, client, session_maker, monkeypatch, finalized
 ):
     a, b = await _prepare(app, session_maker)
     assert (await _post(client, _signed(a))).status_code == 200
@@ -676,13 +677,18 @@ async def test_pending_payout_resolves_before_failing_block_scan(
         "ditto.api_server.source_emission_collector.read_source_emission_block", scan
     )
     substrate = SimpleNamespace(
-        get_chain_finalised_head=AsyncMock(return_value=_hash(202)),
-        get_block_header=AsyncMock(return_value={"header": {"number": 202}}),
+        get_chain_finalised_head=AsyncMock(return_value=_hash(finalized)),
+        get_block_header=AsyncMock(return_value={"header": {"number": finalized}}),
     )
     with pytest.raises(RuntimeError, match="RPC work limit exceeded"):
         await collector._sweep_provider(substrate)
     scan.assert_awaited_once()
     async with session_maker() as session:
+        from ditto.db.models import SourceEmissionCollectorCursor
+
+        cursor = await session.get(SourceEmissionCollectorCursor, a["netuid"])
+        assert cursor.block == 201
+        assert cursor.block_hash == _hash(201)
         aid = UUID(a["provenance"]["champion_agent_id"])
         bid = UUID(b["provenance"]["champion_agent_id"])
         reveals = await get_king_reveal(session, agent_ids=[aid, bid])
@@ -729,6 +735,44 @@ async def test_sweep_widens_batch_and_skips_leading_resolution_in_catchup(
     monkeypatch.setattr(collector, "resolve_pending_payouts", resolve)
     await collector._sweep_provider(substrate)
     assert scanned == list(range(101, 229))
+    assert len(resolved) == 1
+
+
+async def test_failed_catchup_scan_still_resolves_pending_payouts(
+    app, session_maker, monkeypatch
+):
+    """A mid-batch archive failure during deep catch-up must not starve payout
+    resolution: the resolver cycles pending rows with its own archive reads."""
+    from ditto.db.models import SourceEmissionCollectorCursor
+
+    a, _ = await _prepare(app, session_maker)
+    async with session_maker() as session, session.begin():
+        cursor = await session.get(SourceEmissionCollectorCursor, a["netuid"])
+        cursor.block = 100
+        cursor.block_hash = _hash(100)
+    collector = _collector(app, session_maker)
+
+    async def read(_substrate, *, netuid, block, expected_runtime_code_hash=None):  # noqa: ARG001
+        del netuid, block, expected_runtime_code_hash
+        raise RuntimeError("Historical work rate limit exceeded")
+
+    resolved = []
+
+    async def resolve(_substrate):
+        resolved.append(True)
+        return 0
+
+    substrate = SimpleNamespace(
+        get_chain_finalised_head=AsyncMock(return_value=_hash(15000)),
+        get_block_header=AsyncMock(return_value={"header": {"number": 15000}}),
+    )
+    monkeypatch.setattr(
+        "ditto.api_server.source_emission_collector.read_source_emission_block",
+        read,
+    )
+    monkeypatch.setattr(collector, "resolve_pending_payouts", resolve)
+    with pytest.raises(RuntimeError, match="rate limit"):
+        await collector._sweep_provider(substrate)
     assert len(resolved) == 1
 
 
