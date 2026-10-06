@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.353.3 (2026-10-06)
+
+### Bug Fixes
+
+- **platform**: Evaluate Gamma heartbeats after preflight reads
+  ([#2722](https://github.com/ditto-assistant/ditto-subnet/pull/2722),
+  [`4b2e11a`](https://github.com/ditto-assistant/ditto-subnet/commit/4b2e11afd54183159d3431064c9cfff511d7736e))
+
+
 ## v0.353.2 (2026-10-06)
 
 ### Bug Fixes
