@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.353.7 (2026-10-06)
+
+### Bug Fixes
+
+- **treasury**: Conserve capped canary receipt remainders
+  ([#2726](https://github.com/ditto-assistant/ditto-subnet/pull/2726),
+  [`0a030a0`](https://github.com/ditto-assistant/ditto-subnet/commit/0a030a0fb2ee1c9bb2b9c55437a4516af8973cbd))
+
+- **treasury**: Reuse fresh scoped dispatch reads
+  ([#2727](https://github.com/ditto-assistant/ditto-subnet/pull/2727),
+  [`d1dc5d3`](https://github.com/ditto-assistant/ditto-subnet/commit/d1dc5d3230032f94430256c1dd5b3e13b41a61f3))
+
+
 ## v0.353.6 (2026-10-06)
 
 ### Bug Fixes
