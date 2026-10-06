@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.353.6 (2026-10-06)
+
+### Bug Fixes
+
+- **gamma**: Show recorded runtime separately from verified funds
+  ([#2725](https://github.com/ditto-assistant/ditto-subnet/pull/2725),
+  [`219ef5e`](https://github.com/ditto-assistant/ditto-subnet/commit/219ef5e98071e9b0c52660f11cb5457a342cce5d))
+
+
 ## v0.353.5 (2026-10-06)
 
 ### Bug Fixes
