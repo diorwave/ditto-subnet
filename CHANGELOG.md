@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.355.3 (2026-10-06)
+
+### Bug Fixes
+
+- **dashboard**: Link gamma receipts to Taostats transactions
+  ([`4944ed3`](https://github.com/ditto-assistant/ditto-subnet/commit/4944ed374333fe1b744a5313fb0b300b5e4c7b60))
+
+
 ## v0.355.2 (2026-10-06)
 
 ### Bug Fixes
