@@ -1122,23 +1122,23 @@ class ChainClient:
             ) from e
 
     async def read_epoch_schedule(self, netuid: int) -> EpochSchedule:
-        """Read the subnet's stateful epoch position at the current head.
+        """Read the subnet's stateful epoch position at one finalized head.
 
         Five storage reads at one block hash -- ``LastEpochBlock``,
         ``PendingEpochAt``, ``SubnetEpochIndex``, ``Tempo`` and
         ``BlocksSinceLastStep`` -- plus the block's own timestamp. This is the
-        identity the epoch-pinned ledger keys on, so unlike :meth:`_read_epoch`
+        identity the epoch-pinned ledger keys on. SDK startup metadata and all
+        six storage queries share one request-local finalized hash; another
+        invocation obtains a new finalized head. Unlike :meth:`_read_epoch`
         it fails loud: a pin taken against a half-read schedule would be worse
         than no pin. It deliberately does not read the timelocked commit map
         (``read_weight_diagnostics`` does; that is a diagnostic, not a clock).
         """
-        from async_substrate_interface import AsyncSubstrateInterface
-
         from ditto.chain.weight_diagnostics import predict_next_epoch_block
 
         try:
-            async with AsyncSubstrateInterface(url=self._substrate_url()) as substrate:
-                block_hash = await substrate.get_chain_head()
+            async with _treasury_substrate(self._substrate_url()) as substrate:
+                block_hash = await substrate.get_chain_finalised_head()
                 header = await substrate.get_block_header(block_hash=block_hash)
                 block = _block_number_from_header(header)
 
