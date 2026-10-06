@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.355.0 (2026-10-06)
+
+### Features
+
+- **treasury**: Prepare bounded manual collector transfers
+  ([#2748](https://github.com/ditto-assistant/ditto-subnet/pull/2748),
+  [`7dd1e30`](https://github.com/ditto-assistant/ditto-subnet/commit/7dd1e300d64f16299c82733ec5e3d710989d8302))
+
+### Performance Improvements
+
+- **platform**: Bound screening claim, ledger and quorum telemetry database costs
+  ([#2744](https://github.com/ditto-assistant/ditto-subnet/pull/2744),
+  [`727749f`](https://github.com/ditto-assistant/ditto-subnet/commit/727749f71ece2434357bbada7898e67cdc7b0787))
+
+
 ## v0.354.0 (2026-10-06)
 
 ### Bug Fixes
