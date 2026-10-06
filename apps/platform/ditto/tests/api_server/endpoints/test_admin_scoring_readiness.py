@@ -35,6 +35,21 @@ _HEADERS = {"Authorization": f"Bearer {_TOKEN}", "X-Admin-Actor": "operator"}
 _T0 = datetime(2026, 7, 21, 4, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def floor_policy_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module tests the documented no-scheduled-activation state.
+
+    Another test in the same worker may publish a raised process-global policy
+    snapshot. Database resets do not reset that snapshot. Restore our intended
+    floor for each test without changing production policy or other modules.
+    """
+    import ditto.screener_policy_state as policy_state
+
+    monkeypatch.setattr(
+        policy_state, "_required_policy_version", SCREENING_FLOOR_POLICY_VERSION
+    )
+
+
 @pytest.fixture
 def sr_engine(engine: AsyncEngine) -> AsyncEngine:
     """Local alias for the root Postgres ``engine``."""
