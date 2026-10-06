@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.355.1 (2026-10-06)
+
+### Bug Fixes
+
+- **platform**: Collapse owner families after the registration filter
+  ([#2701](https://github.com/ditto-assistant/ditto-subnet/pull/2701),
+  [`fd17b78`](https://github.com/ditto-assistant/ditto-subnet/commit/fd17b7856354f7bd21da9cd043119c20745581e7))
+
+- **validator**: Stop polling the ledger while waiting for the weight window
+  ([#2754](https://github.com/ditto-assistant/ditto-subnet/pull/2754),
+  [`2123eac`](https://github.com/ditto-assistant/ditto-subnet/commit/2123eac1db04845ffc1af4f4d9b00bea0e428ec1))
+
+### Chores
+
+- **skills**: Add contributor PR review workflow
+  ([#2756](https://github.com/ditto-assistant/ditto-subnet/pull/2756),
+  [`4bb23de`](https://github.com/ditto-assistant/ditto-subnet/commit/4bb23de1f035233f28cdea3a70228938ad755703))
+
+
 ## v0.355.0 (2026-10-06)
 
 ### Features
