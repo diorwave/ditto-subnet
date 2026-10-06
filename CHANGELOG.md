@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v0.353.12 (2026-10-06)
+
+### Bug Fixes
+
+- **collector**: Separate archive scans from transfer signing
+  ([#2736](https://github.com/ditto-assistant/ditto-subnet/pull/2736),
+  [`8aba3f4`](https://github.com/ditto-assistant/ditto-subnet/commit/8aba3f4ea8a7cd504a161f27cdb51b675ee63b56))
+
+- **platform**: Separate receipt policy and settings revisions
+  ([#2735](https://github.com/ditto-assistant/ditto-subnet/pull/2735),
+  [`2453d55`](https://github.com/ditto-assistant/ditto-subnet/commit/2453d551e4e79018363aa6d280a4dc0417d63cd2))
+
+- **validator**: Skip the owner hotkey read when the vector has no burn residual
+  ([#2708](https://github.com/ditto-assistant/ditto-subnet/pull/2708),
+  [`ba058e3`](https://github.com/ditto-assistant/ditto-subnet/commit/ba058e374e8f0a67d7b79f352d25682d8fcd0c32))
+
+
 ## v0.353.11 (2026-10-06)
 
 ### Bug Fixes
