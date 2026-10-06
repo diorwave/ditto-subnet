@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.353.8 (2026-10-06)
+
+### Bug Fixes
+
+- **platform**: Expose gamma ledger-clock diagnostics
+  ([#2730](https://github.com/ditto-assistant/ditto-subnet/pull/2730),
+  [`a1aa7e5`](https://github.com/ditto-assistant/ditto-subnet/commit/a1aa7e5e447aa567f06558f11bad78008c093344))
+
+### Documentation
+
+- **gamma**: Explain capped partial canary receipts
+  ([#2728](https://github.com/ditto-assistant/ditto-subnet/pull/2728),
+  [`76e777b`](https://github.com/ditto-assistant/ditto-subnet/commit/76e777b81d5c5942cb697705a96e4449629ed516))
+
+### Performance Improvements
+
+- **gamma**: Avoid duplicate historical identity reads
+  ([#2729](https://github.com/ditto-assistant/ditto-subnet/pull/2729),
+  [`344ffde`](https://github.com/ditto-assistant/ditto-subnet/commit/344ffde4e23d7eb5436bee81f65a21f420ba8079))
+
+
 ## v0.353.7 (2026-10-06)
 
 ### Bug Fixes
