@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.353.5 (2026-10-06)
+
+### Bug Fixes
+
+- **treasury**: Scope permission proofs to managed validators
+  ([#2724](https://github.com/ditto-assistant/ditto-subnet/pull/2724),
+  [`9f8870b`](https://github.com/ditto-assistant/ditto-subnet/commit/9f8870b81435027b0e4499204adbbdf6a104f76f))
+
+
 ## v0.353.4 (2026-10-06)
 
 ### Bug Fixes
