@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.353.9 (2026-10-06)
+
+### Bug Fixes
+
+- **gamma**: Adapt pylon finalized RPC wire shapes
+  ([#2731](https://github.com/ditto-assistant/ditto-subnet/pull/2731),
+  [`7d64c0e`](https://github.com/ditto-assistant/ditto-subnet/commit/7d64c0e18e35603f299bb4176aadb87215d796eb))
+
+
 ## v0.353.8 (2026-10-06)
 
 ### Bug Fixes
