@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.355.4 (2026-10-06)
+
+### Performance Improvements
+
+- **platform**: Correlate screening aggregates per agent and bound remaining details reads
+  ([#2761](https://github.com/ditto-assistant/ditto-subnet/pull/2761),
+  [`43d3315`](https://github.com/ditto-assistant/ditto-subnet/commit/43d3315420c9f86d6d186e71a9cba1729ea36d0e))
+
+
 ## v0.355.3 (2026-10-06)
 
 ### Bug Fixes
