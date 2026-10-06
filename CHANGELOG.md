@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.354.0 (2026-10-06)
+
+### Bug Fixes
+
+- **treasury**: Expose read-only finalized receipt preflight
+  ([#2745](https://github.com/ditto-assistant/ditto-subnet/pull/2745),
+  [`eed684f`](https://github.com/ditto-assistant/ditto-subnet/commit/eed684f36d000b30ea17743293abcb8adb21babd))
+
+### Features
+
+- **gamma**: Show verified public wallet transaction trail
+  ([#2746](https://github.com/ditto-assistant/ditto-subnet/pull/2746),
+  [`6fea0ac`](https://github.com/ditto-assistant/ditto-subnet/commit/6fea0ac0a97dd9c8e78ab6951158675da4c1dc46))
+
+
 ## v0.353.14 (2026-10-06)
 
 ### Bug Fixes
