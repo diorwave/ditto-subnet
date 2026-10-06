@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.353.2 (2026-10-06)
+
+### Bug Fixes
+
+- **platform**: Reuse exact-hash gamma preflight connection
+  ([#2721](https://github.com/ditto-assistant/ditto-subnet/pull/2721),
+  [`88933b3`](https://github.com/ditto-assistant/ditto-subnet/commit/88933b3826b04bf053f6b9c166d9a34c4bee0401))
+
+
 ## v0.353.1 (2026-10-05)
 
 ### Bug Fixes
