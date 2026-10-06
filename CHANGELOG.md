@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.353.10 (2026-10-06)
+
+### Bug Fixes
+
+- **platform**: Bind epoch schedule to finalized startup
+  ([`c3d509b`](https://github.com/ditto-assistant/ditto-subnet/commit/c3d509b4d1ad007f5e2921df29ff533587a11681))
+
+### Chores
+
+- **tests**: Isolate scoring readiness policy snapshot
+  ([`d132f49`](https://github.com/ditto-assistant/ditto-subnet/commit/d132f4994da3f36f32a145408c700879180257d4))
+
+
 ## v0.353.9 (2026-10-06)
 
 ### Bug Fixes
