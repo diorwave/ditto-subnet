@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.355.2 (2026-10-06)
+
+### Bug Fixes
+
+- **platform**: Recover invalid audit index during migration retries
+  ([#2758](https://github.com/ditto-assistant/ditto-subnet/pull/2758),
+  [`8291c4d`](https://github.com/ditto-assistant/ditto-subnet/commit/8291c4d05f87890e7b96759d92cac0c5a07da953))
+
+- **treasury**: Let all validators follow the signed gamma ledger
+  ([#2757](https://github.com/ditto-assistant/ditto-subnet/pull/2757),
+  [`b15c03d`](https://github.com/ditto-assistant/ditto-subnet/commit/b15c03d6832a769723d042e595da670dcc8901da))
+
+
 ## v0.355.1 (2026-10-06)
 
 ### Bug Fixes
