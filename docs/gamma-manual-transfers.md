@@ -1,8 +1,7 @@
 # Bounded manual collector requests
 
 The manual core prepares a single transfer under the existing offline-signed
-collector policy. It is not a generic wallet API, recurring activation, a new
-destination approval, or a live Backroom-to-custody bridge.
+collector policy. It is not a generic wallet API or a new destination approval. The Backroom bridge below uses the same bounded core.
 
 Each public request file names a UUID, the exact previous operation ID, source
 earning block, allocated bucket, alpha amount in integer rao, positive retained
@@ -38,9 +37,10 @@ The private selector snapshot contains allowlisted public receipt coordinates,
 not keys or signed bytes. Existing separate-user publisher/observer code can
 durably deliver these to public Backroom receipt ingress. A snapshot is not a
 published receipt; the independent historical chain checks must accept it.
-Do not mark the operator control ready until that observer is deployed with
-its dedicated normal-consent OAuth grant and a bounded receipt is visibly
-published. No broad desktop token may be copied into the observer.
+The CLI-only observer requires its dedicated normal-consent OAuth grant;
+no broad desktop token may be copied into it. The Backroom button uses the
+keyless mailbox bridge below instead. Neither path is ready solely from a
+selector snapshot: independent receipt publication must succeed.
 
 This change does not install a signer runtime, arm an intent, reset a journal,
 enable a timer, provision OAuth/IAM, or move funds. Backroom control wiring and
@@ -51,3 +51,81 @@ blocks in the existing transfer journal without preparing or broadcasting any
 transaction. It can continue after a spent manual/canary claim, so observation
 does not have to slow to the daily spending frequency. Historical failures
 roll back the scan; they never skip missing blocks or reset the cursor.
+
+
+## Backroom button and automatic public receipt
+
+Under **Emissions & treasury**, **Transfer to a service wallet** previews the
+approved destination, amount and minimum alpha retained staked. The operator
+must type the exact displayed amount-and-wallet confirmation and click
+**Transfer once**. The live signed-in Backroom actor is recorded by the server;
+read-only users and cross-origin requests cannot queue a transfer.
+
+Platform serializes confirmed requests in SQL before dispatch. A UUID binds
+one immutable envelope, including previous claim, source, expiry and reason.
+One pending claim or unpublished receipt blocks a second request. If delivery
+of a queue publish or signer broadcast is unknown, retry uses the original
+UUID/journal and signed bytes; it never creates an automatic replacement.
+The dispatch-attempt timestamp commits before mailbox publication. A request
+refused before that timestamp is guaranteed never attempted and does not block
+another claim after resume. A timestamped attempt remains unresolved after a
+lost publication ACK or later pause until custody supplies a terminal report;
+a crash between reservation and publication is conservatively unresolved.
+An intent expiring after arming stays in custody history and requires recovery.
+
+The default-off Google Pub/Sub bridge uses the attached VM identities, not
+wallet credentials or copied desktop OAuth tokens. Platform can publish only
+to `sn118-manual-requests` and consume only `sn118-manual-reports`. The transfer
+signer has the inverse grants. Topics remain in `sn118-gamma-custody`; signer
+network egress remains the existing restricted Google APIs and Finney policy.
+The registration signer receives no mailbox authority. The worker observes
+bounded finalized earnings but only executes an explicitly confirmed request.
+Recurring collector timers remain stopped.
+
+The return report contains only public settlement coordinates. It is not a
+receipt proof: Platform's existing independent chain ingress verifies them
+against the approved source policy and publishes the Gamma event. An archive
+failure retries publication in SQL without re-invoking custody. A semantic
+proof refusal stops publication for operator review. A wallet transfer does
+not prove a provider purchase or credited GM balance.
+
+### Separate deployment and enablement
+
+1. Merge and verify the selected Platform/Backroom release, including migration
+   `f4d95a6c827b` and the new read-only `get_treasury_manual_transfers` tool.
+2. First review/apply the owner bootstrap delta: Pub/Sub API and metadata-only
+   plan/resource-management apply custom roles for the existing protected
+   infrastructure identities, with no payload or wallet permissions.
+   Subscription creation includes the [documented topic attachment permission](https://docs.cloud.google.com/pubsub/docs/access-control). Then run
+   the existing protected Gamma custody plan with **sealed** roles,
+   runtime RPC egress unchanged/true and `gamma_manual_mailbox_enabled=true`.
+   Review the entire private plan before apply. Never apply the repository's
+   old bootstrap defaults over live sealed custody. Only the dedicated Platform
+   API principal may receive the resource-specific publisher/subscriber grants.
+3. Stage the exact merged worker/shared protocol on the existing signer with
+   its journal, signed policy and numeric Secret Manager version unchanged.
+   Install `sn118-treasury-manual.service`; its reviewed deployment drop-in must
+   point to that exact source and existing venv. Keep automatic transfer timers
+   **persistently masked**, not merely disabled:
+   `systemctl mask --now sn118-collector@transfer.service sn118-collector@transfer.timer`.
+   Stage `scripts/check-treasury-manual-mode.sh` alongside the reviewed unit;
+   its pre-start guard requires both persistent masks. A rejected manual start
+   leaves existing recurring units untouched; no conflict stop occurs before
+   the guard. A later ordinary timer
+   or service start therefore fails without stopping the manual consumer.
+   Create the activation file only after inspecting effective unit configuration,
+   masks and mailbox IAM. Returning to recurring mode requires deliberately
+   stopping manual dispatch, reconciling all outstanding claims, removing manual
+   enablement and then unmasking; do not unmask during manual mode.
+4. Converge Platform with `platform_treasury_manual_enabled=true` and the exact
+   project/request topic/report subscription defaults, via the owned deployment
+   process. No new Backroom OAuth grant is required for this keyless bridge.
+5. Read fresh public Backroom manual state: enabled, matching policy pin,
+   no bridge error, no unresolved prior claim, positive approved entitlement.
+   Do not call the button usable merely because default-off code is deployed.
+   Verify the public receipt on the next operator-confirmed transfer; never
+   replay the already-finalized canary or send another amount just for testing.
+
+Stopping the manual service or disabling Platform dispatch prevents new
+claims. Preserve pending journals and queued requests for reconciliation;
+do not reset/delete financial history during rollback.

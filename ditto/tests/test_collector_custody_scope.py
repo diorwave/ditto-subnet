@@ -89,6 +89,77 @@ class PrivatePlanScope(unittest.TestCase):
         ]
         return plan
 
+    def test_manual_mailbox_scope_requires_exact_direction_and_explicit_enablement(
+        self,
+    ):
+        plan = fixture()
+        plan["variables"].update(
+            {
+                "project": {"value": "sn118-gamma-custody"},
+                "enable_manual_mailbox": {"value": True},
+                "collector_custody_phases": {
+                    "value": {"registration": "sealed", "transfer": "sealed"}
+                },
+                "manual_mailbox_platform_service_account": {
+                    "value": "ditto-platform-api@ditto-app-dev.iam.gserviceaccount.com"
+                },
+            }
+        )
+        after = {
+            "project": "sn118-gamma-custody",
+            "topic": "sn118-manual-requests",
+            "role": "roles/pubsub.publisher",
+            "member": (
+                "serviceAccount:ditto-platform-api@"
+                "ditto-app-dev.iam.gserviceaccount.com"
+            ),
+        }
+        plan["resource_changes"] = [
+            {
+                "address": "google_pubsub_topic_iam_member.manual_requests[0]",
+                "mode": "managed",
+                "change": {"actions": ["create"], "after": after},
+            }
+        ]
+        plan["planned_values"]["root_module"]["resources"] = [
+            {"address": address} for address in sorted(scope.MAILBOX)
+        ]
+        self.assertEqual(scope.validate(plan, project="sn118-gamma-custody"), 1)
+        for key, bad in (
+            ("topic", "unrelated"),
+            ("role", "roles/pubsub.admin"),
+            ("member", "allUsers"),
+        ):
+            old = after[key]
+            after[key] = bad
+            with self.assertRaises(ValueError):
+                scope.validate(plan, project="sn118-gamma-custody")
+            after[key] = old
+        plan["variables"]["enable_manual_mailbox"]["value"] = False
+        with self.assertRaises(ValueError):
+            scope.validate(plan, project="sn118-gamma-custody")
+
+    def test_mailbox_enabled_intent_requires_complete_planned_graph(self):
+        plan = fixture()
+        plan["variables"].update(
+            {
+                "project": {"value": "sn118-gamma-custody"},
+                "enable_manual_mailbox": {"value": True},
+                "collector_custody_phases": {
+                    "value": {"registration": "sealed", "transfer": "sealed"}
+                },
+                "manual_mailbox_platform_service_account": {
+                    "value": "ditto-platform-api@ditto-app-dev.iam.gserviceaccount.com"
+                },
+            }
+        )
+        for addresses in ([], list(scope.MAILBOX)[:7], [next(iter(scope.MAILBOX))] * 8):
+            plan["planned_values"]["root_module"]["resources"] = [
+                {"address": address} for address in addresses
+            ]
+            with self.assertRaisesRegex(ValueError, "mailbox intent and plan differ"):
+                scope.validate(plan, project="sn118-gamma-custody")
+
     def test_accepts_exact_sealed_finney_tls_rule(self):
         self.assertEqual(scope.validate(self.rpc_fixture()), 2)
 
@@ -299,6 +370,37 @@ class ProtectedWorkflow(unittest.TestCase):
                     }
                     result = subprocess.run(["bash", "-e", "-c", script], env=env)
                     self.assertEqual(result.returncode == 0, accepted)
+
+    def test_both_selectors_reject_mailbox_flag_for_other_roots(self):
+        selectors = re.findall(
+            r"      - name: Select exact root\n.*?        run: \|\n(.*?)(?=\n      - )",
+            self.text,
+            re.S,
+        )
+        self.assertEqual(len(selectors), 2)
+        for selector in selectors:
+            for root in ("gcp-gamma-custody", "gcp-collector-custody", "gcp-platform"):
+                for flag in ("true", "false"):
+                    script = "\n".join(line[10:] for line in selector.splitlines())
+                    script = script.replace("${{ inputs.root }}", root)
+                    with tempfile.TemporaryDirectory() as tmp:
+                        env = {
+                            "PATH": os.environ["PATH"],
+                            "GITHUB_OUTPUT": str(Path(tmp) / "output"),
+                            "GITHUB_ENV": str(Path(tmp) / "env"),
+                            "TF_TARGETS": "",
+                            "HOTKEY_ADMIN_PHASE": "absent",
+                            "HOTKEY_ADMIN_REVISION": "",
+                            "SCREENER_DEV_HOST_ENABLED": "false",
+                            "GAMMA_MANUAL_MAILBOX_ENABLED": flag,
+                        }
+                        result = subprocess.run(
+                            ["bash", "-e", "-c", script], env=env, capture_output=True
+                        )
+                        self.assertEqual(
+                            result.returncode == 0,
+                            flag == "false" or root == "gcp-gamma-custody",
+                        )
 
     def test_custody_steps_never_receive_platform_secret_env(self):
         for name in (
