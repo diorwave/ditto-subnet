@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.356.0 (2026-10-07)
+
+### Features
+
+- **treasury**: Finish Backroom manual transfer button and automatic receipts
+  ([#2755](https://github.com/ditto-assistant/ditto-subnet/pull/2755),
+  [`ff288c5`](https://github.com/ditto-assistant/ditto-subnet/commit/ff288c5652b2245bc45641959409e440ba2b3ce1))
+
+
 ## v0.355.5 (2026-10-06)
 
 ### Bug Fixes
