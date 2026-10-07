@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v0.356.1 (2026-10-07)
+
+### Bug Fixes
+
+- **gamma**: Accept known unset mailbox storage defaults
+  ([#2765](https://github.com/ditto-assistant/ditto-subnet/pull/2765),
+  [`6ed7bf7`](https://github.com/ditto-assistant/ditto-subnet/commit/6ed7bf79b8218c7b1f9f6cd93f5564cdb25367dc))
+
+### Chores
+
+- **gamma**: Enable production manual transfer mailbox
+  ([#2766](https://github.com/ditto-assistant/ditto-subnet/pull/2766),
+  [`790a88c`](https://github.com/ditto-assistant/ditto-subnet/commit/790a88cbe220b702bba0b246b8b53f484a56fe24))
+
+### Continuous Integration
+
+- Restore GitHub PR checks and retain manual Depot fallback
+  ([#2768](https://github.com/ditto-assistant/ditto-subnet/pull/2768),
+  [`701d4b9`](https://github.com/ditto-assistant/ditto-subnet/commit/701d4b962b4c2c75a195595b3c2f787d4240e4f2))
+
+### Documentation
+
+- **gamma**: Record restricted Pub/Sub host prerequisite
+  ([#2767](https://github.com/ditto-assistant/ditto-subnet/pull/2767),
+  [`2ae674c`](https://github.com/ditto-assistant/ditto-subnet/commit/2ae674c76d3fc81d62da4f8b89c09028c51ece87))
+
+
 ## v0.356.0 (2026-10-07)
 
 ### Features
