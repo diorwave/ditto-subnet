@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.356.3 (2026-10-08)
+
+### Bug Fixes
+
+- **platform**: Expose epoch pin producer failures
+  ([#2776](https://github.com/ditto-assistant/ditto-subnet/pull/2776),
+  [`bfb2a76`](https://github.com/ditto-assistant/ditto-subnet/commit/bfb2a76d51797fff530909bc0f8375e6b6794c3a))
+
+
 ## v0.356.2 (2026-10-08)
 
 ### Bug Fixes
