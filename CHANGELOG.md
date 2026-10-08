@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.356.2 (2026-10-08)
+
+### Bug Fixes
+
+- **platform**: Validate treasury heartbeats after database reads
+  ([#2773](https://github.com/ditto-assistant/ditto-subnet/pull/2773),
+  [`baeda00`](https://github.com/ditto-assistant/ditto-subnet/commit/baeda006051d40d196b9f7fdc8017b6cb1949ecf))
+
+
 ## v0.356.1 (2026-10-07)
 
 ### Bug Fixes
