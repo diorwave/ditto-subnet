@@ -759,9 +759,26 @@ async def test_dry_run_matches_the_live_decision_on_the_same_cohort(
     [entry] = body["would_trigger"]
     assert entry["agent_id"] == str(candidate.agent_id)
     live_evidence = live["evidence"]
-    assert entry["evidence"] == {
-        key: live_evidence.get(key) for key in entry["evidence"]
+    # The composite evidence matches the public entry exactly. The per-axis
+    # statistics are only in the (admin) replay; the public entry recorded
+    # the neutral projection, which the replay's flags reproduce.
+    per_axis_keys = {"per_axis", "per_axis_outlier_axes", "per_axis_enforce"}
+    assert {
+        key: value
+        for key, value in entry["evidence"].items()
+        if key not in per_axis_keys
+    } == {
+        key: live_evidence.get(key)
+        for key in entry["evidence"]
+        if key not in per_axis_keys
     }
+    assert [
+        {"axis": axis["axis"], "outlier": axis["outlier"]}
+        for axis in entry["evidence"]["per_axis"]
+    ] == live_evidence["per_axis"]
+    assert all(
+        axis["cohort_median"] is not None for axis in entry["evidence"]["per_axis"]
+    )
 
 
 @pytest.mark.asyncio
@@ -982,14 +999,20 @@ async def test_axis_evidence_is_counted_and_listed_apart_from_holds(
     assert first["algorithm_version"] == OUTLIER_ALGORITHM_VERSION
     evidence = first["evidence"]
     assert evidence["trigger"] is None
-    assert evidence["per_axis_enforce"] is False
+    # Read back from the public chain: only axis + flag were recorded, so the
+    # policy flag and every per-axis statistic are null; the outlier axes are
+    # derived from the flags.
+    assert evidence["per_axis_enforce"] is None
     assert evidence["per_axis_outlier_axes"] == ["memory_mean"]
     by_axis = {entry["axis"]: entry for entry in evidence["per_axis"]}
     assert set(by_axis) == {"tool_mean", "memory_mean"}
     assert by_axis["memory_mean"]["outlier"] is True
-    assert by_axis["memory_mean"]["value"] == pytest.approx(0.95)
-    assert by_axis["memory_mean"]["modified_z"] > 6.0
     assert by_axis["tool_mean"]["outlier"] is False
+    for entry in by_axis.values():
+        for key in ("value", "cohort_size", "cohort_median", "cohort_mad"):
+            assert entry[key] is None
+        assert entry["modified_z"] is None
+        assert entry["upward"] is None
     # The composite hold entry also carries a (null) per-axis projection
     # because the helper was called without axes.
     assert activity["recent"][0]["evidence"]["per_axis"] is None
@@ -1091,3 +1114,62 @@ async def test_dry_run_reports_per_axis_evidence(
         row["agent_id"] for row in opted["axis_evidence"]
     }
     assert v.OUTLIER_ESCALATION_SETTINGS.per_axis_enforce is False
+
+
+@pytest.mark.asyncio
+async def test_public_audit_feed_carries_no_per_axis_statistics(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """issue #476: no per-axis threshold, cohort statistic or z-score reaches
+    the public, hash-chained /audit feed, and the chain still verifies."""
+    from ditto.db.queries.audit import list_audit_entries, verify_audit_chain
+
+    _install(app, session_maker)
+    _load_env(monkeypatch, {})
+    await _record_axis_evidence(session_maker, now=datetime.now(UTC))
+    held = _agent()
+    async with session_maker() as session:
+        async with session.begin():
+            session.add(held)
+        async with session.begin():
+            await _evaluate_and_record_outlier_escalation(
+                session,
+                agent=held,
+                bench_version=12,
+                composite=0.99,
+                cohort=_SPREAD_COHORT,
+                settings=OutlierEscalationSettings(mode="enforce"),
+                now=datetime.now(UTC),
+                axes={
+                    "tool_mean": AxisObservation(value=0.99, cohort=_SPREAD_COHORT),
+                    "memory_mean": AxisObservation(value=0.95, cohort=_SPREAD_COHORT),
+                },
+            )
+
+    body = (await client.get("/api/v1/public/audit")).json()
+
+    outlier_entries = [
+        entry
+        for entry in body["entries"]
+        if entry["payload"].get("audit_kind")
+        in {"anomalous_score", "anomalous_score_axis"}
+    ]
+    assert len(outlier_entries) == 2
+    for entry in outlier_entries:
+        evidence = entry["payload"]["evidence"]
+        assert "per_axis_enforce" not in evidence
+        assert "per_axis_outlier_axes" not in evidence
+        for axis in evidence["per_axis"]:
+            assert set(axis) == {"axis", "outlier"}
+    async with session_maker() as session:
+        assert verify_audit_chain(await list_audit_entries(session, limit=1000))
+        review = await session.scalar(
+            select(AthReview).where(AthReview.agent_id == held.agent_id)
+        )
+    # The operator-only snapshot keeps the full per-axis statistics.
+    assert review is not None
+    private_axes = review.original_evidence["per_axis"]
+    assert all(axis["cohort_median"] is not None for axis in private_axes)

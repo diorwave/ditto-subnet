@@ -208,6 +208,7 @@ from ditto.api_server.outlier_escalation import (
     OutlierEscalationSettingsLoad,
     evaluate_score_outlier,
     load_outlier_escalation_settings,
+    public_audit_evidence,
 )
 from ditto.api_server.private_benchmark_preparation import lease_dataset_sha
 from ditto.api_server.queue_policy_settings import (
@@ -1153,6 +1154,10 @@ async def _evaluate_and_record_outlier_escalation(
     enforcement off, or the composite below the floor) is appended as
     ``OUTLIER_AXIS_EVIDENCE_KIND`` evidence only -- never a hold, never a
     would-be hold -- in both ``observe`` and ``enforce`` mode.
+
+    The audit chain is public, so its entries carry only the neutral per-axis
+    projection (:func:`public_audit_evidence`: axis name + outlier flag). The
+    full per-axis statistics live only on the private ``ath_reviews`` snapshot.
     """
     if settings.mode == "off":
         return
@@ -1181,7 +1186,7 @@ async def _evaluate_and_record_outlier_escalation(
                     "enforced": False,
                     "qualified": False,
                     "bench_version": bench_version,
-                    "evidence": decision.evidence,
+                    "evidence": public_audit_evidence(decision.evidence),
                 },
                 recorded_at=now,
             )
@@ -1211,7 +1216,7 @@ async def _evaluate_and_record_outlier_escalation(
                 "enforced": False,
                 "qualified": True,
                 "bench_version": bench_version,
-                "evidence": decision.evidence,
+                "evidence": public_audit_evidence(decision.evidence),
             },
             recorded_at=now,
         )
@@ -1262,7 +1267,7 @@ async def _evaluate_and_record_outlier_escalation(
             "enforced": True,
             "qualified": True,
             "bench_version": bench_version,
-            "evidence": decision.evidence,
+            "evidence": public_audit_evidence(decision.evidence),
         },
         recorded_at=now,
     )

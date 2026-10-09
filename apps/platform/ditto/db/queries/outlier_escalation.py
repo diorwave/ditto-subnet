@@ -8,7 +8,10 @@ operator can see what the gate has done. It never writes.
 
 A per-axis outlier the policy does not hold is appended under its own
 ``anomalous_score_axis`` kind (evidence only), so it is counted and listed
-separately and never inflates the would-be-hold or hold counts.
+separately and never inflates the would-be-hold or hold counts. The chain is
+public, so per-axis evidence on it is only the axis name and outlier flag;
+per-axis statistics are null here and come from the dry-run replay or the
+held row's ``ath_reviews`` snapshot.
 
 Every list is bounded; the counts are exact aggregates over the whole chain.
 """
@@ -139,11 +142,17 @@ def public_outlier_evidence(raw: Any) -> dict[str, EvidenceValue]:
     else:
         safe["per_axis"] = None
     outlier_axes = evidence.get("per_axis_outlier_axes")
-    safe["per_axis_outlier_axes"] = (
-        [axis for axis in outlier_axes[:_MAX_AXES] if isinstance(axis, str)]
-        if isinstance(outlier_axes, list)
-        else None
-    )
+    if isinstance(outlier_axes, list):
+        safe["per_axis_outlier_axes"] = [
+            axis for axis in outlier_axes[:_MAX_AXES] if isinstance(axis, str)
+        ]
+    elif isinstance(safe["per_axis"], list):
+        # The public audit chain records only axis + flag; derive the list.
+        safe["per_axis_outlier_axes"] = [
+            entry["axis"] for entry in safe["per_axis"] if entry["outlier"] is True
+        ]
+    else:
+        safe["per_axis_outlier_axes"] = None
     safe["per_axis_enforce"] = _bool(evidence.get("per_axis_enforce"))
     trigger = evidence.get("trigger")
     safe["trigger"] = trigger if trigger in _TRIGGERS else None

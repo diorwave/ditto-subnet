@@ -35,6 +35,7 @@ from ditto.api_server.outlier_escalation import (
     OutlierEscalationSettings,
     evaluate_score_outlier,
     load_outlier_escalation_settings,
+    public_audit_evidence,
 )
 from ditto.db.models import Agent, AthReview, Score, ScoreAuditEntry
 from ditto.db.queries.audit import EVENT_AUDIT
@@ -412,6 +413,11 @@ async def test_existing_pending_review_is_not_duplicated(
 # ---------------------------------------------------------------------------
 
 _PER_AXIS_KEYS = ("per_axis", "per_axis_outlier_axes", "per_axis_enforce", "trigger")
+# What the public audit chain records for a memory-only outlier.
+_NEUTRAL_AXES = [
+    {"axis": "tool_mean", "outlier": False},
+    {"axis": "memory_mean", "outlier": True},
+]
 
 
 def _axes(
@@ -696,7 +702,10 @@ async def test_single_axis_outlier_records_evidence_without_holding(
     assert audit.payload["qualified"] is False
     assert audit.payload["bench_version"] == 12
     evidence = audit.payload["evidence"]
-    assert evidence["per_axis_outlier_axes"] == ["memory_mean"]
+    # The chain is public: per-axis material is only the axis and its flag.
+    assert evidence["per_axis"] == _NEUTRAL_AXES
+    assert "per_axis_outlier_axes" not in evidence
+    assert "per_axis_enforce" not in evidence
     assert evidence["trigger"] is None
     assert evidence["algorithm_version"] == OUTLIER_ALGORITHM_VERSION
 
@@ -774,9 +783,24 @@ async def test_composite_hold_snapshot_includes_per_axis_evidence(
     assert review is not None
     assert review.original_evidence["trigger"] == "composite"
     assert review.original_evidence["per_axis_outlier_axes"] == ["memory_mean"]
+    # The private review snapshot keeps the full per-axis statistics ...
+    private_memory = _axis(review.original_evidence, "memory_mean")
+    assert private_memory["cohort_median"] == pytest.approx(0.50, abs=1e-9)
+    assert cast(float, private_memory["modified_z"]) > 6.0
     # One entry: the hold, not a second evidence-only axis entry.
     [audit] = audits
     assert audit.payload["audit_kind"] == OUTLIER_REVIEW_KIND
+    # ... while the public chain gets the neutral projection, and the composite
+    # fields exactly as before.
+    public = audit.payload["evidence"]
+    assert public["per_axis"] == _NEUTRAL_AXES
+    assert {
+        key: value for key, value in public.items() if key not in _PER_AXIS_KEYS
+    } == {
+        key: value
+        for key, value in review.original_evidence.items()
+        if key not in _PER_AXIS_KEYS
+    }
 
 
 @pytest.mark.asyncio
@@ -865,7 +889,36 @@ async def test_finalization_records_single_axis_evidence_end_to_end(
     evidence = audit.payload["evidence"]
     assert evidence["composite"] == pytest.approx(0.605)
     assert evidence["cohort_size"] == len(_SPREAD_COHORT)
-    assert evidence["per_axis_outlier_axes"] == ["memory_mean"]
-    memory = _axis(evidence, "memory_mean")
-    assert memory["value"] == pytest.approx(0.95)
-    assert memory["cohort_median"] == pytest.approx(0.50, abs=1e-9)
+    assert evidence["per_axis"] == _NEUTRAL_AXES
+
+
+def test_public_audit_evidence_keeps_only_neutral_axis_fields() -> None:
+    decision = evaluate_score_outlier(
+        composite=0.92,
+        cohort=_HIGH_COHORT,
+        settings=_enforce(per_axis_enforce=True),
+        axes=_axes(0.91, 0.95, tool_cohort=_HIGH_COHORT),
+    )
+    public = public_audit_evidence(decision.evidence)
+    assert public["per_axis"] == _NEUTRAL_AXES
+    assert public["trigger"] == "per_axis"
+    assert "per_axis_enforce" not in public
+    assert "per_axis_outlier_axes" not in public
+    # The private decision itself is untouched.
+    assert "cohort_median" in _axis(decision.evidence, "memory_mean")
+
+
+@pytest.mark.parametrize(
+    ("composite", "cohort"),
+    [(0.99, _SPREAD_COHORT), (0.615, _SPREAD_COHORT), (0.99, [0.5, 0.51])],
+)
+def test_public_audit_evidence_is_identity_without_axes(
+    composite: float, cohort: list[float]
+) -> None:
+    """Composite-only evidence publishes exactly what it always has."""
+    evidence = evaluate_score_outlier(
+        composite=composite, cohort=cohort, settings=_enforce()
+    ).evidence
+    public = public_audit_evidence(evidence)
+    assert public == evidence
+    assert list(public) == list(evidence)

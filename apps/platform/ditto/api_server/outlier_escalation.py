@@ -498,3 +498,36 @@ def evaluate_score_outlier(
     if settings.per_axis_enforce and axis_outliers and above_floor:
         return _decide(True, "per_axis")
     return _decide(False, None)
+
+
+# The only per-axis fields the PUBLIC audit chain carries. ``score_audit_log``
+# is served verbatim at ``/audit`` and every entry's hash covers its whole
+# payload, so a field cannot be redacted at serialization without breaking
+# chain verification -- it has to be left out when the entry is written.
+_PUBLIC_AXIS_FIELDS = ("axis", "outlier")
+_PRIVATE_EVIDENCE_KEYS = ("per_axis_outlier_axes", "per_axis_enforce")
+
+
+def public_audit_evidence(evidence: Mapping[str, object]) -> dict[str, object]:
+    """``evidence`` as written to the public, hash-chained audit log.
+
+    Per-axis material is reduced to the neutral axis name and outlier flag:
+    no per-axis value, cohort median/MAD, modified z or policy setting. The
+    composite fields are passed through unchanged, so an entry without axes
+    is exactly the evidence the gate has always published. The full snapshot
+    stays operator-only: on ``ath_reviews.original_evidence`` for a hold, and
+    recomputable through the admin dry-run replay.
+    """
+    public = {
+        key: value
+        for key, value in evidence.items()
+        if key not in _PRIVATE_EVIDENCE_KEYS
+    }
+    per_axis = evidence.get("per_axis")
+    if isinstance(per_axis, list):
+        public["per_axis"] = [
+            {name: entry.get(name) for name in _PUBLIC_AXIS_FIELDS}
+            for entry in per_axis
+            if isinstance(entry, Mapping)
+        ]
+    return public

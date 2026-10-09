@@ -136,7 +136,9 @@ class OutlierEscalationEvidence(BaseModel):
             default=None,
             description=(
                 "Per-axis robust z evidence (outlier-escalation-v2+). Null on "
-                "entries recorded before per-axis evidence existed."
+                "entries recorded before per-axis evidence existed. Audit-chain "
+                "entries are public and record only axis and outlier; their "
+                "statistics are null (the dry run reports them in full)."
             ),
         ),
     ]
