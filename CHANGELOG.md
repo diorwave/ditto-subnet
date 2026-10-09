@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.356.15 (2026-10-09)
+
+### Bug Fixes
+
+- **platform**: Populate validator weight pin and fold provenance
+  ([#2800](https://github.com/ditto-assistant/ditto-subnet/pull/2800),
+  [`8116201`](https://github.com/ditto-assistant/ditto-subnet/commit/81162014349f6189f1c1b27a8c8696aac1fb9bab))
+
+- **receipts**: Allow signed-policy followers to forward evidence
+  ([#2817](https://github.com/ditto-assistant/ditto-subnet/pull/2817),
+  [`f73696d`](https://github.com/ditto-assistant/ditto-subnet/commit/f73696d14c2424bc2d4f65764b896a650f7db711))
+
+
 ## v0.356.14 (2026-10-09)
 
 ### Bug Fixes
