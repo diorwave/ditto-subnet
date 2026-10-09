@@ -137,6 +137,20 @@ type gradingPolicy struct {
 	// copies from an ASCII record, so "VK‑48HJXP6A63" missed "VK-48HJXP6A63".
 	// V13 is a frozen scored contract and keeps the unfolded match.
 	foldTypographicHyphens bool
+	// hyphenJoinedValues (v14) reads a hyphen that joins the words of a known
+	// multi-word value as the space it replaces, so "blue-purple" grades as
+	// "blue purple" (#2734). It applies to every hidden value alike (expected,
+	// accepted, distractor, forbidden), so a hyphen-joined distractor is still
+	// caught. A changed word ("blue-green" for "bluey green") stays a miss.
+	hyphenJoinedValues bool
+	// setRemovalPlace (v14) lets a set-membership clause that ends in completed
+	// passive removal carry a short trailing place phrase ("PE kit has been
+	// removed from the list") and still read as removal (#2734).
+	setRemovalPlace bool
+	// progressiveActions (v14) accepts the progressive -ing form of an action
+	// claim's verb ("pausing" for "pause"), for accepted and distractor forms
+	// alike (#2734). Past -ed forms describe an earlier action and stay misses.
+	progressiveActions bool
 }
 
 func gradingPolicyForVersion(benchVersion int) gradingPolicy {
@@ -151,6 +165,9 @@ func gradingPolicyForVersion(benchVersion int) gradingPolicy {
 			typedClaims:             true,
 			claimProvenance:         true,
 			foldTypographicHyphens:  true,
+			hyphenJoinedValues:      true,
+			setRemovalPlace:         true,
+			progressiveActions:      true,
 		}
 	case benchVersion >= protocol.BenchVersionV13:
 		return gradingPolicy{

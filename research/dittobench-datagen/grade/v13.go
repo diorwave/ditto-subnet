@@ -51,6 +51,9 @@ func memoryV13(mc protocol.MemoryCase, resp protocol.RunResponse, policy grading
 	if policy.foldTypographicHyphens {
 		resp = foldReplyHyphens(resp)
 	}
+	if policy.hyphenJoinedValues {
+		resp = joinHyphenatedValuesV14(mc, resp)
+	}
 	slot := strings.TrimSpace(resp.Answer)
 	full := slot + "\n" + resp.FinalText
 	qt := strings.ToLower(mc.QuestionType)

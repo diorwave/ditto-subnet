@@ -1114,6 +1114,34 @@ bank (`v14-1`: the v13-1 bank plus hyphen positives and negatives); it also
 catches a forbidden or distractor value written with those hyphens. V13 keeps
 the unfolded match.
 
+The same v14 floor adds three memory-axis matcher changes from #2734; v13 and
+older grade byte-identically:
+
+- **Hyphen-joined multi-word values.** A hyphen (after the fold) that joins
+  two letter-ended words of a known multi-word value reads as the space it
+  replaces, so `blue‑purple` grades as `blue purple` and `true‑blue accent`
+  as `true blue accent` on every rule, including the
+  `conversational-declarative` acknowledgement. Known values are every hidden
+  value (expected, accepted, list items, claim values, distractors, forbidden,
+  dump guard), so a joined distractor or forbidden value is still caught. The
+  words must match (`blue‑green` stays a miss for `bluey green`), values
+  without a space are unaffected, and a join is not undone where it would
+  break a known value that itself contains a hyphen.
+- **Set removal with a place phrase.** A set-membership clause ending in
+  ` has been removed` / ` was removed` / ` is removed` followed only by a
+  preposition (`from`, `in`, `on`, `off`) and at most three plain words
+  (`from the list`, `from it`, `from your packing list`) reads as removal, as
+  does the bare form with trailing punctuation. A phrase that names a case
+  value, runs longer, or sits in a hedged clause does not, and an item
+  asserted in another clause is still asserted.
+- **Progressive action claims.** An `action` claim also accepts the -ing form
+  of the first word of each accepted form (`pausing` for `pause`,
+  `upgrading`, `stopping`, `canceling`/`cancelling`), and the case's
+  distractors get the same forms so a progressive distractor is caught. Past
+  -ed forms stay misses.
+
+Audit bank `v14-1` carries reviewed positives and negatives for each.
+
 The generated surface, question-family identifiers, envelope, the rest of the
 grader policy, v13 gate postures, LongMem instrument, and public harness wire
 version (9) carry forward. V14 has its own seed rotation, epoch `2027-06-01T00:00:00Z`, and artifact
