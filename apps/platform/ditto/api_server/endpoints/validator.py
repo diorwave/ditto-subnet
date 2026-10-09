@@ -201,7 +201,9 @@ from ditto.api_server.model_use import evaluate_model_use, model_use_policy
 from ditto.api_server.onchain_seed import derive_validator_seed
 from ditto.api_server.outlier_escalation import (
     OUTLIER_ALGORITHM_VERSION,
+    OUTLIER_AXIS_EVIDENCE_KIND,
     OUTLIER_REVIEW_KIND,
+    AxisObservation,
     OutlierEscalationSettings,
     OutlierEscalationSettingsLoad,
     evaluate_score_outlier,
@@ -1127,6 +1129,7 @@ async def _evaluate_and_record_outlier_escalation(
     cohort: Sequence[float],
     settings: OutlierEscalationSettings,
     now: datetime,
+    axes: Mapping[str, AxisObservation] | None = None,
 ) -> None:
     """Escalate an out-of-band composite to ATH review (issue #476).
 
@@ -1144,6 +1147,12 @@ async def _evaluate_and_record_outlier_escalation(
     opens the hold. Bench-version scoped so v8-v11 are untouched, and gated on
     ``SCORED`` so a copy / transform-audit hold that already fired this
     transition wins outright (this path never re-holds an already-held agent).
+
+    ``axes`` adds per-axis robust-z evidence to every recorded entry. A
+    per-axis outlier that does not hold under the policy (per-axis
+    enforcement off, or the composite below the floor) is appended as
+    ``OUTLIER_AXIS_EVIDENCE_KIND`` evidence only -- never a hold, never a
+    would-be hold -- in both ``observe`` and ``enforce`` mode.
     """
     if settings.mode == "off":
         return
@@ -1155,9 +1164,32 @@ async def _evaluate_and_record_outlier_escalation(
         return
 
     decision = evaluate_score_outlier(
-        composite=composite, cohort=cohort, settings=settings
+        composite=composite, cohort=cohort, settings=settings, axes=axes
     )
     if not decision.held:
+        if decision.axis_outliers:
+            # A single axis far out of band while the policy holds nothing:
+            # observe-only evidence on its own audit kind, so the would-be-hold
+            # and hold counts stay exactly the composite policy's.
+            await append_audit_entry(
+                session,
+                agent_id=agent.agent_id,
+                validator_hotkey=None,
+                event=EVENT_AUDIT,
+                payload={
+                    "audit_kind": OUTLIER_AXIS_EVIDENCE_KIND,
+                    "enforced": False,
+                    "qualified": False,
+                    "bench_version": bench_version,
+                    "evidence": decision.evidence,
+                },
+                recorded_at=now,
+            )
+            logger.info(
+                "agent %s: per-axis out-of-band score recorded as evidence: %s",
+                agent.agent_id,
+                ",".join(decision.axis_outliers),
+            )
         # In-band, below the floor, or an insufficient cohort. Rank normally and
         # leave no hold; the "why not" lives in the decision evidence, which is
         # only persisted when a would-be hold fires (below), matching the other
@@ -7505,6 +7537,8 @@ async def submit_score(
                 # it on. The cohort is the eligible ledger read above, which is
                 # one row per owner and excludes this still-evaluating
                 # candidate, held agents, and banned agents.
+                # Per-axis evidence: each axis is the median of this agent's
+                # quorum on that axis, against the same eligible ledger's axis.
                 await _evaluate_and_record_outlier_escalation(
                     session,
                     agent=agent,
@@ -7513,6 +7547,18 @@ async def submit_score(
                     cohort=[row.composite for row in eligible],
                     settings=OUTLIER_ESCALATION_SETTINGS,
                     now=audit_now,
+                    axes={
+                        "tool_mean": AxisObservation(
+                            value=statistics.median(s.tool_mean for s in agent_scores),
+                            cohort=[row.tool_mean for row in eligible],
+                        ),
+                        "memory_mean": AxisObservation(
+                            value=statistics.median(
+                                s.memory_mean for s in agent_scores
+                            ),
+                            cohort=[row.memory_mean for row in eligible],
+                        ),
+                    },
                 )
                 deferred_settings = queue_policy.deferred_source_review
                 await _evaluate_and_record_deferred_review(
