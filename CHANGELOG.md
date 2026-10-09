@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v0.356.17 (2026-10-09)
+
+### Bug Fixes
+
+- **chain**: Skip metadata startup for header-only RPC reads
+  ([#2822](https://github.com/ditto-assistant/ditto-subnet/pull/2822),
+  [`dbc3296`](https://github.com/ditto-assistant/ditto-subnet/commit/dbc32964452a701b5554f8fc912234ca6f0e9e45))
+
+- **ledger**: Project confirmation fold fields beside score audit JSON
+  ([#2824](https://github.com/ditto-assistant/ditto-subnet/pull/2824),
+  [`696611a`](https://github.com/ditto-assistant/ditto-subnet/commit/696611a873ae856ed1f8275f7ac6c957b294f30b))
+
+- **validator**: Report safe receipt failure coordinates
+  ([#2820](https://github.com/ditto-assistant/ditto-subnet/pull/2820),
+  [`e97d132`](https://github.com/ditto-assistant/ditto-subnet/commit/e97d132cd4bb43dd0a6e42ab7ee1786f524f4498))
+
+### Chores
+
+- **tests**: Retain SIGTERM drain failure diagnostics
+  ([#2825](https://github.com/ditto-assistant/ditto-subnet/pull/2825),
+  [`f787190`](https://github.com/ditto-assistant/ditto-subnet/commit/f787190581ec33bb76f3ff9ddd1f74e15dc4143b))
+
+
 ## v0.356.16 (2026-10-09)
 
 ### Bug Fixes
