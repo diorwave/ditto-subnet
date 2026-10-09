@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.356.11 (2026-10-09)
+
+### Performance Improvements
+
+- **platform**: Skip public display work for finalized admission
+  ([#2806](https://github.com/ditto-assistant/ditto-subnet/pull/2806),
+  [`1b94024`](https://github.com/ditto-assistant/ditto-subnet/commit/1b940248bfc9619e089fafc8fc0cf8f3afb43caa))
+
+
 ## v0.356.10 (2026-10-09)
 
 ### Bug Fixes
