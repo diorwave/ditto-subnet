@@ -14,6 +14,7 @@ from ditto.api_server.treasury_weights import (
     require_enforcing_requester,
     treasury_fleet_members,
 )
+from ditto.chain.errors import ChainTreasuryActivationReadError
 from ditto.db.models import ValidatorHeartbeat
 from ditto_screening_protocol.treasury import TreasuryLedgerPin
 from ditto_screening_protocol.treasury_enforcement import EnforcingTreasuryPin
@@ -250,8 +251,12 @@ async def test_independent_requester_reads_same_pin_without_managed_capability(
         assert tuple(m.validator_hotkey for m in p.fleet) == (managed.validator_hotkey,)
         state.chain.get_treasury_dispatch_observation.assert_awaited_once()
     else:
-        with pytest.raises(ValueError):
+        rejection = ChainTreasuryActivationReadError if fault == "owner" else ValueError
+        with pytest.raises(rejection) as rejected:
             await require_enforcing_requester(session, p, hotkey, app_state=state)
+        if fault == "owner":
+            assert rejected.value.read_stage == "identity"
+            assert isinstance(rejected.value.read_error, ValueError)
 
 
 async def test_producer_binds_real_approval_complete_roster_and_epoch(session):
@@ -335,8 +340,13 @@ async def test_producer_and_dispatch_use_fresh_exact_managed_permission_scope(
         if fault == "none":
             await action()
         else:
-            with pytest.raises(ValueError):
+            wrapped = fault == "partial" and action is dispatch
+            rejection = ChainTreasuryActivationReadError if wrapped else ValueError
+            with pytest.raises(rejection) as rejected:
                 await action()
+            if wrapped:
+                assert rejected.value.read_stage == "setter_roster"
+                assert isinstance(rejected.value.read_error, ValueError)
     assert scoped.await_count == 2
     for call in scoped.await_args_list:
         assert call.kwargs == {
@@ -417,8 +427,14 @@ async def test_requester_revalidates_current_chain_and_every_pinned_member(
             p.policy, block_hash=observation.finalized_block_hash
         )
     else:
-        with pytest.raises((ValueError, TimeoutError)):
+        expected = (
+            ChainTreasuryActivationReadError if fault == "rpc_failure" else ValueError
+        )
+        with pytest.raises(expected) as rejected:
             await require_enforcing_requester(session, p, hotkey, app_state=state)
+        if fault == "rpc_failure":
+            assert rejected.value.read_stage == "identity"
+            assert isinstance(rejected.value.read_error, TimeoutError)
 
 
 @pytest.mark.parametrize(
