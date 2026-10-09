@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v0.356.5 (2026-10-09)
+
+### Bug Fixes
+
+- **platform**: Expose bounded treasury read failures
+  ([#2784](https://github.com/ditto-assistant/ditto-subnet/pull/2784),
+  [`90212c5`](https://github.com/ditto-assistant/ditto-subnet/commit/90212c59cb28170d81294166e434250155c087c9))
+
+- **platform**: Isolate efficiency materialization transactions
+  ([#2787](https://github.com/ditto-assistant/ditto-subnet/pull/2787),
+  [`d783e0d`](https://github.com/ditto-assistant/ditto-subnet/commit/d783e0d5d55d71329f4dce37356e8a29622d2426))
+
+### Chores
+
+- **ops**: Allow read-only explain of case expressions
+  ([#2783](https://github.com/ditto-assistant/ditto-subnet/pull/2783),
+  [`ccd22fa`](https://github.com/ditto-assistant/ditto-subnet/commit/ccd22fa588b236f6e5ba2285b9eb57b406c9f59e))
+
+### Performance Improvements
+
+- **platform**: Extract scalar ledger stderr once per winner
+  ([#2786](https://github.com/ditto-assistant/ditto-subnet/pull/2786),
+  [`c6fd96b`](https://github.com/ditto-assistant/ditto-subnet/commit/c6fd96b7e52c608553015decb19714cf8cad1609))
+
+
 ## v0.356.4 (2026-10-08)
 
 ### Performance Improvements
