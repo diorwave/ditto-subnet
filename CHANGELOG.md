@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.356.12 (2026-10-09)
+
+### Bug Fixes
+
+- **infra**: Report safe PostgreSQL restore failure stages
+  ([#2807](https://github.com/ditto-assistant/ditto-subnet/pull/2807),
+  [`4c82b92`](https://github.com/ditto-assistant/ditto-subnet/commit/4c82b92f81fb2a50d2815bc60fac5969d9ce9be5))
+
+- **protocol**: Expose signed receipt validation diagnostics
+  ([#2802](https://github.com/ditto-assistant/ditto-subnet/pull/2802),
+  [`0b666c5`](https://github.com/ditto-assistant/ditto-subnet/commit/0b666c52d863ffb594fdbf8b317ec0131ff55a8e))
+
+
 ## v0.356.11 (2026-10-09)
 
 ### Performance Improvements
