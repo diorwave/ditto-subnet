@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.356.7 (2026-10-09)
+
+### Bug Fixes
+
+- **platform**: Extract partial ledger evidence in one pass
+  ([#2792](https://github.com/ditto-assistant/ditto-subnet/pull/2792),
+  [`a3b7665`](https://github.com/ditto-assistant/ditto-subnet/commit/a3b76653668b32a60f2a208d776c68c5ac6cc273))
+
+
 ## v0.356.6 (2026-10-09)
 
 ### Bug Fixes
