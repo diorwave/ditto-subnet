@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.356.10 (2026-10-09)
+
+### Bug Fixes
+
+- **infra**: Qualify and enable production PostgreSQL backups
+  ([#2798](https://github.com/ditto-assistant/ditto-subnet/pull/2798),
+  [`5d0e39d`](https://github.com/ditto-assistant/ditto-subnet/commit/5d0e39d630c92dd37e2e6fe9f618da001ea8fb3d))
+
+
 ## v0.356.9 (2026-10-09)
 
 ### Bug Fixes
