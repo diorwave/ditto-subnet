@@ -6,6 +6,24 @@ import type { components } from '../generated/platform-api'
 const address = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{47,48}$/)
 const hash = z.string().regex(/^0x[0-9a-f]{64}$/)
 const digest = z.string().regex(/^[0-9a-f]{64}$/)
+const bps = z.number().int().min(0).max(10000)
+// The signed range must survive parsing: dropping it would change the digest
+// Platform verifies, so a ranged approval could never be recorded.
+const bucket = z.object({
+  bucket_id: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/),
+  allocation_bps: bps,
+  holding_coldkey: address,
+  min_allocation_bps: bps.nullish(),
+  max_allocation_bps: bps.nullish(),
+}).refine((value) => (value.min_allocation_bps == null) === (value.max_allocation_bps == null), {
+  message: 'allocation range requires both bounds',
+}).refine((value) => value.min_allocation_bps == null
+  || (value.min_allocation_bps <= value.allocation_bps && value.allocation_bps <= (value.max_allocation_bps ?? 0)), {
+  message: 'signed default allocation is outside its range',
+})
+export type TreasuryPolicyBucket = z.infer<typeof bucket>
+export const bucketMaximumBps = (b: TreasuryPolicyBucket) => b.max_allocation_bps ?? b.allocation_bps
+export const bucketMinimumBps = (b: TreasuryPolicyBucket) => b.min_allocation_bps ?? b.allocation_bps
 const policy = z.object({
   version: z.literal(1),
   revision: z.number().int().min(1),
@@ -14,11 +32,17 @@ const policy = z.object({
   collector_hotkey: address,
   collector_coldkey: address,
   collector_policy_digest: digest,
-  buckets: z.array(z.object({
-    bucket_id: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/),
-    allocation_bps: z.number().int().min(0).max(1000),
-    holding_coldkey: address,
-  })).min(1).max(20),
+  buckets: z.array(bucket).min(1).max(20),
+}).refine((value) => new Set(value.buckets.map((b) => b.bucket_id)).size === value.buckets.length, {
+  path: ['buckets'], message: 'duplicate treasury bucket',
+}).refine((value) => {
+  const wallets = value.buckets.map((b) => b.holding_coldkey)
+  return new Set(wallets).size === wallets.length
+    && wallets.every((key) => key !== value.collector_hotkey && key !== value.collector_coldkey)
+}, {
+  path: ['buckets'], message: 'holding coldkeys must be distinct from collector',
+}).refine((value) => value.buckets.reduce((total, b) => total + bucketMaximumBps(b), 0) <= 10000, {
+  path: ['buckets'], message: 'combined service allocation exceeds 10000 bps',
 }) satisfies z.ZodType<components['schemas']['TreasuryEmissionPolicy']>
 
 const identity = z.object({
@@ -50,7 +74,7 @@ const fleetMember = z.object({
   collector_policy_digest: digest,
 })
 
-const enforcingPin = z.object({
+export const enforcingTreasuryPinSchema = z.object({
   version: z.literal(2),
   mode: z.literal('enforce'),
   epoch_index: z.number().int().nonnegative(),
@@ -65,6 +89,28 @@ const enforcingPin = z.object({
     signature: z.string().regex(/^0x[0-9a-f]{128}$/),
   }),
   fleet: z.array(fleetMember).min(1).max(4096),
+  allocations: z.array(z.object({
+    bucket_id: z.string().regex(/^[a-z][a-z0-9_]{1,47}$/),
+    allocation_bps: bps,
+  })).min(1).max(20).nullish(),
+}).superRefine((pin, context) => {
+  // Mirror the protocol: allocations exist exactly for a ranged policy and
+  // name every signed bucket once, sorted, inside its signed bounds.
+  const ranged = pin.policy.buckets.some((b) => b.min_allocation_bps != null)
+  if (ranged !== (pin.allocations != null)) {
+    context.addIssue({ code: 'custom', message: 'pinned allocation must match the signed policy shape' })
+    return
+  }
+  if (pin.allocations == null) return
+  const ids = pin.allocations.map((a) => a.bucket_id)
+  const signed = new Map(pin.policy.buckets.map((b) => [b.bucket_id, b]))
+  if (ids.some((id, i) => i > 0 && ids[i - 1] >= id) || ids.length !== signed.size
+    || pin.allocations.some((a) => {
+      const b = signed.get(a.bucket_id)
+      return !b || a.allocation_bps < bucketMinimumBps(b) || a.allocation_bps > bucketMaximumBps(b)
+    })) {
+    context.addIssue({ code: 'custom', message: 'pinned allocation is outside the signed range' })
+  }
 }) satisfies z.ZodType<components['schemas']['EnforcingTreasuryPin']>
 
 export const treasuryLedgerReadinessSchema = z.object({
@@ -121,7 +167,7 @@ export const treasuryLedgerReadinessSchema = z.object({
   latest_stored_epoch_index: z.number().int().nonnegative().nullable(),
   latest_stored_ledger_digest: digest.nullable(),
   stored_shadow_pin: pin.nullable(),
-  stored_enforcing_pin: enforcingPin.nullable().default(null),
+  stored_enforcing_pin: enforcingTreasuryPinSchema.nullable().default(null),
   enforcement_configured: z.boolean().default(false),
   fleet_gate: z.enum(['not_checked', 'ready', 'not_ready']).default('not_checked'),
   blocking_reasons: z.array(z.enum([

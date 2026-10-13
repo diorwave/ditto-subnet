@@ -2,6 +2,117 @@
 
 <!-- version list -->
 
+## v0.359.0 (2026-10-13)
+
+### Bug Fixes
+
+- **dittobench**: Let operators enforce control-plane auth and reject the public broker token
+  ([#2830](https://github.com/ditto-assistant/ditto-subnet/pull/2830),
+  [`f773f8b`](https://github.com/ditto-assistant/ditto-subnet/commit/f773f8b54cea61c24b0e6c1df4208bdcdc3ff919))
+
+- **platform**: Bound request bodies before authentication
+  ([#2826](https://github.com/ditto-assistant/ditto-subnet/pull/2826),
+  [`103f95f`](https://github.com/ditto-assistant/ditto-subnet/commit/103f95f0c7f3ae4458a7a98f85a9ebe4054bf330))
+
+- **platform**: Record review events for policy-only rescreen passes
+  ([#2829](https://github.com/ditto-assistant/ditto-subnet/pull/2829),
+  [`15fed9e`](https://github.com/ditto-assistant/ditto-subnet/commit/15fed9ed63d7af3460c247280bd71c343a8f7f30))
+
+### Features
+
+- **platform**: Diff source between any two agents for lineage review
+  ([#2834](https://github.com/ditto-assistant/ditto-subnet/pull/2834),
+  [`6aa22da`](https://github.com/ditto-assistant/ditto-subnet/commit/6aa22da9905f48cfa710f2d2d262620f5c26fc46))
+
+- **platform**: Report ATH and copy-review queue age against SLO
+  ([#2833](https://github.com/ditto-assistant/ditto-subnet/pull/2833),
+  [`8acc729`](https://github.com/ditto-assistant/ditto-subnet/commit/8acc729f12c749defebb68663afecae01f4cf4c1))
+
+- **scoring**: Publish every composite gate factor
+  ([#2832](https://github.com/ditto-assistant/ditto-subnet/pull/2832),
+  [`cca2486`](https://github.com/ditto-assistant/ditto-subnet/commit/cca248617969d977664902e2278e6ac2a0d41400))
+
+### Testing
+
+- **datagen**: Add a generator pool cardinality canary
+  ([#2840](https://github.com/ditto-assistant/ditto-subnet/pull/2840),
+  [`d6c901f`](https://github.com/ditto-assistant/ditto-subnet/commit/d6c901f2ab6af4c4f9994afc879dd689e1e1cbc3))
+
+
+## v0.358.2 (2026-10-13)
+
+### Bug Fixes
+
+- **backroom**: Publish the quarantine batch execute input schema
+  ([#2865](https://github.com/ditto-assistant/ditto-subnet/pull/2865),
+  [`7ffb648`](https://github.com/ditto-assistant/ditto-subnet/commit/7ffb64851bb0cf903c66889c92cd293606da6214))
+
+
+## v0.358.1 (2026-10-13)
+
+### Bug Fixes
+
+- **dittobench**: Stop charging stale request timestamps to the agent
+  ([#2866](https://github.com/ditto-assistant/ditto-subnet/pull/2866),
+  [`8875f2c`](https://github.com/ditto-assistant/ditto-subnet/commit/8875f2ce76655b33d26e674ef2cf28a94b077bb6))
+
+
+## v0.358.0 (2026-10-13)
+
+### Documentation
+
+- **backroom-review**: Correct clear-v42 precedent for the v13 claim grader
+  ([#2859](https://github.com/ditto-assistant/ditto-subnet/pull/2859),
+  [`4e5bbf8`](https://github.com/ditto-assistant/ditto-subnet/commit/4e5bbf8167bcea4bb25eb23644cb253e3547cf35))
+
+### Features
+
+- **treasury**: Let the coldkey sign a Gamma range adjustable from Backroom
+  ([#2861](https://github.com/ditto-assistant/ditto-subnet/pull/2861),
+  [`7431ce9`](https://github.com/ditto-assistant/ditto-subnet/commit/7431ce9cee9f21752491c06434e0ac133cfc0504))
+
+
+## v0.357.2 (2026-10-13)
+
+### Bug Fixes
+
+- **miner-cli**: Let ditto practice reject options it cannot honour
+  ([#2640](https://github.com/ditto-assistant/ditto-subnet/pull/2640),
+  [`f736eed`](https://github.com/ditto-assistant/ditto-subnet/commit/f736eed0e1b8c42161ec85420159a0d97623d06e))
+
+- **relay**: Apply Backroom requests-per-minute limits at admission
+  ([#2625](https://github.com/ditto-assistant/ditto-subnet/pull/2625),
+  [`1ec030e`](https://github.com/ditto-assistant/ditto-subnet/commit/1ec030eb031dbec01e39272e79b752877dad9563))
+
+
+## v0.357.1 (2026-10-13)
+
+### Bug Fixes
+
+- **platform**: Let the source-emission collector outpace the chain
+  ([#2852](https://github.com/ditto-assistant/ditto-subnet/pull/2852),
+  [`1a7bb89`](https://github.com/ditto-assistant/ditto-subnet/commit/1a7bb89ad0eaf6cf5e00c3b082d67e143c661f26))
+
+
+## v0.357.0 (2026-10-10)
+
+### Chores
+
+- **infra**: Prepare recovered coding host retirement
+  ([#2841](https://github.com/ditto-assistant/ditto-subnet/pull/2841),
+  [`b9ffad6`](https://github.com/ditto-assistant/ditto-subnet/commit/b9ffad6fbe51d0f4e9e7e91468927df6b1856301))
+
+- **infra**: Retire recovered native coding host
+  ([#2842](https://github.com/ditto-assistant/ditto-subnet/pull/2842),
+  [`447f33c`](https://github.com/ditto-assistant/ditto-subnet/commit/447f33c4d2a8726dbf857b6c5066bca600cace11))
+
+### Features
+
+- **gamma**: Allow service allocations up to 100 percent
+  ([#2845](https://github.com/ditto-assistant/ditto-subnet/pull/2845),
+  [`fe22d27`](https://github.com/ditto-assistant/ditto-subnet/commit/fe22d27fe55983414d6092ed30f941cb29f41924))
+
+
 ## v0.356.17 (2026-10-09)
 
 ### Bug Fixes
