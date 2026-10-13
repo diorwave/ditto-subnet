@@ -133,7 +133,9 @@ services:
   # DITTO_COMPOSE_SERVICES on a deployed host. The platform stays disabled until
   # CODE_EMBEDDER_URL is set, so a host that does not run this service is unaffected.
   embedder:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.7.2@sha256:bbdbd7793b70e0329abcb55a6fb96cf7ee68e459305da95dfa79fb643f086317
+    # Same TEI base as docker/embedder/Dockerfile: cpu-1.8.2+ fixes the Intel-MKL
+    # crash on AMD hosts (TEI #636 / #667) that also hits a Qwen3 model override.
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.3@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
     profiles: ["embedder"]
     # amd64-only image; run under emulation on Apple Silicon (colima qemu).
     platform: linux/amd64
