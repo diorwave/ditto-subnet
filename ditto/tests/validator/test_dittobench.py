@@ -2771,7 +2771,7 @@ class TestSeedDeadlineExceeded:
     def test_never_mints_a_no_fault_grant(self) -> None:
         assert "seed_deadline_exceeded" in dittobench._BOUNDED_RETRY_CODES
         assert "seed_deadline_exceeded" not in dittobench._SANDBOX_INFRASTRUCTURE_CODES
-        payload = {"failure": self._FAILURE}
+        payload: dict[str, object] = {"failure": self._FAILURE}
         assert dittobench._sandbox_infrastructure_failure_code(payload) is None
         assert dittobench._agent_attributable_failure_code(payload) is None
         assert dittobench._platform_route_proof_gap(payload) is False
@@ -2781,7 +2781,7 @@ class TestSeedDeadlineExceeded:
             ("sandbox_failure", True),
             ("validator_infrastructure", False),
         ):
-            payload = {
+            payload: dict[str, object] = {
                 "failure": {**self._FAILURE, "kind": kind, "retryable": retryable}
             }
             assert dittobench._bounded_retry_failure_code(payload) is None
