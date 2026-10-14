@@ -38,26 +38,59 @@ function formatLanguageMix(inventory: CopyReviewLanguageInventory | null | undef
   if (!inventory) return 'not recorded'
   const ranked = rankedLanguages(inventory)
   const total = ranked.reduce((sum, [, bytes]) => sum + bytes, 0)
-  if (total === 0) return 'no authored files'
+  const files = Object.values(inventory.files).reduce((sum, count) => sum + count, 0)
+  const fileCount = `${files} file${files === 1 ? '' : 's'}`
+  if (total === 0) return files > 0 ? `${fileCount} (0 bytes)` : 'no authored files'
   const shown = ranked
     .slice(0, 3)
     .map(([language, bytes]) => `${language} ${Math.round((bytes / total) * 100)}%`)
   const more = ranked.length > 3 ? ` +${ranked.length - 3} more` : ''
-  const files = Object.values(inventory.files).reduce((sum, count) => sum + count, 0)
-  return `${shown.join(' · ')}${more} (${files} file${files === 1 ? '' : 's'})`
+  return `${shown.join(' · ')}${more} (${fileCount})`
 }
 
+// Labels that say nothing about which language the code is written in: an
+// unclassified file, or documentation, data and config that any agent may ship
+// in bulk (a JSON registry, a Markdown prompt, Cargo.toml).
+const NON_CODE_LANGUAGES = new Set([
+  'unknown',
+  'markdown',
+  'restructuredtext',
+  'text',
+  'json',
+  'toml',
+  'yaml',
+  'ini',
+  'requirements',
+  'dotenv',
+])
+
 // The normalized-source and prompt channels canonicalize Rust/C-style syntax.
-// Flag a comparison where either side is mostly another language so a miss on
-// those channels is not read as exculpatory.
+// Flag a comparison where either side's code is mostly another language, by
+// byte majority over code labels only, so a miss on those channels is not read
+// as exculpatory. A tie, or a side with no classified code, does not qualify.
 function mostlyNonRust(
   ...inventories: Array<CopyReviewLanguageInventory | null | undefined>
 ) {
   return inventories.some((inventory) => {
     if (!inventory) return false
-    const [top] = rankedLanguages(inventory)
-    return top !== undefined && top[0] !== 'rust'
+    let codeBytes = 0
+    let nonRustBytes = 0
+    for (const [language, bytes] of Object.entries(inventory.bytes)) {
+      if (bytes <= 0 || NON_CODE_LANGUAGES.has(language)) continue
+      codeBytes += bytes
+      if (language !== 'rust') nonRustBytes += bytes
+    }
+    return nonRustBytes * 2 > codeBytes
   })
+}
+
+// Inventories recorded under different detection rules are not like-for-like.
+function inventoryVersionMismatch(
+  candidate: CopyReviewLanguageInventory | null | undefined,
+  reference: CopyReviewLanguageInventory | null | undefined,
+) {
+  if (!candidate || !reference || candidate.version === reference.version) return null
+  return `candidate ${candidate.version} vs reference ${reference.version}`
 }
 
 function comparisonLabel(item: CopyReviewConsoleItem) {
@@ -756,6 +789,17 @@ export function CopyReviewPanel({
                         Mostly non-Rust source: normalized-source and prompt canonicalization is Rust-shaped, so a miss there is not exculpatory.
                       </p>
                     ) : null}
+                    {(() => {
+                      const mismatch = inventoryVersionMismatch(
+                        selected.current_comparison.candidate_languages,
+                        selected.current_comparison.reference_languages,
+                      )
+                      return mismatch ? (
+                        <p className="mt-1 text-[var(--muted)]">
+                          Inventories recorded under different detection rules ({mismatch}); the mixes are not like-for-like.
+                        </p>
+                      ) : null
+                    })()}
                   </div>
                 </dl>
               )}
