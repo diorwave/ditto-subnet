@@ -7,6 +7,7 @@ through an in-memory cursor so the transition logic is covered on every run.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -29,10 +30,14 @@ def _stalled_gauge() -> float | None:
     return REGISTRY.get_sample_value("ditto_source_emission_collector_stalled")
 
 
-def _lag_gauge() -> float | None:
+def _age_gauge() -> float | None:
     return REGISTRY.get_sample_value(
-        "ditto_source_emission_collector_cursor_lag_seconds"
+        "ditto_source_emission_collector_cursor_age_seconds"
     )
+
+
+def _backlog_gauge() -> float | None:
+    return REGISTRY.get_sample_value("ditto_source_emission_collector_backlog_blocks")
 
 
 def test_missing_cursor_is_unknown_never_stalled() -> None:
@@ -40,7 +45,7 @@ def test_missing_cursor_is_unknown_never_stalled() -> None:
         cursor_updated_at=None, blocked_reason=_REASON, now=_NOW
     )
     assert staleness.cursor_updated_at is None
-    assert staleness.lag_seconds is None
+    assert staleness.cursor_age_seconds is None
     assert staleness.stalled is False
     assert staleness.threshold_seconds == SOURCE_EMISSION_COLLECTOR_STALL_SECONDS
 
@@ -52,17 +57,17 @@ def test_current_cursor_with_reason_is_not_stalled() -> None:
         blocked_reason=_REASON,
         now=_NOW,
     )
-    assert staleness.lag_seconds == 45
+    assert staleness.cursor_age_seconds == 45
     assert staleness.stalled is False
 
 
-def test_stale_cursor_without_reason_reports_lag_only() -> None:
+def test_stale_cursor_without_reason_reports_age_only() -> None:
     staleness = collector_staleness(
         cursor_updated_at=_NOW - timedelta(hours=2),
         blocked_reason=None,
         now=_NOW,
     )
-    assert staleness.lag_seconds == 7200
+    assert staleness.cursor_age_seconds == 7200
     assert staleness.stalled is False
 
 
@@ -88,7 +93,7 @@ def test_stale_cursor_with_reason_is_stalled_past_the_threshold_only() -> None:
         now=_NOW,
     )
     assert days.stalled is True
-    assert days.lag_seconds == 13 * 86400
+    assert days.cursor_age_seconds == 13 * 86400
 
 
 def test_threshold_is_overridable_and_clock_skew_clamps_to_zero() -> None:
@@ -103,7 +108,7 @@ def test_threshold_is_overridable_and_clock_skew_clamps_to_zero() -> None:
         blocked_reason=_REASON,
         now=_NOW,
     )
-    assert future.lag_seconds == 0
+    assert future.cursor_age_seconds == 0
     assert future.stalled is False
 
 
@@ -193,10 +198,10 @@ async def test_stalled_cursor_is_distinguishable_and_logged_once_per_transition(
     assert record.source_emission_collector_stalled is True  # type: ignore[attr-defined]
     assert record.cursor_block == 6_800_000  # type: ignore[attr-defined]
     assert record.runtime_code_hash == "0xv468"  # type: ignore[attr-defined]
-    assert record.cursor_lag_seconds >= 20 * 60  # type: ignore[attr-defined]
+    assert record.cursor_age_seconds >= 20 * 60  # type: ignore[attr-defined]
     assert "unaudited runtime fingerprint" in record.getMessage()
     assert _stalled_gauge() == 1
-    assert (_lag_gauge() or 0) >= 20 * 60
+    assert (_age_gauge() or 0) >= 20 * 60
 
     # The audited fingerprint ships; the next block commit advances the cursor
     # and clears the reason.
@@ -211,7 +216,7 @@ async def test_stalled_cursor_is_distinguishable_and_logged_once_per_transition(
     assert len(recovered) == 1
     assert recovered[0].levelno == logging.WARNING
     assert _stalled_gauge() == 0
-    assert (_lag_gauge() or 0) < 60
+    assert (_age_gauge() or 0) < 60
 
 
 async def test_staleness_read_failure_never_breaks_the_loop(
@@ -230,8 +235,76 @@ async def test_staleness_read_failure_never_breaks_the_loop(
         interval_seconds=0.0,
     )
     caplog.set_level(logging.WARNING, logger=_LOGGER)
+    # A healthy scrape first, so the failure has a stale 0 to overwrite.
+    collector._record_staleness(
+        collector_staleness(
+            cursor_updated_at=datetime.now(UTC), blocked_reason=None, now=_NOW
+        ),
+        blocked_reason=None,
+        cursor_block=1,
+        runtime_code_hash=None,
+    )
+    assert _stalled_gauge() == 0
     await _sweep_once(collector, None)
     assert any(
         r.getMessage() == "source emission collector staleness read failed"
         for r in caplog.records
     )
+    # Unknown, not healthy: the previous stalled=0 must not survive the outage.
+    assert math.isnan(_stalled_gauge() or 0.0)
+    assert math.isnan(_age_gauge() or 0.0)
+
+
+def test_backlog_is_unknown_until_measured_and_after_it_goes_stale() -> None:
+    collector = SourceEmissionCollector(
+        app_state=_APP_STATE, session_maker=lambda: None, interval_seconds=0.0
+    )
+    now = datetime.now(UTC)
+    assert collector.backlog_blocks(now=now) is None
+
+    collector._record_backlog(finalized=6_812_000, current=6_800_000)
+    assert collector.last_finalized_block == 6_812_000
+    assert collector.backlog_blocks(now=now) == 12_000
+    assert _backlog_gauge() == 12_000
+
+    stale = now + timedelta(seconds=SOURCE_EMISSION_COLLECTOR_STALL_SECONDS + 1)
+    assert collector.backlog_blocks(now=stale) is None
+
+
+async def test_throttled_collector_reads_current_by_age_but_shows_its_backlog() -> None:
+    """#2850: the cursor advances every sweep yet the chain pulls away.
+
+    Cursor age stays near one sweep and nothing is stalled; only the backlog
+    against the finalized head tells an operator the collector is losing.
+    """
+    now = datetime.now(UTC)
+    cursor = SimpleNamespace(
+        block=6_800_000,
+        updated_at=now - timedelta(seconds=60),
+        last_blocked_reason=None,
+        runtime_code_hash="0xv468",
+    )
+    collector = SourceEmissionCollector(
+        app_state=_APP_STATE,
+        session_maker=lambda: _Session(cursor),
+        interval_seconds=0.0,
+    )
+    collector._record_backlog(finalized=6_809_000, current=6_800_000)
+    await _sweep_once(collector, None)
+    assert _stalled_gauge() == 0
+    assert (_age_gauge() or 0) < 120
+    assert _backlog_gauge() == 9_000
+
+
+def test_unmeasured_backlog_gauge_reads_nan() -> None:
+    collector = SourceEmissionCollector(
+        app_state=_APP_STATE, session_maker=lambda: None, interval_seconds=0.0
+    )
+    collector._record_staleness(
+        collector_staleness(cursor_updated_at=None, blocked_reason=None, now=_NOW),
+        blocked_reason=None,
+        cursor_block=None,
+        runtime_code_hash=None,
+    )
+    assert math.isnan(_backlog_gauge() or 0.0)
+    assert math.isnan(_age_gauge() or 0.0)

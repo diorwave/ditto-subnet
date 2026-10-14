@@ -180,6 +180,9 @@ async def get_settings(
         )
     )
     now = datetime.now(UTC)
+    # Same process as the collector under DITTO_ROLE=platform; any other
+    # process holds an unstarted collector and reports the backlog unknown.
+    collector = getattr(request.app.state, "source_emission_collector", None)
     staleness = collector_staleness(
         cursor_updated_at=cursor.updated_at if cursor else None,
         blocked_reason=cursor.last_blocked_reason if cursor else None,
@@ -202,7 +205,10 @@ async def get_settings(
             collector_runtime_code_hash=cursor.runtime_code_hash if cursor else None,
             collector_blocked_reason=cursor.last_blocked_reason if cursor else None,
             collector_cursor_updated_at=staleness.cursor_updated_at,
-            collector_lag_seconds=staleness.lag_seconds,
+            collector_cursor_age_seconds=staleness.cursor_age_seconds,
+            collector_backlog_blocks=(
+                collector.backlog_blocks(now=now) if collector is not None else None
+            ),
             collector_stall_threshold_seconds=staleness.threshold_seconds,
             collector_stalled=staleness.stalled,
             last_payout_block=last_payout.block if last_payout else None,
