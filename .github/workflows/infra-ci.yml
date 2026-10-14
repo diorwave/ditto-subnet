@@ -91,6 +91,12 @@ jobs:
           terraform -chdir=infra/terraform/modules/coding-hosted-host init -backend=false -input=false -lockfile=readonly
           terraform -chdir=infra/terraform/modules/coding-hosted-host test
 
+      - name: Test shared compute deletion protection with mocked provider
+        if: matrix.root == 'infra/terraform/stacks/gcp-platform'
+        run: |
+          terraform -chdir=infra/terraform/modules/compute/gcp init -backend=false -input=false -lockfile=readonly
+          terraform -chdir=infra/terraform/modules/compute/gcp test
+
       - name: Test optional compute snapshot attachments with mocked provider
         if: matrix.root == 'infra/terraform/stacks/gcp-platform'
         run: |
@@ -111,6 +117,12 @@ jobs:
 
       - name: Install pinned Ansible collections
         run: uvx --from ansible-core==2.21.2 ansible-galaxy collection install -r requirements.yml
+
+      - name: Test Caddy body caps against the deployed Caddy version
+        run: |
+          mkdir -p "$RUNNER_TEMP/caddy-bin"
+          GOBIN="$RUNNER_TEMP/caddy-bin" go install github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.4
+          PATH="$RUNNER_TEMP/caddy-bin:$PATH" uv run --no-project --with pytest --with jinja2 python -m pytest tests/test_caddy_request_body.py -q
 
       - name: Syntax-check subnet playbooks
         run: |

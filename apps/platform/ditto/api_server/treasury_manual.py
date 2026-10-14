@@ -19,6 +19,15 @@ from ditto_screening_protocol.treasury_manual import (
 )
 
 ACTIVE = ("queued", "dispatched", "pending", "audit_pending")
+OBSERVATION_BLOCKERS = {
+    "runtime_changed": (
+        "Finney runtime changed; custody audit and offline approval required"
+    ),
+    "policy_runtime_unreviewed": (
+        "Custody policy requires a renewed offline runtime approval"
+    ),
+    "observation_unavailable": "Custody cannot verify its current observation",
+}
 
 
 def readiness_is_fresh(observed_at):
@@ -58,6 +67,14 @@ async def state(session, config, *, enabled):
         blocked = "Waiting for a fresh custody observation"
         if bridge:
             report = ManualReport.model_validate(bridge.report)
+            if (
+                report.status == "blocked"
+                and report.blocker
+                and readiness_is_fresh(report.observed_at)
+                and report.collector_policy_digest
+                == runtime.treasury_approved_collector_policy_digest
+            ):
+                blocked = OBSERVATION_BLOCKERS[report.blocker.code]
             if (
                 report.readiness
                 and readiness_is_fresh(report.observed_at)
@@ -111,6 +128,12 @@ async def state(session, config, *, enabled):
     }
 
 
+def _fundable(bucket: dict) -> bool:
+    # A ranged bucket may receive emission whenever its signed ceiling is
+    # positive, even if today's in-range Gamma % (or its default) is zero.
+    return bucket.get("max_allocation_bps", bucket["allocation_bps"]) > 0
+
+
 async def validate_envelope(session, config, envelope, *, enabled):
     view = await state(session, config, enabled=enabled)
     if view["blocked_reason"]:
@@ -120,7 +143,7 @@ async def validate_envelope(session, config, envelope, *, enabled):
     destinations = view["destinations"]
     if envelope.collector_policy_digest != readiness.policy or not any(
         b["bucket_id"] == req.bucket_id
-        and b["allocation_bps"] > 0
+        and _fundable(b)
         and b["holding_coldkey"] == envelope.destination
         for b in destinations
     ):
@@ -157,7 +180,7 @@ async def preview(session, config, payload, *, enabled):
     approved = {
         (b["bucket_id"], b["holding_coldkey"])
         for b in view["destinations"]
-        if b["allocation_bps"] > 0
+        if _fundable(b)
     }
     matches = [
         (s.source_block, p.holding_coldkey)
@@ -229,13 +252,13 @@ async def accept_report(session, config, body):
     await lock_runtime(session)
     runtime = await treasury_runtime(session, config)
     await lock_manual(session)
-    if report.status == "readiness":
+    if report.status in {"readiness", "blocked"}:
         if (
             report.collector_policy_digest
             != runtime.treasury_approved_collector_policy_digest
         ):
             raise InvalidManualReport("Custody readiness policy differs")
-        if (
+        if report.status == "readiness" and (
             not report.readiness
             or report.readiness.policy != report.collector_policy_digest
         ):
