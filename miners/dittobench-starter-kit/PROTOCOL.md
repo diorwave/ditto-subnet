@@ -313,22 +313,20 @@ slot is that line, copied verbatim.
 - **Same-turn corrections: point-in-time anchors live inside `user_input`.**
   Waves are realism, not the point-in-time signal: you re-index after every
   `/seed`, so nothing a wave delivers defeats an index compiled at ingest time.
-  The signal is an `as of <date>` anchor in the question itself (`As of March
-  14, 2026, what work email did I have on file for <name>, …?`); the date
-  exists in no seeded record. The question walks one correction chain from the
-  seed — a contact's work email, a project's invoice total, or the days planned
-  for one trip leg — whose original record and later correction each carry
-  their own seed `timestamp`, and asks for the value in force on that date.
-  Every chain yields an `as_of_twin` pair whose halves are never adjacent in
-  the run: the before-half's date falls strictly between the two records
-  (answer: the superseded value), the after-half's date falls after the
-  correction (answer: the current value), and each half plants the other
-  half's answer as its distractor. Keep superseded records with their
-  timestamps and choose the one in force on the named date: an index that only
-  knows the current state scores exactly one half
-  (`TestV13PointInTimeTwinsDefeatAStaticStateIndex` (#1844)), and the same
-  answer on both halves is `twin_concordant`. Answer the question in front of
-  you, at the time it names.
+  The signal is an `as of <date>` anchor in the question itself ("As of 12
+  March, which venue was booked for the offsite?"); the date exists in no
+  seeded record. Somewhere in the seed, an original record and a later
+  correction of it each carry their own seed `timestamp`, and the question
+  asks for the value in force on the named date. Each such correction yields
+  an `as_of_twin` pair whose halves are never adjacent in the run: the
+  before-half's date falls strictly between the two records (answer: the
+  superseded value), the after-half's date falls after the correction (answer:
+  the current value), and each half plants the other half's answer as its
+  distractor. Keep superseded records with their timestamps and choose the one
+  in force on the named date: an index that only knows the current state
+  scores exactly one half (`TestV13PointInTimeTwinsDefeatAStaticStateIndex`
+  (#1844)), and the same answer on both halves is `twin_concordant`. Answer
+  the question in front of you, at the time it names.
 - **Some cases expect a clarifying question, some expect a grounded decline.**
   On an ask-half restraint case the value is absent from the records: make no
   non-memory tool call and ask a question that names the missing slot ("which
@@ -360,7 +358,7 @@ marked incomplete, which always fails **open**.
 | --- | --- | --- | --- |
 | Catalog-present | the model was never offered a choosable non-memory catalog on a no-tool case (restraint you decided, not the model — `tool_choice: "none"` and a memory-only catalog count as no offer), or the expected tool was never offered; waived when your retained set holds the top-3 of the published TF-IDF embedding (`v13::semantic_top_k` in this kit, `scorer.CatalogSemanticTopK` in the validator) or is merely non-empty on a chit-chat/declarative/decline case (the negation family excepted) | `restraint_without_offer`, `expected_tool_not_offered` | shadow (`DITTOBENCH_V13_CATALOG_GATE_POSTURE`) |
 | Swallowed model call | the model emitted a non-memory call on a no-tool case and you did not execute it through `tool_endpoint` | `swallowed_model_call` | shadow |
-| Claim-span provenance | the graded value tokens in the credited span (`answer`, else `final_text`) are not contained in the union of the case's completions after the claim-span normaliser (below) — a `/100` rescale, direction map, or draft replacement; a credited value with no completion at all | `served_text_not_model_emitted`, `no_model_completion` | shadow (`DITTOBENCH_V13_CLAIM_PROVENANCE_POSTURE`, shared with the causal gate) |
+| Claim-span provenance | the graded value tokens in the credited span (`answer`, else `final_text`) are not contained in the union of the case's completions after the claim-span normaliser (below) — a `/100` rescale, a direction map from a phrase the grader does not accept, or a draft replacement; a credited value with no completion at all | `served_text_not_model_emitted`, `no_model_completion` | shadow (`DITTOBENCH_V13_CLAIM_PROVENANCE_POSTURE`, shared with the causal gate) |
 | Slot tie-break | the `answer` slot alone would pass but no typed-equivalent value is asserted in `final_text` | `slot_not_in_prose` | grading rule |
 | Causal model dependence | the graded value appears in a prompt span you authored (system prompt, template, prefill, tool-role message) before any completion produced it, and in no `/seed` record, served tool result, the case's `user_input` or the validator's system prompt | `answer_in_prompt` | shadow (same switch) |
 | Twin / pair post-pass | you gave the same decision or the same answer to both halves of a `decision_twin` / `as_of_twin`, or the counterfactual member got the base member's answer | `twin_concordant`, `counterfactual_insensitive` | observe |
