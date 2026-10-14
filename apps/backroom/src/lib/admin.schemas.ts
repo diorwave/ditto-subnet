@@ -9873,6 +9873,7 @@ export const outlierEscalationDryRunInputSchema = z.object({
   minCohortSize: z.number().int().min(1).max(1000).optional(),
   modifiedZThreshold: z.number().positive().max(1000).optional(),
   minCompositeFloor: z.number().min(0).max(1).optional(),
+  perAxisEnforce: z.boolean().optional(),
   limit: z.number().int().min(1).max(100).default(20),
 })
 

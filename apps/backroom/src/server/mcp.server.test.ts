@@ -4372,6 +4372,9 @@ describe('Backroom MCP tools', () => {
       const guidance = (readJsonResult(help) as { guidance: string }).guidance
       expect(guidance).toContain('default_invalid_env')
       expect(guidance).toContain('/admin/score-outliers')
+      expect(guidance).toContain('per_axis_enforce')
+      expect(guidance).toContain('axis_evidence_in_window')
+      expect(guidance).toContain('recent_axis_evidence')
       expect(fetchMock).toHaveBeenCalledTimes(1)
     } finally {
       await client.close()
@@ -4483,12 +4486,13 @@ describe('Backroom MCP tools', () => {
       .fn()
       .mockResolvedValueOnce(Response.json(outlierDryRunPayload()))
       .mockResolvedValueOnce(Response.json(outlierDryRunPayload()))
+      .mockResolvedValueOnce(Response.json(outlierDryRunPayload()))
     vi.stubGlobal('fetch', fetchMock)
     const { client, server } = await connect([BACKROOM_READ_SCOPE])
     try {
       const response = await client.callTool({
         name: 'get_outlier_escalation_dry_run',
-        arguments: { benchVersion: 12, modifiedZThreshold: 4.5, limit: 2 },
+        arguments: { benchVersion: 12, modifiedZThreshold: 4.5, perAxisEnforce: true, limit: 2 },
       })
 
       expect(response.isError).not.toBe(true)
@@ -4510,14 +4514,30 @@ describe('Backroom MCP tools', () => {
       expect(JSON.stringify(body)).not.toContain('raw_cohort')
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
       expect(String(url)).toBe(
-        'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=2&bench_version=12&modified_z_threshold=4.5',
+        'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=2&bench_version=12&modified_z_threshold=4.5&per_axis_enforce=true',
       )
       expect(init.method ?? 'GET').toBe('GET')
 
-      await client.callTool({ name: 'get_outlier_escalation_dry_run', arguments: {} })
+      // An explicit false is an override too: it previews composite-only holds
+      // even when the live setting enforces per axis.
+      await client.callTool({
+        name: 'get_outlier_escalation_dry_run',
+        arguments: { perAxisEnforce: false },
+      })
       expect(String(fetchMock.mock.calls[1][0])).toBe(
+        'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=20&per_axis_enforce=false',
+      )
+
+      await client.callTool({ name: 'get_outlier_escalation_dry_run', arguments: {} })
+      expect(String(fetchMock.mock.calls[2][0])).toBe(
         'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=20',
       )
+
+      const invalidOverride = await client.callTool({
+        name: 'get_outlier_escalation_dry_run',
+        arguments: { perAxisEnforce: 'yes' },
+      })
+      expect(invalidOverride.isError).toBe(true)
 
       const invalid = await client.callTool({
         name: 'get_outlier_escalation_dry_run',
@@ -4532,7 +4552,8 @@ describe('Backroom MCP tools', () => {
       const guidance = (readJsonResult(help) as { guidance: string }).guidance
       expect(guidance).toContain('mode is reported but not applied')
       expect(guidance).toContain('writes nothing')
-      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(guidance).toContain('perAxisEnforce')
+      expect(fetchMock).toHaveBeenCalledTimes(3)
     } finally {
       await client.close()
       await server.close()
