@@ -48,12 +48,7 @@ const declarativeAckQuestionType = DeclarativeAckQuestionType
 const declarativeAckCredit = 0.25
 
 func memoryV13(mc protocol.MemoryCase, resp protocol.RunResponse, policy gradingPolicy) Verdict {
-	if policy.foldTypographicHyphens {
-		resp = foldReplyHyphens(resp)
-	}
-	if policy.hyphenJoinedValues {
-		resp = joinHyphenatedValuesV14(mc, resp)
-	}
+	resp = memoryReplyAsGraded(mc, resp, policy)
 	slot := strings.TrimSpace(resp.Answer)
 	full := slot + "\n" + resp.FinalText
 	qt := strings.ToLower(mc.QuestionType)
@@ -162,6 +157,28 @@ func FoldReplyHyphens(benchVersion int, resp protocol.RunResponse) protocol.RunR
 		return resp
 	}
 	return foldReplyHyphens(resp)
+}
+
+// memoryReplyAsGraded applies the reply rewrites the memory grader makes
+// before matching: the v14 typographic hyphen fold, then the v14 case-aware
+// hyphen-joined-value rewrite. Below v14 it returns resp unchanged.
+func memoryReplyAsGraded(mc protocol.MemoryCase, resp protocol.RunResponse, policy gradingPolicy) protocol.RunResponse {
+	if policy.foldTypographicHyphens {
+		resp = foldReplyHyphens(resp)
+	}
+	if policy.hyphenJoinedValues {
+		resp = joinHyphenatedValuesV14(mc, resp)
+	}
+	return resp
+}
+
+// MemoryReplyAsGraded returns resp as the memory grader reads it under the
+// policy governing benchVersion (memoryReplyAsGraded). The scorer's twin
+// post-pass compares asserted answers through it, so two replies the grader
+// reads alike ("blue-purple" and "blue purple" for a case that knows "blue
+// purple") compare alike. It changes no grade.
+func MemoryReplyAsGraded(benchVersion int, mc protocol.MemoryCase, resp protocol.RunResponse) protocol.RunResponse {
+	return memoryReplyAsGraded(mc, resp, gradingPolicyForVersion(benchVersion))
 }
 
 func gradeClaimV13(mc protocol.MemoryCase, resp protocol.RunResponse, kind string, an analysis, lex claimLexicon, policy gradingPolicy) Verdict {
