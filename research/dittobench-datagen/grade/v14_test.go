@@ -270,6 +270,11 @@ func TestV14ProgressiveActionClaims(t *testing.T) {
 		{"v14 cancel because pausing isn't possible", protocol.BenchVersionV14, say("We'll cancel it because pausing isn't possible."), 1},
 		{"v14 asserted progressive distractor", protocol.BenchVersionV14, say("We'll cancel it, or we are pausing it."), 0},
 	})
+	reopen := protocol.MemoryCase{AnswerKind: protocol.AnswerValue, ExpectedAnswer: "pause it", DistractorAnswers: []string{"open a new plan"},
+		Claims: []protocol.Claim{{Kind: protocol.ClaimKindAction, Expected: "pause it", Accept: []string{"pause it"}, Weight: 1}}}
+	checkVersionVectors(t, reopen, []versionVector{
+		{"v14 multisyllable progressive distractor is caught", protocol.BenchVersionV14, say("We are pausing it, or opening a new plan."), 0},
+	})
 	upgrade := protocol.MemoryCase{AnswerKind: protocol.AnswerValue, ExpectedAnswer: "upgrade it",
 		Claims: []protocol.Claim{{Kind: protocol.ClaimKindAction, Expected: "upgrade it", Accept: []string{"upgrade it", "upgrade", "go up a tier"}, Weight: 1}}}
 	checkVersionVectors(t, upgrade, []versionVector{
@@ -292,10 +297,20 @@ func TestProgressiveVerbSpelling(t *testing.T) {
 		"hop": "hopping", "hope": "hoping", "see": "seeing", "go": "going", "pay": "paying",
 		"freeze": "freezing", "tie": "tying", "fix": "fixing", "put": "putting", "send": "sending",
 		"book": "booking", "paused": "", "billing": "", "nda": "ndaing", "café": "",
+		// Multisyllabic verbs double only when listed: never "openning".
+		"open": "opening", "listen": "listening", "visit": "visiting", "edit": "editing",
+		"happen": "happening", "order": "ordering", "deliver": "delivering", "unlock": "unlocking",
+		"travel": "traveling travelling", "admit": "admitting", "prefer": "preferring",
+		"quit": "quitting", "equip": "equipping",
 	} {
 		if got := strings.Join(progressiveVerbV14(in), " "); got != want {
 			t.Errorf("progressiveVerbV14(%q) = %q, want %q", in, got, want)
 		}
+	}
+	// Distractor values go through the same speller.
+	got := progressiveFormsV14([]string{"open a new account", "listen to the voicemail", "cancel it"})
+	if want := "opening a new account|listening to the voicemail|canceling it|cancelling it"; strings.Join(got, "|") != want {
+		t.Fatalf("progressiveFormsV14 = %q, want %q", strings.Join(got, "|"), want)
 	}
 }
 

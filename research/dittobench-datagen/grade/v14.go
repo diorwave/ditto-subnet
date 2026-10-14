@@ -260,10 +260,10 @@ func progressiveFormsV14(values []string) []string {
 // progressiveVerbV14 spells the -ing form of a verb conservatively: a final
 // silent e drops (pause -> pausing, upgrade -> upgrading; see, free keep
 // theirs), -ie becomes -ying, and a final consonant after a single vowel
-// doubles in a one-syllable verb (stop -> stopping). A longer verb with that
-// ending gets both spellings (cancel -> canceling, cancelling), never the
-// undoubled one alone for a one-syllable verb, so "hop" cannot read as
-// "hoping".
+// doubles only in a one-syllable verb (stop -> stopping, quit -> quitting, so
+// "hop" cannot read as "hoping"). A longer verb doubles only when
+// multisyllableDoublingV14 lists it (admit -> admitting; cancel -> canceling
+// and cancelling): open -> opening, never "openning".
 func progressiveVerbV14(w string) []string {
 	if len(w) < 2 {
 		return nil
@@ -276,7 +276,10 @@ func progressiveVerbV14(w string) []string {
 	if strings.HasSuffix(w, "ing") || strings.HasSuffix(w, "ed") {
 		return nil
 	}
-	isVowel := func(c byte) bool { return strings.IndexByte("aeiou", c) >= 0 }
+	// A "u" after "q" spells a consonant sound (quit, equip).
+	isVowel := func(i int) bool {
+		return strings.IndexByte("aeiou", w[i]) >= 0 && !(w[i] == 'u' && i > 0 && w[i-1] == 'q')
+	}
 	n := len(w)
 	switch {
 	case strings.HasSuffix(w, "ie"):
@@ -287,20 +290,40 @@ func progressiveVerbV14(w string) []string {
 		return []string{w[:n-1] + "ing"}
 	}
 	last := w[n-1]
-	if n >= 3 && !isVowel(last) && isVowel(w[n-2]) && !isVowel(w[n-3]) && strings.IndexByte("wxy", last) < 0 {
+	if n >= 3 && !isVowel(n-1) && isVowel(n-2) && !isVowel(n-3) && strings.IndexByte("wxy", last) < 0 {
 		doubled := w + string(last) + "ing"
 		groups := 0
 		for i := 0; i < n; i++ {
-			if isVowel(w[i]) && (i == 0 || !isVowel(w[i-1])) {
+			if isVowel(i) && (i == 0 || !isVowel(i-1)) {
 				groups++
 			}
 		}
 		if groups == 1 {
 			return []string{doubled}
 		}
-		return []string{w + "ing", doubled}
+		if both, ok := multisyllableDoublingV14[w]; ok {
+			if both {
+				return []string{w + "ing", doubled}
+			}
+			return []string{doubled}
+		}
 	}
 	return []string{w + "ing"}
+}
+
+// multisyllableDoublingV14 lists the multisyllabic verbs whose final
+// consonant doubles before -ing. true: both spellings are standard (US
+// "canceling", UK "cancelling"); false: only the doubled one is (stress on
+// the final syllable: "admitting", "preferring"). Every other multisyllabic
+// verb takes plain -ing ("opening", "listening", "visiting").
+var multisyllableDoublingV14 = map[string]bool{
+	"cancel": true, "channel": true, "counsel": true, "label": true, "level": true,
+	"model": true, "signal": true, "total": true, "travel": true,
+	"admit": false, "begin": false, "commit": false, "compel": false, "confer": false,
+	"control": false, "defer": false, "equip": false, "expel": false, "forget": false,
+	"infer": false, "occur": false, "omit": false, "patrol": false, "permit": false,
+	"prefer": false, "propel": false, "rebel": false, "refer": false, "regret": false,
+	"submit": false, "transfer": false, "unplug": false, "unzip": false,
 }
 
 // ── Gerund and post-posed negation of an action (progressiveActions) ────────

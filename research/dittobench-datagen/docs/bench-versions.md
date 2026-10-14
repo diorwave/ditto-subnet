@@ -1121,8 +1121,9 @@ NFKC turns a completion's U+2011 into U+2010, a separator. So from v14
 `ClaimAlternatives` adds the U+2010 variant of every hyphenated claim form, and
 an honest completion that wrote U+2011 is not flagged
 `served_text_not_model_emitted`. The twin post-pass compares asserted answers
-and the result-usage check reads the reply after the same fold, so a hyphen
-variant cannot make two credited answers compare unequal.
+and the result-usage check reads the reply after the same fold (memory twins
+also after the hyphen-joined-value rewrite below), so a hyphen variant cannot
+make two credited answers compare unequal.
 
 The same v14 floor adds three memory-axis matcher changes from #2734; v13 and
 older grade byte-identically:
@@ -1148,7 +1149,9 @@ older grade byte-identically:
   asserted.
 - **Progressive action claims.** An `action` claim also accepts the -ing form
   of the first word of each accepted form (`pausing` for `pause`,
-  `upgrading`, `stopping`, `canceling`/`cancelling`), and the case's
+  `upgrading`, `stopping`, `canceling`/`cancelling`; a multisyllabic verb
+  doubles its final consonant only as a listed exception such as `admitting`
+  or `cancelling`, so `open` gives `opening`), and the case's
   distractors get the same forms so a progressive distractor is caught. Past
   -ed forms stay misses. Because the -ing form makes gerund negation
   natural, an action claim also reads a gerund-taking negator (`avoid`,
