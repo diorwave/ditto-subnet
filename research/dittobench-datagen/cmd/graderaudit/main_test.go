@@ -297,8 +297,45 @@ func TestSyntheticRobustnessV14BankIsClean(t *testing.T) {
 	if !report.CoverageOK || !report.WithinLimits || report.NegativeFailures != 0 || report.ReviewedPositiveFailures != 0 || report.PositiveFailures != 0 {
 		t.Fatalf("v14 bank not clean: failed=%v report=%+v", report.FailedChecks, report)
 	}
-	if report.NegativeChecks != len(bank.Negatives) || report.ReviewedPositives != len(bank.Positives) {
-		t.Fatalf("v14 bank checks skipped: negatives=%d/%d positives=%d/%d", report.NegativeChecks, len(bank.Negatives), report.ReviewedPositives, len(bank.Positives))
+	// The report's check counts are the bank sizes, so they cannot show a
+	// skipped entry. Grade every entry here and count what actually ran.
+	if len(bank.Negatives) == 0 || len(bank.Positives) == 0 {
+		t.Fatalf("v14 bank is empty: negatives=%d positives=%d", len(bank.Negatives), len(bank.Positives))
+	}
+	negatives, positives := 0, 0
+	for _, n := range bank.Negatives {
+		mc := n.Case
+		mc.BenchVersion = protocol.BenchVersionV14
+		if got := grade.Memory(mc, n.Response).Score; got != 0 {
+			t.Errorf("negative %s scored %v at v14", n.Name, got)
+		}
+		negatives++
+	}
+	for _, p := range bank.Positives {
+		mc := p.Case
+		mc.BenchVersion = protocol.BenchVersionV14
+		want := p.MinScore
+		if want <= 0 {
+			want = 1
+		}
+		if got := grade.Memory(mc, p.Response).Score; got < want {
+			t.Errorf("positive %s scored %v at v14, want >= %v", p.Name, got, want)
+		}
+		positives++
+	}
+	if negatives != len(bank.Negatives) || positives != len(bank.Positives) ||
+		report.NegativeChecks != negatives || report.ReviewedPositives != positives {
+		t.Fatalf("v14 bank checks skipped: graded negatives=%d positives=%d, bank %d/%d, report %d/%d",
+			negatives, positives, len(bank.Negatives), len(bank.Positives), report.NegativeChecks, report.ReviewedPositives)
+	}
+	for _, name := range []string{"gerund-negation-avoid", "gerund-negation-decided-against", "gerund-negation-stopped", "gerund-negation-not-possible", "set-removal-scheduled-day"} {
+		found := false
+		for _, n := range bank.Negatives {
+			found = found || n.Name == name
+		}
+		if !found {
+			t.Errorf("v14 bank lost negative %s", name)
+		}
 	}
 }
 
