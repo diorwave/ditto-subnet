@@ -8,11 +8,12 @@ alter emissions, or change a production setting.
 ## Immutable boundary
 
 V14 changes the declarative memory over-call rule, folds the typographic
-hyphens U+2010/U+2011 in graded reply text to ASCII (#2734), adds three memory
-matcher corrections from #2734 (a hyphen joining the words of a known
-multi-word value reads as a space; set removal may end in a short place phrase
-such as `from the list`; action claims accept the verb's -ing form), and
-changes benchmark identity.
+hyphens U+2010/U+2011 in graded reply text to ASCII (#2734) with matching
+claim-gate forms and twin/result-usage reads, adds three memory matcher
+corrections from #2734 (a hyphen joining the words of a known multi-word value
+reads as a space; set removal may end in a short place phrase such as
+`from the list`; action claims accept the verb's -ing form), and changes
+benchmark identity.
 V13 keeps its whole-case exclusion. V2–v12 keep their existing rules. Lifecycle
 write cases remain excluded at every version. V14 counts each observed
 declarative-ack case and permits save/update/delete memory actions on that case;

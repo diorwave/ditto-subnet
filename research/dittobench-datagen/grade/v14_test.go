@@ -259,3 +259,24 @@ func TestProgressiveVerbSpelling(t *testing.T) {
 		}
 	}
 }
+
+// TestV14ClaimAlternativesCarryTheTypographicHyphenForm pins the provenance
+// half of #2734: from v14 every hyphenated claim form gains its U+2010 variant
+// (what NFKC turns a model's U+2011 into), and v13's claim vocabulary is
+// unchanged.
+func TestV14ClaimAlternativesCarryTheTypographicHyphenForm(t *testing.T) {
+	mc := protocol.MemoryCase{AnswerKind: protocol.AnswerValue, ExpectedAnswer: "VK-48HJXP6A63", AcceptAny: []string{"Lisbon"}}
+	mc.BenchVersion = protocol.BenchVersionV13
+	if got := ClaimAlternatives(mc); len(got) != 1 || len(got[0]) != 2 {
+		t.Fatalf("v13 claim vocabulary changed: %q", got)
+	}
+	mc.BenchVersion = protocol.BenchVersionV14
+	got := ClaimAlternatives(mc)
+	if len(got) != 1 || len(got[0]) != 3 || got[0][0] != "VK-48HJXP6A63" || got[0][1] != "Lisbon" || got[0][2] != "VK‐48HJXP6A63" {
+		t.Fatalf("v14 claim vocabulary = %q", got)
+	}
+	list := protocol.MemoryCase{BenchVersion: protocol.BenchVersionV14, AnswerKind: protocol.AnswerList, AnswerItems: []string{"GAVOTU-8841", "tea"}}
+	if got := ClaimAlternatives(list); len(got) != 2 || len(got[0]) != 2 || got[0][1] != "GAVOTU‐8841" || len(got[1]) != 1 {
+		t.Fatalf("v14 list claim vocabulary = %q", got)
+	}
+}

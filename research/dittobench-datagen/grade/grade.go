@@ -526,6 +526,32 @@ func ClaimAlternatives(mc protocol.MemoryCase) [][]string {
 			group(forms...)
 		}
 	}
+	if gradingPolicyForVersion(mc.BenchVersion).foldTypographicHyphens {
+		out = withTypographicHyphenForms(out)
+	}
+	return out
+}
+
+// withTypographicHyphenForms adds, to each claim group, the U+2010 HYPHEN
+// variant of every form carrying an ASCII hyphen (v14, foldTypographicHyphens).
+// The grader folds a reply's U+2010/U+2011 to ASCII before matching, but the
+// relay tokenizes the model's raw completion: NFKC maps U+2011 to U+2010, which
+// the published claim-span normaliser reads as a separator, while it keeps the
+// ASCII '-' and so reads "VK-48HJXP6A63" as carrying a signed "-48". Without
+// this variant the gate would flag an honest model that wrote U+2011 as
+// served_text_not_model_emitted. The variant differs from its form only in the
+// hyphen, so it accepts no value the grader does not.
+func withTypographicHyphenForms(groups [][]string) [][]string {
+	out := make([][]string, len(groups))
+	for i, group := range groups {
+		forms := append([]string(nil), group...)
+		for _, form := range group {
+			if strings.Contains(form, "-") {
+				forms = append(forms, strings.ReplaceAll(form, "-", "\u2010"))
+			}
+		}
+		out[i] = forms
+	}
 	return out
 }
 
