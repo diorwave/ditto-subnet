@@ -49,8 +49,9 @@ function formatLanguageMix(inventory: CopyReviewLanguageInventory | null | undef
 }
 
 // Labels that say nothing about which language the code is written in: an
-// unclassified file, or documentation, data and config that any agent may ship
-// in bulk (a JSON registry, a Markdown prompt, Cargo.toml).
+// unclassified file, or documentation, data, config and build files that any
+// agent may ship in bulk (a JSON registry, a Markdown prompt, Cargo.toml, a
+// Makefile or Dockerfile).
 const NON_CODE_LANGUAGES = new Set([
   'unknown',
   'markdown',
@@ -62,6 +63,8 @@ const NON_CODE_LANGUAGES = new Set([
   'ini',
   'requirements',
   'dotenv',
+  'dockerfile',
+  'make',
 ])
 
 // The normalized-source and prompt channels canonicalize Rust/C-style syntax.

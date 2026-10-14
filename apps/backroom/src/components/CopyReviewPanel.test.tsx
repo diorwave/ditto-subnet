@@ -278,6 +278,11 @@ describe('CopyReviewPanel', () => {
       expect(screen.queryByText(/Mostly non-Rust source/)).toBeNull()
     })
 
+    it('does not fire on Rust code beside a substantial Makefile and Dockerfile', () => {
+      renderSelected(withInventories({ rust: 2000, make: 12000, dockerfile: 9000 }))
+      expect(screen.queryByText(/Mostly non-Rust source/)).toBeNull()
+    })
+
     it('fires when non-Rust code bytes are the majority of code on either side', () => {
       renderSelected(withInventories({ rust: 9000 }, { rust: 2000, typescript: 2001, json: 50000 }))
       expect(screen.getByText(/Mostly non-Rust source/)).toBeDefined()
