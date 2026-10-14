@@ -1114,6 +1114,16 @@ bank (`v14-1`: the v13-1 bank plus hyphen positives and negatives); it also
 catches a forbidden or distractor value written with those hyphens. V13 keeps
 the unfolded match.
 
+The rest of the v14 scorer reads the reply the same way. The claim-span
+provenance gate keeps the published `NormalizeSpan` unchanged; that normaliser
+keeps the ASCII `-` (so `VK-48HJXP6A63` tokenizes with a signed `-48`) while
+NFKC turns a completion's U+2011 into U+2010, a separator. So from v14
+`ClaimAlternatives` adds the U+2010 variant of every hyphenated claim form, and
+an honest completion that wrote U+2011 is not flagged
+`served_text_not_model_emitted`. The twin post-pass compares asserted answers
+and the result-usage check reads the reply after the same fold, so a hyphen
+variant cannot make two credited answers compare unequal.
+
 The generated surface, question-family identifiers, envelope, the rest of the
 grader policy, v13 gate postures, LongMem instrument, and public harness wire
 version (9) carry forward. V14 has its own seed rotation, epoch `2027-06-01T00:00:00Z`, and artifact
