@@ -1157,7 +1157,13 @@ async def _evaluate_and_record_outlier_escalation(
 
     The audit chain is public, so its entries carry only the neutral per-axis
     projection (:func:`public_audit_evidence`: axis name + outlier flag). The
-    full per-axis statistics live only on the private ``ath_reviews`` snapshot.
+    full per-axis statistics (value, cohort median/MAD, modified z) are kept
+    only on the private ``ath_reviews`` snapshot, which exists only when an
+    ``enforce`` hold opens. An ``observe`` would-be hold and every
+    ``OUTLIER_AXIS_EVIDENCE_KIND`` entry persist ``{axis, outlier}`` and
+    nothing more, so observe mode records which axes were out of band, not
+    their per-axis z distribution. To see the statistics before enforcing,
+    replay the ledger with the dry-run endpoint (``per_axis_enforce=true``).
     """
     if settings.mode == "off":
         return
