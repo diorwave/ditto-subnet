@@ -9,8 +9,8 @@ import "github.com/ditto-assistant/dittobench-datagen/protocol"
 // place phrase, and an action claim accepts its verb's -ing form. The bank
 // therefore carries the v13 strategies, cases, negatives, and limits
 // unchanged, plus reviewed positives for those honest forms and negatives
-// proving none of them can credit a distractor, a changed word, a past action,
-// or leak a forbidden value.
+// proving none of them can credit a distractor, a changed word, a past or
+// negated action, a scheduled removal, or leak a forbidden value.
 func AuditBankV14() AuditBank {
 	bank := AuditBankV13()
 	bank.Version = "v14-1"
@@ -60,4 +60,9 @@ var auditNegativesV14 = []AuditNegative{
 	{Name: "set-removal-place-phrase-unbounded", Case: packingList, Response: protocol.RunResponse{FinalText: "The list is now swim goggles, packed lunch, sunscreen and torch. PE kit has been removed from the list the school sent home."}},
 	{Name: "progressive-distractor-action", Case: pauseAction, Response: protocol.RunResponse{FinalText: "We are pausing it, or cancelling it."}},
 	{Name: "past-tense-action", Case: pauseAction, Response: protocol.RunResponse{FinalText: "We paused the gym membership."}},
+	{Name: "gerund-negation-avoid", Case: pauseAction, Response: protocol.RunResponse{FinalText: "I'd avoid pausing it."}},
+	{Name: "gerund-negation-decided-against", Case: pauseAction, Response: protocol.RunResponse{FinalText: "We decided against pausing it."}},
+	{Name: "gerund-negation-stopped", Case: pauseAction, Response: protocol.RunResponse{FinalText: "We stopped pausing it."}},
+	{Name: "gerund-negation-not-possible", Case: pauseAction, Response: protocol.RunResponse{FinalText: "Pausing isn't possible."}},
+	{Name: "set-removal-scheduled-day", Case: packingList, Response: protocol.RunResponse{FinalText: "The list is now swim goggles, packed lunch, sunscreen and torch. PE kit is removed on Friday."}},
 }

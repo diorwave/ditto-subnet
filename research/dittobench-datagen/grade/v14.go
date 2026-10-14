@@ -2,6 +2,7 @@ package grade
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -175,8 +176,23 @@ func countBoundedV14(text, phrase string) int {
 // ── Completed removal with a place phrase (setRemovalPlace) ─────────────────
 
 // removalPlacePrepositionsV14 open the place phrase that may follow completed
-// passive removal in a set-membership clause.
-var removalPlacePrepositionsV14 = map[string]bool{"from": true, "in": true, "on": true, "off": true}
+// passive removal in a set-membership clause. "on" is deliberately absent: it
+// almost always opens a date ("is removed on Friday" is a schedule, not a
+// completed removal), never the list the item left.
+var removalPlacePrepositionsV14 = map[string]bool{"from": true, "in": true, "off": true}
+
+// removalTimeWordsV14 mark a tail that names a time rather than a place
+// ("removed in March", "removed in two weeks"): a scheduled or dated removal
+// reads as a plan, which keeps the item a candidate.
+var removalTimeWordsV14 = map[string]bool{
+	"monday": true, "tuesday": true, "wednesday": true, "thursday": true, "friday": true, "saturday": true, "sunday": true,
+	"january": true, "february": true, "march": true, "april": true, "may": true, "june": true, "july": true,
+	"august": true, "september": true, "october": true, "november": true, "december": true,
+	"today": true, "tonight": true, "tomorrow": true, "yesterday": true, "morning": true, "afternoon": true,
+	"evening": true, "night": true, "weekend": true, "week": true, "weeks": true, "month": true, "months": true,
+	"year": true, "years": true, "day": true, "days": true, "hour": true, "hours": true, "minute": true,
+	"minutes": true, "moment": true, "time": true, "next": true, "later": true, "soon": true,
+}
 
 // maxRemovalPlaceWordsV14 bounds the words after the preposition ("from the
 // list", "from your packing list").
@@ -184,9 +200,10 @@ const maxRemovalPlaceWordsV14 = 3
 
 // removedThenPlaceV14 reports whether a set-membership clause (with the case's
 // semantic values masked) ends in completed passive removal followed only by a
-// short place phrase: a preposition and at most three plain words. A masked
-// value inside the phrase ("removed from <value>") does not qualify, and the
-// clause's trailing punctuation is ignored ("(PE kit has been removed)").
+// short place phrase: a preposition and at most three plain words, none naming
+// a time. A masked value inside the phrase ("removed from <value>") does not
+// qualify, and the clause's trailing punctuation is ignored ("(PE kit has
+// been removed)").
 func removedThenPlaceV14(context string) bool {
 	text := strings.TrimRight(context, " .,;:!)")
 	for _, suffix := range []string{" has been removed", " was removed", " is removed"} {
@@ -203,6 +220,9 @@ func removedThenPlaceV14(context string) bool {
 		}
 		plain := true
 		for _, w := range tail[1:] {
+			if removalTimeWordsV14[w] {
+				plain = false
+			}
 			for _, r := range w {
 				if !unicode.IsLetter(r) && r != '\'' {
 					plain = false
@@ -281,4 +301,38 @@ func progressiveVerbV14(w string) []string {
 		return []string{w + "ing", doubled}
 	}
 	return []string{w + "ing"}
+}
+
+// ── Gerund and post-posed negation of an action (progressiveActions) ────────
+
+// gerundNegationV14 are verbs and prepositions that take a gerund object and
+// negate it: "I'd avoid pausing it", "we decided against pausing it", "we
+// stopped pausing it". Accepting the -ing form of an action makes these
+// natural, so in an action claim each one rejects the reviewed value it
+// immediately governs. A verb followed by anything else ("stop the charges by
+// pausing it") rejects nothing.
+var gerundNegationV14 = foldedPhrasesV14(
+	"avoid", "avoids", "avoided", "avoiding", "against",
+	"stop", "stops", "stopped", "stopping", "quit", "quits", "quitting",
+)
+
+// postposedRejectionV14 are predicates that negate the value right before
+// them: "pausing isn't possible", "pausing it is not an option". In an action
+// claim they reject that value only; the rest of the clause keeps its status,
+// so "we'll cancel it because pausing isn't possible" still asserts cancel.
+var postposedRejectionV14 = foldedPhrasesV14(
+	"isn't possible", "isnt possible", "is not possible", "wasn't possible", "was not possible",
+	"not possible", "is impossible", "isn't an option", "is not an option",
+	"isn't allowed", "is not allowed",
+)
+
+// foldedPhrasesV14 folds phrases like the claim lexicon does and orders them
+// longest first, as matchPhraseAt expects.
+func foldedPhrasesV14(phrases ...string) []string {
+	out := make([]string, 0, len(phrases))
+	for _, p := range phrases {
+		out = append(out, foldV13(p))
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
 }

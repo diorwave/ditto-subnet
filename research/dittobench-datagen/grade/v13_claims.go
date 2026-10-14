@@ -69,6 +69,10 @@ type claimLexicon struct {
 	numberWords                   map[string]int
 	months                        map[string]int
 	minorUnit, majorUnit          []string
+	// v14 action claims: a gerund-taking negator immediately before a reviewed
+	// value ("avoid pausing it") and a post-posed negative predicate right after
+	// one ("pausing isn't possible") reject that value. Empty elsewhere.
+	gerundNegation, postposedRejection []string
 }
 
 var (
@@ -442,13 +446,46 @@ func segmentSentenceV13(sentence string, lex claimLexicon) []segment {
 			rejected = false
 		}
 	}
+	// valueStart is where the reviewed value that ends cur begins, or -1 when
+	// cur does not end in one (v14 post-posed rejection).
+	valueStart := -1
 	for i := 0; i < len(words); {
 		if n := matchPhraseAt(words, i, lex.protected); n > 0 {
+			valueStart = -1
+			if matchPhraseAt(words, i, lex.semanticValues) == n {
+				valueStart = len(cur)
+			}
 			cur = append(cur, words[i:i+n]...)
 			i += n
 			// Protect the semantic phrase, not punctuation following it. A
 			// historical explanation after "video meeting," is another clause.
 			finishChunk(words[i-1], i)
+			if len(cur) == 0 {
+				valueStart = -1
+			}
+			continue
+		}
+		if n := matchPhraseAt(words, i, lex.postposedRejection); n > 0 && valueStart >= 0 {
+			// "pausing isn't possible": the clause up to the value keeps its
+			// status; the value itself is rejected.
+			value := append([]string(nil), cur[valueStart:]...)
+			cur = cur[:valueStart]
+			flush()
+			rejected = true
+			cur = append(cur, value...)
+			cur = append(cur, words[i:i+n]...)
+			i += n
+			valueStart = -1
+			continue
+		}
+		valueStart = -1
+		if n := matchPhraseAt(words, i, lex.gerundNegation); n > 0 && !strings.ContainsAny(words[i+n-1], ",;:)") && matchPhraseAt(words, i+n, lex.semanticValues) > 0 {
+			// "avoid pausing it": the negator opens a rejected span over the
+			// value it governs, like a rejection connective.
+			flush()
+			rejected = true
+			cur = append(cur, words[i:i+n]...)
+			i += n
 			continue
 		}
 		if n := matchPhraseAt(words, i, lex.rejection); n > 0 {

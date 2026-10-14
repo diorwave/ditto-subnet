@@ -281,6 +281,27 @@ func TestReleaseGateCoversEverySupportedVersionAndPolicyFloor(t *testing.T) {
 	}
 }
 
+// TestSyntheticRobustnessV14BankIsClean runs the v14 bank under the v14
+// policy: every limit respected, every hard negative (including the #2734
+// gerund-negation and scheduled-removal negatives) at 0, every reviewed
+// positive at its floor.
+func TestSyntheticRobustnessV14BankIsClean(t *testing.T) {
+	bank := grade.AuditBankV14()
+	report, err := syntheticRobustnessAudit(protocol.BenchVersionV14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.BankVersion != bank.Version || report.BenchVersion != protocol.BenchVersionV14 {
+		t.Fatalf("wrong bank: %+v", report)
+	}
+	if !report.CoverageOK || !report.WithinLimits || report.NegativeFailures != 0 || report.ReviewedPositiveFailures != 0 || report.PositiveFailures != 0 {
+		t.Fatalf("v14 bank not clean: failed=%v report=%+v", report.FailedChecks, report)
+	}
+	if report.NegativeChecks != len(bank.Negatives) || report.ReviewedPositives != len(bank.Positives) {
+		t.Fatalf("v14 bank checks skipped: negatives=%d/%d positives=%d/%d", report.NegativeChecks, len(bank.Negatives), report.ReviewedPositives, len(bank.Positives))
+	}
+}
+
 // TestSyntheticRobustnessV13BankIsCleanAndCoversEveryKind runs the v13-1
 // bank under the v13 policy: full kind coverage, every limit respected, every
 // hard negative at 0, every reviewed positive at its floor.

@@ -37,6 +37,10 @@ func gradeClaimSetV13(mc protocol.MemoryCase, resp protocol.RunResponse, an anal
 			// action in the -ing form is caught the same way (#2734).
 			cm.AcceptAny = append(append([]string(nil), cm.AcceptAny...), progressiveFormsV14(append([]string{claim.Expected}, claim.Accept...))...)
 			cm.DistractorAnswers = append(append([]string(nil), cm.DistractorAnswers...), progressiveFormsV14(cm.DistractorAnswers)...)
+			// The -ing form makes gerund negation natural ("I'd avoid pausing
+			// it", "pausing isn't possible"), so the same claims read it.
+			claimLex.gerundNegation = gerundNegationV14
+			claimLex.postposedRejection = postposedRejectionV14
 		}
 		// Negation intrinsic to a reviewed semantic value ("do not agree",
 		// "not happening") is not rejection of that value. An outer "not"

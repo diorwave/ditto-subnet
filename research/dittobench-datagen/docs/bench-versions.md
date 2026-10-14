@@ -1139,16 +1139,27 @@ older grade byte-identically:
   break a known value that itself contains a hyphen.
 - **Set removal with a place phrase.** A set-membership clause ending in
   ` has been removed` / ` was removed` / ` is removed` followed only by a
-  preposition (`from`, `in`, `on`, `off`) and at most three plain words
+  preposition (`from`, `in`, `off`) and at most three plain words
   (`from the list`, `from it`, `from your packing list`) reads as removal, as
   does the bare form with trailing punctuation. A phrase that names a case
-  value, runs longer, or sits in a hedged clause does not, and an item
-  asserted in another clause is still asserted.
+  value, names a time (`is removed on Friday`, `in two weeks`; `on` is not a
+  place preposition at all), runs longer, or sits in a hedged clause does not:
+  a scheduled removal is a plan. An item asserted in another clause is still
+  asserted.
 - **Progressive action claims.** An `action` claim also accepts the -ing form
   of the first word of each accepted form (`pausing` for `pause`,
   `upgrading`, `stopping`, `canceling`/`cancelling`), and the case's
   distractors get the same forms so a progressive distractor is caught. Past
-  -ed forms stay misses.
+  -ed forms stay misses. Because the -ing form makes gerund negation
+  natural, an action claim also reads a gerund-taking negator (`avoid`,
+  `against`, `stop`, `quit` and their inflections) immediately before a
+  reviewed action value, and a post-posed predicate (`isn't possible`,
+  `is not an option`, `isn't allowed`) right after one, as rejecting that
+  value: `I'd avoid pausing it`, `we decided against pausing it`,
+  `we stopped pausing it` and `pausing isn't possible` are misses. The
+  negator must govern the value directly (`to stop the charges, we are
+  pausing it` still states the action), and the post-posed predicate rejects
+  only the value before it, not the rest of its clause.
 
 Audit bank `v14-1` carries reviewed positives and negatives for each.
 

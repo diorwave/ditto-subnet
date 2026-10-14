@@ -189,18 +189,35 @@ func TestV14SetRemovalWithPlacePhrase(t *testing.T) {
 		{"v14 place phrase names a value", protocol.BenchVersionV14, at("PE kit has been removed from sunscreen."), 0},
 		{"v14 not a place phrase", protocol.BenchVersionV14, at("PE kit is removed later today."), 0},
 		{"v14 hedged removal", protocol.BenchVersionV14, at("Maybe PE kit has been removed from the list."), 0},
+		// A dated or scheduled removal is a plan: the item stays a candidate.
+		{"v13 scheduled removal stays asserted", protocol.BenchVersionV13, at("PE kit is removed on Friday."), 0},
+		{"v14 scheduled removal on a day", protocol.BenchVersionV14, at("PE kit is removed on Friday."), 0},
+		{"v14 scheduled removal in a time span", protocol.BenchVersionV14, at("PE kit is removed in two weeks."), 0},
+		{"v14 scheduled removal next week", protocol.BenchVersionV14, at("PE kit has been removed from next week."), 0},
+		// "was" is v13's weak past marker, so a dated completed removal is
+		// excused by the v13 rule at both versions, not by the place phrase.
+		{"v13 dated past removal", protocol.BenchVersionV13, at("PE kit was removed on Monday."), 1},
+		{"v14 dated past removal", protocol.BenchVersionV14, at("PE kit was removed on Monday."), 1},
 	})
 }
 
 // TestRemovedThenPlace pins the clause rule directly.
 func TestRemovedThenPlace(t *testing.T) {
 	for in, want := range map[string]bool{
-		"pe kit has been removed":                      true,
-		"(pe kit has been removed)":                    true,
-		"pe kit has been removed from the list":        true,
-		"pe kit was removed from it.":                  true,
-		"pe kit is removed in the update":              true,
-		"pe kit was removed on monday":                 true,
+		"pe kit has been removed":               true,
+		"(pe kit has been removed)":             true,
+		"pe kit has been removed from the list": true,
+		"pe kit was removed from it.":           true,
+		"pe kit is removed in the update":       true,
+		// "on" opens a date, not the list the item left; a time-word tail is
+		// a schedule. A completed "was removed on monday" still grades as
+		// removal through v13's weak-past rule (TestV14SetRemovalWithPlacePhrase).
+		"pe kit was removed on monday":                 false,
+		"pe kit is removed on friday":                  false,
+		"pe kit is removed on the list":                false,
+		"pe kit was removed in march":                  false,
+		"pe kit is removed in two weeks":               false,
+		"pe kit has been removed from today":           false,
 		"pe kit has been removed from":                 false,
 		"pe kit has been removed by the school":        false,
 		"pe kit has been removed from a b c d":         false,
@@ -230,6 +247,28 @@ func TestV14ProgressiveActionClaims(t *testing.T) {
 		{"v14 past tense stays a miss", protocol.BenchVersionV14, say("We paused the gym membership."), 0},
 		{"v14 another verb's -ing form", protocol.BenchVersionV14, say("We are passing on the gym membership."), 0},
 		{"v14 progressive distractor is caught", protocol.BenchVersionV14, say("We are pausing it, or cancelling it."), 0},
+		// Gerund-object negation rejects the action it governs.
+		{"v13 avoid pausing", protocol.BenchVersionV13, say("I'd avoid pausing it."), 0},
+		{"v14 avoid pausing", protocol.BenchVersionV14, say("I'd avoid pausing it."), 0},
+		{"v14 decided against pausing", protocol.BenchVersionV14, say("We decided against pausing it."), 0},
+		{"v14 stopped pausing", protocol.BenchVersionV14, say("We stopped pausing it."), 0},
+		{"v14 pausing isn't possible", protocol.BenchVersionV14, say("Pausing isn't possible."), 0},
+		{"v14 pausing it is not an option", protocol.BenchVersionV14, say("Pausing it is not an option."), 0},
+		{"v14 avoid the base form", protocol.BenchVersionV14, say("I'd avoid pause it."), 0},
+		{"v14 base form isn't possible", protocol.BenchVersionV14, say("Pause isn't possible."), 0},
+		// The negator rejects only the value it governs.
+		{"v14 stop governs another object", protocol.BenchVersionV14, say("To stop the charges, we are pausing it."), 1},
+		{"v14 stop then a clause break", protocol.BenchVersionV14, say("We'll stop the gym, pausing it for now."), 1},
+		{"v14 avoid a distractor", protocol.BenchVersionV14, say("Let's avoid cancelling and pause it instead."), 1},
+		{"v14 decided against something else", protocol.BenchVersionV14, say("We decided against it and will pause it."), 1},
+	})
+	cancel := protocol.MemoryCase{AnswerKind: protocol.AnswerValue, ExpectedAnswer: "cancel it", DistractorAnswers: []string{"pause it"},
+		Claims: []protocol.Claim{{Kind: protocol.ClaimKindAction, Expected: "cancel it", Accept: []string{"cancel it", "cancel"}, Weight: 1}}}
+	checkVersionVectors(t, cancel, []versionVector{
+		// A post-posed predicate rejects the value right before it, not the
+		// rest of the clause.
+		{"v14 cancel because pausing isn't possible", protocol.BenchVersionV14, say("We'll cancel it because pausing isn't possible."), 1},
+		{"v14 asserted progressive distractor", protocol.BenchVersionV14, say("We'll cancel it, or we are pausing it."), 0},
 	})
 	upgrade := protocol.MemoryCase{AnswerKind: protocol.AnswerValue, ExpectedAnswer: "upgrade it",
 		Claims: []protocol.Claim{{Kind: protocol.ClaimKindAction, Expected: "upgrade it", Accept: []string{"upgrade it", "upgrade", "go up a tier"}, Weight: 1}}}
