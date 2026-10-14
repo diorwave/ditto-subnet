@@ -239,13 +239,21 @@ func SeedForVersion(parent context.Context, harnessURL string, req protocol.Seed
 }
 
 // seedDeadlineError types err as ErrSeedDeadlineExceeded when the /seed
-// call's own deadline is what stopped it: ctx expired while parent did not.
+// call's own deadline is what stopped it: ctx expired while parent did not,
+// and ctx's deadline is strictly earlier than parent's. With equal deadlines
+// WithTimeout arms a separate child timer that can fire before the parent's
+// sets parent.Err(), and that expiry belongs to the caller, not to /seed.
 // Any other transport failure is returned unchanged.
 func seedDeadlineError(parent, ctx context.Context, timeout time.Duration, err error) error {
-	if parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("%w after %s: %w", ErrSeedDeadlineExceeded, timeout, err)
+	if parent.Err() != nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
 	}
-	return err
+	if parentDeadline, ok := parent.Deadline(); ok {
+		if seedDeadline, _ := ctx.Deadline(); !seedDeadline.Before(parentDeadline) {
+			return err
+		}
+	}
+	return fmt.Errorf("%w after %s: %w", ErrSeedDeadlineExceeded, timeout, err)
 }
 
 // marshalSeedRequest keeps every historical request byte-identical while V9

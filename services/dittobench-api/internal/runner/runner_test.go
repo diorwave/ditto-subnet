@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -401,6 +402,34 @@ func TestSeedDeadlineIsTypedOnlyWhenTheSeedOwnDeadlineFires(t *testing.T) {
 			t.Fatalf("a non-deadline failure was typed as a seed deadline: %v", err)
 		}
 	})
+}
+
+// liveDeadlineContext reports a deadline without having expired yet: the
+// window in which a child sharing that deadline can fire first.
+type liveDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c liveDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestSeedDeadlineIsNotTypedWhenItMatchesTheCallerDeadline(t *testing.T) {
+	deadline := time.Now().Add(-time.Millisecond)
+	expired, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	cause := fmt.Errorf("post /seed: %w", context.DeadlineExceeded)
+
+	equal := liveDeadlineContext{Context: context.Background(), deadline: deadline}
+	if err := seedDeadlineError(equal, expired, time.Minute, cause); errors.Is(err, ErrSeedDeadlineExceeded) {
+		t.Fatalf("a caller deadline equal to the seed deadline was typed as the seed's: %v", err)
+	}
+	later := liveDeadlineContext{Context: context.Background(), deadline: deadline.Add(time.Second)}
+	if err := seedDeadlineError(later, expired, time.Minute, cause); !errors.Is(err, ErrSeedDeadlineExceeded) {
+		t.Fatalf("a seed deadline strictly before the caller's was not typed: %v", err)
+	}
+	if err := seedDeadlineError(context.Background(), expired, time.Minute, cause); !errors.Is(err, ErrSeedDeadlineExceeded) {
+		t.Fatalf("a caller without a deadline lost the seed classification: %v", err)
+	}
 }
 
 func TestRunCase(t *testing.T) {
