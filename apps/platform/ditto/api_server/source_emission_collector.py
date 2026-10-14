@@ -274,10 +274,12 @@ class SourceEmissionCollector:
                 )
         except Exception:
             logger.exception("source emission collector staleness read failed")
-            # Unknown, not healthy: a previous scrape's ``stalled=0`` must not
-            # keep being exported as current while the cursor is unreadable.
+            # Unknown, not healthy: no previous scrape's value (``stalled=0``,
+            # an old age or backlog) may keep being exported as current while
+            # the cursor is unreadable.
             SOURCE_EMISSION_COLLECTOR_STALLED.set(float("nan"))
             SOURCE_EMISSION_COLLECTOR_CURSOR_AGE_SECONDS.set(float("nan"))
+            SOURCE_EMISSION_COLLECTOR_BACKLOG_BLOCKS.set(float("nan"))
             return
         self._record_staleness(
             collector_staleness(

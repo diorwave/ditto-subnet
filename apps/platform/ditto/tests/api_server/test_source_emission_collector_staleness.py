@@ -244,7 +244,9 @@ async def test_staleness_read_failure_never_breaks_the_loop(
         cursor_block=1,
         runtime_code_hash=None,
     )
+    collector._record_backlog(finalized=6_812_000, current=6_800_000)
     assert _stalled_gauge() == 0
+    assert _backlog_gauge() == 12_000
     await _sweep_once(collector, None)
     assert any(
         r.getMessage() == "source emission collector staleness read failed"
@@ -253,6 +255,7 @@ async def test_staleness_read_failure_never_breaks_the_loop(
     # Unknown, not healthy: the previous stalled=0 must not survive the outage.
     assert math.isnan(_stalled_gauge() or 0.0)
     assert math.isnan(_age_gauge() or 0.0)
+    assert math.isnan(_backlog_gauge() or 0.0)
 
 
 def test_backlog_is_unknown_until_measured_and_after_it_goes_stale() -> None:
