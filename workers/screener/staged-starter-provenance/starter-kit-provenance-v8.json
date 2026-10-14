@@ -9,7 +9,7 @@
     "Cargo.toml": "8ca23cba81af784f738594962d8ee2cab5f1e8c7be359339501b969d04c882ac",
     "Dockerfile": "d3a1a2a1e5d43b0465c28712457d95432942ac8f017fd10d538859a901a54641",
     "LICENSE": "31930afa24e664ca57a2fa3e6ab4cea9307c55a8f9e6c0c9818340ea3181eac1",
-    "PROTOCOL.md": "7da06bfb43796b9e6ae14635a00561f02c3bd1b7e88b15115e38c1bd079111a3",
+    "PROTOCOL.md": "5352b64acab76ec3499a3a10fb2a52310181a1114db373460812ee637627a585",
     "README.md": "680429c88e7d02688c2bc273e96a02575b1a7d8f10d395164430bfc31c79e1d8",
     "SETUP.md": "16fa641d6ee6bc41cf30b6a8a9ca5d59f40d29b370c43b233bfc77028ed8bb57",
     "UPSTREAM.md": "be89588e1f1182b888dfee48a55806a343067bcb1c43243ceccaa81381d21392",
@@ -51,6 +51,6 @@
     "tests/store_concurrency.rs": "7cf956ffa08d2632ecb400f1f5aa7580df6e684fa831861beca8ba947c8578cd"
   },
   "origin": "ditto-assistant/ditto-subnet/miners/dittobench-starter-kit",
-  "revision": "4c339faedf79081db1a2dca8a65464bbbccd77a1",
+  "revision": "5b5faf23d29be0937d3e50f9f2fee4a9b97f7c8b",
   "version": 1
 }
