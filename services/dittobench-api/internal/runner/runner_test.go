@@ -349,6 +349,60 @@ func TestSeedStoreLockTimeoutIsTypedOnlyForExact503Contract(t *testing.T) {
 	}
 }
 
+func TestSeedDeadlineIsTypedOnlyWhenTheSeedOwnDeadlineFires(t *testing.T) {
+	previousBase, previousV7 := seedTimeout, v7SeedTimeout
+	seedTimeout, v7SeedTimeout = 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { seedTimeout, v7SeedTimeout = previousBase, previousV7 })
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	t.Run("own deadline", func(t *testing.T) {
+		_, err := SeedForVersion(sandboxContext(), srv.URL, protocol.SeedRequest{}, 13)
+		if !errors.Is(err, ErrSeedDeadlineExceeded) {
+			t.Fatalf("errors.Is(seed deadline) = false: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("typed error dropped the transport cause: %v", err)
+		}
+	})
+	t.Run("caller cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(sandboxContext())
+		time.AfterFunc(10*time.Millisecond, cancel)
+		_, err := SeedForVersion(ctx, srv.URL, protocol.SeedRequest{}, 13)
+		if err == nil || errors.Is(err, ErrSeedDeadlineExceeded) {
+			t.Fatalf("a cancelled run was typed as a seed deadline: %v", err)
+		}
+	})
+	t.Run("outer deadline first", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(sandboxContext(), 10*time.Millisecond)
+		defer cancel()
+		_, err := SeedForVersion(ctx, srv.URL, protocol.SeedRequest{}, 13)
+		if err == nil || errors.Is(err, ErrSeedDeadlineExceeded) {
+			t.Fatalf("an outer run deadline was typed as a seed deadline: %v", err)
+		}
+	})
+	t.Run("ordinary failure", func(t *testing.T) {
+		failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer failing.Close()
+		_, err := SeedForVersion(sandboxContext(), failing.URL, protocol.SeedRequest{}, 13)
+		if err == nil || errors.Is(err, ErrSeedDeadlineExceeded) {
+			t.Fatalf("a non-deadline failure was typed as a seed deadline: %v", err)
+		}
+	})
+}
+
 func TestRunCase(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req protocol.RunRequest

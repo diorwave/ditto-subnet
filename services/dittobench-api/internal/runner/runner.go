@@ -59,6 +59,12 @@ var ErrSeedStoreLockTimeout = errors.New("seed store lock timeout")
 
 const seedStoreLockTimeoutMessage = "seed exceeded 600s, aborted to release the store lock"
 
+// ErrSeedDeadlineExceeded marks a /seed call that ran out its own
+// seedTimeoutFor deadline while the caller's context was still live. It is
+// typed here, where the deadline is owned, so a run cancellation or an outer
+// run cap expiring mid-seed can never be mistaken for it.
+var ErrSeedDeadlineExceeded = errors.New("seed deadline exceeded")
+
 // envDuration reads a Go duration from key, returning def when unset, empty,
 // unparseable, or non-positive.
 func envDuration(key string, def time.Duration) time.Duration {
@@ -189,8 +195,9 @@ func Seed(ctx context.Context, harnessURL string, req protocol.SeedRequest) (pro
 // SeedForVersion is Seed with the bench version's deadline envelope. The wire
 // bytes are identical to Seed for every version — only the client-side timeout
 // differs (v7 haystacks are much larger).
-func SeedForVersion(ctx context.Context, harnessURL string, req protocol.SeedRequest, benchVersion int) (protocol.SeedResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, seedTimeoutFor(benchVersion))
+func SeedForVersion(parent context.Context, harnessURL string, req protocol.SeedRequest, benchVersion int) (protocol.SeedResponse, error) {
+	timeout := seedTimeoutFor(benchVersion)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	buf, err := marshalSeedRequest(req, benchVersion)
@@ -205,13 +212,13 @@ func SeedForVersion(ctx context.Context, harnessURL string, req protocol.SeedReq
 
 	httpResp, err := clientFor(ctx).Do(httpReq)
 	if err != nil {
-		return protocol.SeedResponse{}, fmt.Errorf("post /seed: %w", err)
+		return protocol.SeedResponse{}, seedDeadlineError(parent, ctx, timeout, fmt.Errorf("post /seed: %w", err))
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 	if err != nil {
-		return protocol.SeedResponse{}, fmt.Errorf("read /seed body: %w", err)
+		return protocol.SeedResponse{}, seedDeadlineError(parent, ctx, timeout, fmt.Errorf("read /seed body: %w", err))
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		var payload struct {
@@ -229,6 +236,16 @@ func SeedForVersion(ctx context.Context, harnessURL string, req protocol.SeedReq
 		return protocol.SeedResponse{}, fmt.Errorf("decode /seed response: %w", err)
 	}
 	return out, nil
+}
+
+// seedDeadlineError types err as ErrSeedDeadlineExceeded when the /seed
+// call's own deadline is what stopped it: ctx expired while parent did not.
+// Any other transport failure is returned unchanged.
+func seedDeadlineError(parent, ctx context.Context, timeout time.Duration, err error) error {
+	if parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w after %s: %w", ErrSeedDeadlineExceeded, timeout, err)
+	}
+	return err
 }
 
 // marshalSeedRequest keeps every historical request byte-identical while V9
