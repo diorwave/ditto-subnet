@@ -84,6 +84,13 @@ class _Fingerprint:
     attribute affirmatively restricts to the test build (``#[test]``,
     ``#[cfg(test)]``) before matching, for tells whose honest look-alike is the
     same text parked in a test-only helper that ``/run`` never reaches.
+
+    ``suppressor_role`` measures suppressors from that role's matched line,
+    within ``suppressor_window`` lines, instead of from the anchor: the honest
+    look-alike of a wide-window shape can be a check on one particular line
+    (a content test beside a length branch). ``file_roles`` names roles that
+    may match anywhere in the file, for a shape whose consumer is routinely
+    refactored into a separate helper of the same module.
     """
 
     kind: str
@@ -95,6 +102,9 @@ class _Fingerprint:
     languages: frozenset[str] = frozenset()
     min_hits: int = 1
     skip_test_items: bool = False
+    suppressor_role: str | None = None
+    suppressor_window: int = 0
+    file_roles: frozenset[str] = frozenset()
 
 
 def _words(value: str) -> re.Pattern[str]:
@@ -1932,6 +1942,183 @@ _EMULATION_FINGERPRINTS = (
         ),
         scan="raw",
     ),
+    _Fingerprint(
+        # generator-construction-admission (ATH sweep 2026-10-15..18): a comment
+        # or docstring saying the code was fitted to how the benchmark generator
+        # builds its data -- typo-tolerant cues because "the records are
+        # generated with deliberate typos", router examples "generated locally
+        # with the public dataset generator", or a quoted v13 record sentence
+        # ("X used to work at Org"). Probe-tuning admissions stay with
+        # self-reported-benchmark-fitting. The admission is a reason to read
+        # the path, never the charge. The public starter kits describe the
+        # benchmark only in READMEs, which are not scanned, and their source
+        # wording ("the local generator emits", "dataset generation") is not
+        # matched.
+        kind="generator-construction-admission",
+        severity="medium",
+        roles=(
+            _Role(
+                "generator-construction-admission",
+                re.compile(
+                    r"\bgenerated with (?:deliberate |intentional |injected )?typos\b"
+                    r"|\b(?:public |local |benchmark )?dataset generator\b"
+                    r"|\bpractice exams? generated\b"
+                    r"|\brecords are (?:all )?generated\b"
+                    r"|\bthe (?:benchmark |bench |dataset )?generator(?:'s)?"
+                    r" (?:renders|writes|stamps|permutes)\b"
+                    r"|\bgenerator(?:'s)? (?:own )?record sentences\b"
+                    # A comment quoting a v13 record sentence template.
+                    r"|(?:#|//|/\*|^\s*\*)[^\n]*[\"'`\u201c][^\"'`\u201d\n]{0,60}"
+                    r"\b(?:used to work at|back when they were at"
+                    r"|the new work email is|the work email I had saved"
+                    r"|ownership of [^\"'`\u201d\n]{1,40} moved to)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        scan="raw",
+    ),
+    # Policy-v13 I3/I2 shapes confirmed by L2/L3 on one sibling after the
+    # screener passed the same mechanism on another (ATH sweep 2026-10-15..18).
+    _Fingerprint(
+        # length-cut-draft-fallback (I3): with deliberation on, the first reply
+        # is held as draft 1 and the served output cleared; when the deciding
+        # reply ends with finish_reason "length" the host breaks out without
+        # reading its content and serves draft 1. A nonempty deciding reply,
+        # ANSWER line included, is discarded on length metadata alone. The
+        # cleared sibling keeps the deciding reply whenever it has content and
+        # retries only an empty one, so a content test within a few lines of
+        # the length branch drops the lead. A fallback taken only when the
+        # deciding reply is empty is the permitted look-alike.
+        kind="length-cut-draft-fallback",
+        severity="medium",
+        roles=(
+            _Role(
+                "length-finish-branch",
+                re.compile(
+                    r"(?i:finish[_ ]?reason|stop[_ ]?reason)[^\n]{0,60}"
+                    r"(?:===?|\bis\b|Some\(|\bin\s*[(\[{])\s*[\"'](?:length|max_tokens)[\"']"
+                    r"|[\"'](?:length|max_tokens)[\"']\s*===?[^\n]{0,30}"
+                    r"(?i:finish[_ ]?reason|stop[_ ]?reason)"
+                    r"|\bFinishReason::Length\b"
+                ),
+            ),
+            _Role(
+                "earlier-draft-holder",
+                re.compile(
+                    r"\b(?:self\.)?(?:draft\w*|first_(?:reply|answer|draft|output)\w*"
+                    r"|initial_(?:reply|draft)\w*)\s*(?::[^=\n]{1,40})?=(?!=)"
+                    r"|\b\w*drafts\s*\.\s*(?:append|push|insert)\s*\("
+                    r"|\b\w*drafts\s*(?::[^=\n]{1,40})?=\s*(?:\[|vec!\[)\s*\w",
+                    re.IGNORECASE,
+                ),
+            ),
+            _Role(
+                "served-output-cleared",
+                re.compile(
+                    r"\b\w*(?:output|served|answer|final_text)\w*\s*=\s*"
+                    r"(?:\"\"|''|String::new\(\)|None|null|nil|undefined)\s*;?\s*$"
+                    r"|\b\w*(?:output|served)\w*\s*\.\s*clear\(\)"
+                    r"|mem::(?:take|replace)\(\s*&mut\s+(?:self\.)?\w*(?:output|served)",
+                ),
+            ),
+            _Role(
+                "draft-served-fallback",
+                re.compile(
+                    r"\b(?!draft)\w*(?:output|served|answer|final_text|reply_text)\w*"
+                    r"\s*(?:\+?=(?!=)|\.push_str\(|\.extend\()\s*&?\s*(?:Some\()?"
+                    r"(?:self\.)?(?:draft\w*|first_(?:reply|answer|draft|output)\w*"
+                    r"|initial_(?:reply|draft)\w*|\w*drafts\s*(?:\[\s*0\s*\]"
+                    r"|\.(?:first|remove|pop|swap_remove)\w*\())"
+                    r"|\.(?:unwrap_or|unwrap_or_else|or)\(\s*(?:\|\|\s*)?&?"
+                    r"(?:draft\w*|first_(?:reply|answer|draft)\w*)"
+                    r"|\bor\s+(?:draft\w*|first_(?:reply|answer|draft)\w*)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        window=60,
+        suppressors=(
+            _Role(
+                "deciding-content-checked",
+                re.compile(
+                    r"\b\w*(?:content|text|message|body|reply)\w*"
+                    r"(?:\.\w+\([^()\n]*\))*\.(?:is_empty|isEmpty|is_blank)\(\)"
+                    r"|\bnot\s+(?:[\w\]\[\"']+\.)*\w*(?:content|text|message|body|reply)\w*\b"
+                    r"|!\s*(?:\w+\.)*\w*(?:content|text|message|body|reply)\w*\b(?!\s*=)"
+                    r"|\blen\(\s*(?:\w+\.)*\w*(?:content|text|message|body|reply)\w*"
+                    r"|\b\w*(?:content|text|message|body|reply)\w*(?:\.\w+\(\))?"
+                    r"\s*(?:===?|!==?)\s*(?:\"\"|''|None|null|nil)"
+                    r"|\bif\s*\(?\s*(?:\w+\.)*\w*(?:content|text)\w*(?:\.(?:strip|trim)\(\))?"
+                    r"\s*(?:\)|:|\{|&&|\|\||and\b|or\b)"
+                    r"|\bhas_(?:content|answer)\w*\b|\banswer_line\w*\(",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        suppressor_role="length-finish-branch",
+        suppressor_window=4,
+    ),
+    _Fingerprint(
+        # prompt-only-record-dedupe (I2): records sharing a request identifier
+        # are walked oldest first and a seen-set keyed on a normalized form of
+        # the record's PROMPT keeps the first one, while the rendered record
+        # also carries the stored response. A later record with the same prompt
+        # and a different response never reaches the deciding model. The
+        # rejected sibling had the loop in a helper, the passed one inline, so
+        # the response render counts anywhere in the file. A key that includes
+        # the response or a record id, and retrieval that keeps every selected
+        # record, stay silent.
+        kind="prompt-only-record-dedupe",
+        severity="medium",
+        roles=(
+            _Role(
+                "prompt-derived-key",
+                re.compile(
+                    # Not a key that also carries the response or a record id.
+                    r"^(?![^\n]*(?:\.|\[\s*[\"']|get\(\s*[\"'])"
+                    r"(?:response|assistant\w*|reply|answer|id|\w+_id|uuid)\b)"
+                    r"(?=[^\n]*(?:\.|\[\s*[\"']|get\(\s*[\"'])"
+                    r"(?:prompt|question|user_prompt|user_message)\b)"
+                    r"(?:[^\n]*\b(?:\w*_key|key|k|norm\w*|\w*fingerprint)\s*"
+                    r"(?::[^=\n]{1,40}|:)?(?<![=!<>])=(?!=)(?!\s*lambda\b)"
+                    r"|[^\n]*\b\w*seen\w*\s*\.\s*(?:add|insert|contains|has|"
+                    r"contains_key|get)\s*\("
+                    r"|[^\n]*(?::?=\s*|\bif\s+!?)\w*seen\w*\["
+                    r"|[^\n]*\b\w*seen\w*\[[^\]\n]+\]\s*=(?!=)"
+                    r"|[^\n]*\bin\s+(?:self\.)?\w*seen\w*\b"
+                    r"|[^\n]*\b(?:dedup_by_key|dedup_by|unique_by|uniqBy|distinctBy|"
+                    r"drop_duplicates)\b"
+                    r"|[^\n]*\{[^\n]*:\s*\w+\s+for\b)",
+                    re.IGNORECASE,
+                ),
+            ),
+            _Role(
+                "seen-drop",
+                re.compile(
+                    r"\bin\s+(?:self\.)?\w*seen\w*\b"
+                    r"|\b\w*seen\w*\s*\.\s*(?:add|insert|contains|has|contains_key)\s*\("
+                    # A map lookup or mark, not a counter (`seen[k]++`).
+                    r"|(?::?=\s*|\bif\s+!?)\w*seen\w*\["
+                    r"|\b\w*seen\w*\[[^\]\n]+\]\s*=(?!=)"
+                    r"|\b(?:dedup_by_key|dedup_by|unique_by|uniqBy|distinctBy|"
+                    r"drop_duplicates)\b"
+                    r"|\{[^\n]*(?:\.|\[\s*[\"'])(?:prompt|question)\b[^\n]*:\s*\w+\s+for\b",
+                    re.IGNORECASE,
+                ),
+            ),
+            _Role(
+                "response-rendered",
+                re.compile(
+                    r"(?:\.|\[\s*[\"']|get\(\s*[\"'])"
+                    r"(?:response|assistant_response|assistant_reply)\b",
+                    re.IGNORECASE,
+                ),
+            ),
+        ),
+        window=12,
+        file_roles=frozenset({"response-rendered"}),
+    ),
 )
 
 
@@ -2264,12 +2451,20 @@ def _cooccurrence_fingerprint(
                 role_hits[role.name],
                 key=lambda line: (abs(line - anchor), line),
             )
-            if abs(nearby - anchor) > fingerprint.window:
+            if (
+                role.name not in fingerprint.file_roles
+                and abs(nearby - anchor) > fingerprint.window
+            ):
                 break
             signature.append((role.name, nearby))
             locations.append({"path": path, "line": nearby, "role": role.name})
         else:
-            if any(abs(hit - anchor) <= fingerprint.window for hit in suppressor_hits):
+            if fingerprint.suppressor_role is None:
+                center, reach = anchor, fingerprint.window
+            else:
+                center = dict(signature)[fingerprint.suppressor_role]
+                reach = fingerprint.suppressor_window
+            if any(abs(hit - center) <= reach for hit in suppressor_hits):
                 continue
             normalized = tuple(signature)
             if normalized in seen:

@@ -4301,6 +4301,9 @@ def test_written_policy_makes_policy_v10_invariants_implementable() -> None:
         "tool-argument-grammar-sheet",
         "review-turn-argument-template",
         "self-reported-benchmark-fitting",
+        "length-cut-draft-fallback",
+        "prompt-only-record-dedupe",
+        "generator-construction-admission",
     }
 
     assert all(fragment in policy for fragment in required)

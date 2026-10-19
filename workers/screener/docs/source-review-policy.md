@@ -568,6 +568,41 @@ keyed on name plus canonical arguments, a model-authorized repeat (Thief v24,
 lets_636, lets_637), an unsure route that keeps the complete catalog, and plain
 field documentation. Each hit is a location for the reviewer, not a reject.
 
+The 2026-10-15 to 10-18 ATH board sweeps found shapes that L2/L3 confirmed on
+one sibling version after the screener had passed the same mechanism on an
+earlier one. Three more leads automate them:
+
+- `length-cut-draft-fallback` (medium, I3) fires when a `finish_reason ==
+  "length"` branch, an earlier-draft holder (`draft_1`, `first_reply`, a
+  `drafts` push), a cleared served output (`output = ""`, `mem::take`), and a
+  served-text writer that assigns the draft (`output = draft_1`) co-occur
+  within sixty lines. Discarding a nonempty deciding reply, ANSWER line
+  included, on length metadata alone is the I3 shape. A test of the deciding
+  reply's content within four lines of the length branch drops the lead: a
+  fallback taken only when the deciding reply is empty, or a reply kept
+  whenever it has content, is permitted.
+- `prompt-only-record-dedupe` (medium, I2) fires when a seen-set or map key
+  computed from a record's prompt or question field drops later records
+  within twelve lines, and the same file renders the record's response field.
+  A later record with the same prompt and a different response never reaches
+  the deciding model. The render may sit anywhere in the file, so the inline
+  loop and its helper refactor both fire. A key that includes the response or
+  a record id, a counter, and retrieval that keeps every selected record stay
+  silent.
+- `generator-construction-admission` (medium) fires on a comment or string
+  saying the code was fitted to how the benchmark generator builds its data:
+  "generated with deliberate typos", "records are generated", "practice exams
+  generated", "dataset generator", "the generator renders/writes/stamps/
+  permutes", or a comment quoting a v13 record sentence ("X used to work at
+  Org", "Back when they were at Org"). It is the generator-side sibling of
+  `self-reported-benchmark-fitting`. The public starter kits describe the
+  benchmark in READMEs, which are not scanned, and their source wording does
+  not match.
+
+An admission is a reason to read the path, not a finding: trace the cited cue,
+example file, or quoted sentence to the served `/run` decision before citing
+I5 or I8.
+
 Live schema-driven retrieval/reranking, runtime-described semantics, generic
 state reconstruction, and bounded shape-only correction remain allowed through
 their published pass clauses. Prompt specialization and tool routing do not
