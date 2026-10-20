@@ -8,6 +8,8 @@ never leave the archive through this module.
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
@@ -1989,9 +1991,9 @@ _EMULATION_FINGERPRINTS = (
         # reading its content and serves draft 1. A nonempty deciding reply,
         # ANSWER line included, is discarded on length metadata alone. The
         # cleared sibling keeps the deciding reply whenever it has content and
-        # retries only an empty one, so a content test within a few lines of
-        # the length branch drops the lead. A fallback taken only when the
-        # deciding reply is empty is the permitted look-alike.
+        # retries only an empty one. Only a structurally bound empty-content
+        # guard or a preceding content-preserving exit drops the lead; nearby
+        # prose and unrelated content tests cannot establish that guard.
         kind="length-cut-draft-fallback",
         severity="medium",
         roles=(
@@ -2040,26 +2042,6 @@ _EMULATION_FINGERPRINTS = (
             ),
         ),
         window=60,
-        suppressors=(
-            _Role(
-                "deciding-content-checked",
-                re.compile(
-                    r"\b\w*(?:content|text|message|body|reply)\w*"
-                    r"(?:\.\w+\([^()\n]*\))*\.(?:is_empty|isEmpty|is_blank)\(\)"
-                    r"|\bnot\s+(?:[\w\]\[\"']+\.)*\w*(?:content|text|message|body|reply)\w*\b"
-                    r"|!\s*(?:\w+\.)*\w*(?:content|text|message|body|reply)\w*\b(?!\s*=)"
-                    r"|\blen\(\s*(?:\w+\.)*\w*(?:content|text|message|body|reply)\w*"
-                    r"|\b\w*(?:content|text|message|body|reply)\w*(?:\.\w+\(\))?"
-                    r"\s*(?:===?|!==?)\s*(?:\"\"|''|None|null|nil)"
-                    r"|\bif\s*\(?\s*(?:\w+\.)*\w*(?:content|text)\w*(?:\.(?:strip|trim)\(\))?"
-                    r"\s*(?:\)|:|\{|&&|\|\||and\b|or\b)"
-                    r"|\bhas_(?:content|answer)\w*\b|\banswer_line\w*\(",
-                    re.IGNORECASE,
-                ),
-            ),
-        ),
-        suppressor_role="length-finish-branch",
-        suppressor_window=4,
     ),
     _Fingerprint(
         # prompt-only-record-dedupe (I2): records sharing a request identifier
@@ -2489,6 +2471,12 @@ def _cooccurrence_fingerprint(
     scan_lines: list[str],
     raw_lines: list[str],
 ) -> list[dict[str, object]]:
+    tree = None
+    if fingerprint.kind == "prompt-only-record-dedupe" and path.endswith(
+        (".py", ".pyi")
+    ):
+        with contextlib.suppress(SyntaxError, ValueError, RecursionError):
+            tree = ast.parse("\n".join(scan_lines))
     role_hits = {
         role.name: [
             line_number
@@ -2514,8 +2502,22 @@ def _cooccurrence_fingerprint(
         locations: list[dict[str, object]] = []
         signature: list[tuple[str, int]] = []
         for role in fingerprint.roles:
+            candidates = role_hits[role.name]
+            if (
+                fingerprint.kind == "prompt-only-record-dedupe"
+                and role.name == "response-rendered"
+            ):
+                candidates = [
+                    line
+                    for line in candidates
+                    if _dedupe_response_related(
+                        path, scan_lines, dict(signature), line, tree
+                    )
+                ]
+                if not candidates:
+                    break
             nearby = min(
-                role_hits[role.name],
+                candidates,
                 key=lambda line: (abs(line - anchor), line),
             )
             if (
@@ -2533,6 +2535,11 @@ def _cooccurrence_fingerprint(
                 reach = fingerprint.suppressor_window
             if any(abs(hit - center) <= reach for hit in suppressor_hits):
                 continue
+            if (
+                fingerprint.kind == "length-cut-draft-fallback"
+                and _length_content_guard(path, scan_lines, dict(signature))
+            ):
+                continue
             normalized = tuple(signature)
             if normalized in seen:
                 continue
@@ -2541,6 +2548,221 @@ def _cooccurrence_fingerprint(
             if len(seen) >= _MAX_FINGERPRINT_PER_RULE_FILE:
                 break
     return findings
+
+
+def _dedupe_response_related(
+    path: str,
+    lines: list[str],
+    roles: dict[str, int],
+    response: int,
+    tree: ast.Module | None,
+) -> bool:
+    """Require one record scope, or an explicit dedupe-helper consumer.
+
+    This is still a routing heuristic, not a claim that a render is reachable.
+    In particular, a random response access elsewhere in a file is no longer
+    enough to complete the three-role fingerprint.
+    """
+    key = roles["prompt-derived-key"]
+    seen = roles["seen-drop"]
+    receiver = r"\b(\w+)\s*(?:\.|\[\s*[\"']|\.get\(\s*[\"'])"
+    prompt = re.search(
+        receiver + r"(?:prompt|question|user_prompt|user_message)\b",
+        lines[key - 1],
+        re.I,
+    )
+    reply = re.search(
+        receiver + r"(?:response|assistant_response|assistant_reply)\b",
+        lines[response - 1],
+        re.I,
+    )
+    if prompt is None or reply is None:
+        return False
+    if path.endswith((".py", ".pyi")):
+        if tree is None:
+            return False
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+
+        def owner(line: int):
+            return min(
+                (
+                    node
+                    for node in functions
+                    if node.lineno <= line <= (node.end_lineno or node.lineno)
+                ),
+                key=lambda node: (node.end_lineno or node.lineno) - node.lineno,
+                default=None,
+            )
+
+        producer, consumer = owner(key), owner(response)
+        if producer is None or consumer is None or owner(seen) is not producer:
+            return False
+        if producer is consumer:
+            return prompt[1] == reply[1]
+        # A remote render must actually iterate the helper's return value and
+        # read the response from that iteration variable (for or comprehension).
+        for node in ast.walk(consumer):
+            iterators: Iterable[ast.comprehension | ast.For]
+            if isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
+                iterators = node.generators
+            elif isinstance(node, ast.For):
+                iterators = [node]
+            else:
+                continue
+            if not node.lineno <= response <= (node.end_lineno or node.lineno):
+                continue
+            if any(
+                isinstance(item.target, ast.Name)
+                and item.target.id == reply[1]
+                and isinstance(item.iter, ast.Call)
+                and isinstance(item.iter.func, ast.Name)
+                and item.iter.func.id == producer.name
+                for item in iterators
+            ):
+                return True
+        return False
+    if prompt[1] != reply[1]:
+        return False
+    # Brace languages: all three roles must share one loop body. Use the
+    # literal-masked view so braces in prompts cannot invent a common scope.
+    executable = mask_effect_literals("\n".join(lines), path).splitlines()
+    stack: list[int] = []
+    loop_scopes: dict[int, tuple[int, ...]] = {}
+    for number, line in enumerate(executable, 1):
+        for char in line:
+            if char == "{":
+                stack.append(number)
+            elif char == "}" and stack:
+                stack.pop()
+        if number in (key, seen, response):
+            loop_scopes[number] = tuple(
+                start for start in stack if re.search(r"\bfor\b", executable[start - 1])
+            )
+    return bool(
+        set(loop_scopes.get(key, ()))
+        & set(loop_scopes.get(seen, ()))
+        & set(loop_scopes.get(response, ()))
+    )
+
+
+def _reply_content(node: ast.expr, receiver: str) -> bool:
+    """Recognize only direct content and its inert empty-string normalization."""
+    if isinstance(node, ast.Attribute):
+        return (
+            node.attr == "content"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == receiver
+        )
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+        return (
+            len(node.values) == 2
+            and _reply_content(node.values[0], receiver)
+            and isinstance(node.values[1], ast.Constant)
+            and node.values[1].value == ""
+        )
+    return (
+        isinstance(node, ast.Call)
+        and not node.args
+        and not node.keywords
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "strip"
+        and _reply_content(node.func.value, receiver)
+    )
+
+
+def _length_content_guard(path: str, lines: list[str], roles: dict[str, int]) -> bool:
+    """Narrow proven look-alikes, never an arbitrary nearby content mention.
+
+    Unrecognized syntax keeps the routing lead for human review. This is not
+    a general control-flow proof or a policy verdict.
+    """
+    branch = roles["length-finish-branch"]
+    receiver_match = re.search(r"\b(\w+)\.finish_reason\b", lines[branch - 1])
+    if receiver_match is None:
+        return False
+    receiver = receiver_match[1]
+    if path.endswith((".py", ".pyi")):
+        try:
+            tree = ast.parse("\n".join(lines))
+        except (SyntaxError, ValueError, RecursionError):
+            return False
+        for parent in ast.walk(tree):
+            for _field, children in ast.iter_fields(parent):
+                if not isinstance(children, list):
+                    continue
+                for index, node in enumerate(children):
+                    if not isinstance(node, ast.If) or node.lineno != branch:
+                        continue
+                    # The *entire* length branch is gated by this reply being
+                    # empty. An inner guard on only continue does not qualify.
+                    if (
+                        isinstance(node.test, ast.BoolOp)
+                        and isinstance(node.test.op, ast.And)
+                        and any(
+                            isinstance(term, ast.UnaryOp)
+                            and isinstance(term.op, ast.Not)
+                            and _reply_content(term.operand, receiver)
+                            for term in node.test.values
+                        )
+                    ):
+                        return True
+                    if index < 2:
+                        continue
+                    assignment, keep = children[index - 2 : index]
+                    if not (
+                        isinstance(assignment, ast.Assign)
+                        and len(assignment.targets) == 1
+                        and isinstance(assignment.targets[0], ast.Name)
+                        and _reply_content(assignment.value, receiver)
+                        and isinstance(keep, ast.If)
+                        and not keep.orelse
+                        and isinstance(keep.test, ast.Name)
+                        and keep.test.id == assignment.targets[0].id
+                        and len(keep.body) == 2
+                        and isinstance(keep.body[0], ast.Assign)
+                        and isinstance(keep.body[0].value, ast.Name)
+                        and keep.body[0].value.id == keep.test.id
+                        and isinstance(keep.body[1], ast.Break)
+                    ):
+                        continue
+                    # It must preserve the served output, not merely log or
+                    # assign an unrelated variable before breaking.
+                    output = re.match(
+                        r"\s*(\w+)\s*=", lines[roles["served-output-cleared"] - 1]
+                    )
+                    if output and any(
+                        isinstance(target, ast.Name) and target.id == output[1]
+                        for target in keep.body[0].targets
+                    ):
+                        return True
+        return False
+    if not path.endswith(".rs"):
+        return False
+    # Rust: only a conjunction on the outer length if qualifies. A check in
+    # its body can guard a retry while leaving an unconditional discard below.
+    executable = mask_effect_literals("\n".join(lines), path).splitlines()
+    condition = executable[branch - 1].strip()
+    if (
+        not condition.startswith("if ")
+        or not condition.endswith("{")
+        or "||" in condition
+    ):
+        return False
+    direct = rf"{re.escape(receiver)}\.message\.content(?:\.\w+\(\))*"
+    aliases = [direct]
+    for prior in executable[max(0, branch - 3) : branch - 1]:
+        alias = re.fullmatch(rf"\s*let\s+(\w+)\s*=\s*{direct}\s*;\s*", prior)
+        if alias:
+            aliases.append(re.escape(alias[1]))
+    return any(
+        re.search(rf"&&\s*{alias}(?:\.trim\(\))?\.is_empty\(\)\s*\{{$", condition)
+        is not None
+        for alias in aliases
+    )
 
 
 def _aggregate_fingerprint(

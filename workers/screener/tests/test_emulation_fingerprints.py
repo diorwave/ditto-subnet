@@ -1721,13 +1721,60 @@ _PY_CONTENT_FIRST_DRAFT_FALLBACK = _PY_LENGTH_CUT_DRAFT_FALLBACK.replace(
     "        output = deciding.content\n",
 )
 
-_RUST_EMPTY_ONLY_DRAFT_FALLBACK = _RUST_LENGTH_CUT_DRAFT_FALLBACK.replace(
+_RUST_INNER_EMPTY_CHECK_DRAFT_FALLBACK = _RUST_LENGTH_CUT_DRAFT_FALLBACK.replace(
     '        if choice.finish_reason.as_deref() == Some("length") {\n'
     "            if !retried {",
     "        let text = choice.message.content.clone().unwrap_or_default();\n"
     '        if choice.finish_reason.as_deref() == Some("length") {\n'
     "            if text.trim().is_empty() && !retried {",
 )
+
+# Both retry and break must be gated on empty deciding content. The inner
+# check above only gates continue and still discards a nonempty length reply.
+_RUST_EMPTY_ONLY_DRAFT_FALLBACK = _RUST_INNER_EMPTY_CHECK_DRAFT_FALLBACK.replace(
+    'if choice.finish_reason.as_deref() == Some("length") {',
+    'if choice.finish_reason.as_deref() == Some("length") && text.trim().is_empty() {',
+)
+
+
+@pytest.mark.parametrize(
+    "nearby",
+    [
+        "        # answer_line(deciding) is not called\n",
+        '        note = "answer_line(deciding) is not called"\n',
+        "        if other_reply.content:\n"
+        '            log.info("other reply was nonempty")\n',
+        "        if deciding.content:\n"
+        '            log.info("content exists but will be discarded")\n',
+    ],
+)
+def test_nearby_content_mentions_do_not_hide_length_discard(nearby: str) -> None:
+    source = _PY_LENGTH_CUT_DRAFT_FALLBACK.replace(
+        "        if deciding.finish_reason",
+        nearby + "        if deciding.finish_reason",
+        1,
+    )
+    assert "length-cut-draft-fallback" in _kinds(
+        find_benchmark_emulation_fingerprints([("agent.py", source)])
+    )
+
+
+def test_rust_inner_content_check_does_not_guard_unconditional_discard() -> None:
+    assert "length-cut-draft-fallback" in _kinds(
+        find_benchmark_emulation_fingerprints(
+            [("agent.rs", _RUST_INNER_EMPTY_CHECK_DRAFT_FALLBACK)]
+        )
+    )
+
+
+def test_content_first_exit_must_preserve_the_served_output() -> None:
+    source = _PY_CONTENT_FIRST_DRAFT_FALLBACK.replace(
+        "output = content", "other = content"
+    )
+    assert "length-cut-draft-fallback" in _kinds(
+        find_benchmark_emulation_fingerprints([("agent.py", source)])
+    )
+
 
 # Inline loop (the passed sibling).
 _PY_PROMPT_ONLY_DEDUPE_INLINE = """
@@ -1937,6 +1984,26 @@ def test_prompt_dedupe_helper_lead_points_at_the_far_render() -> None:
     lead = next(f for f in findings if f["kind"] == "prompt-only-record-dedupe")
     lines = {location["role"]: location["line"] for location in lead["locations"]}
     assert lines["response-rendered"] - lines["prompt-derived-key"] > 60
+
+
+@pytest.mark.parametrize("access", ["client.response", "record.response"])
+def test_unrelated_response_access_does_not_complete_dedupe_lead(access: str) -> None:
+    helper_only = _PY_PROMPT_ONLY_DEDUPE_HELPER.split("def render(records):")[0]
+    source = helper_only + f"\ndef unrelated(client, record):\n    return {access}\n"
+    assert "prompt-only-record-dedupe" not in _kinds(
+        find_benchmark_emulation_fingerprints([("records.py", source)])
+    )
+
+
+def test_unrelated_nearby_function_does_not_complete_dedupe_lead() -> None:
+    source = _PY_PROMPT_ONLY_DEDUPE_HELPER.split("def render(records):")[0]
+    source = "\n".join(
+        line for line in source.splitlines() if not line.startswith("UNRELATED_")
+    )
+    source += "\ndef other(record):\n    return record.response\n"
+    assert "prompt-only-record-dedupe" not in _kinds(
+        find_benchmark_emulation_fingerprints([("records.py", source)])
+    )
 
 
 _ATH_SWEEP_KINDS = {
