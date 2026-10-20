@@ -920,10 +920,18 @@ func sandboxStartInfraFailure(err error) *store.Failure {
 		(strings.Contains(msg, "unable to find image") ||
 			strings.Contains(msg, "no such image") ||
 			strings.Contains(msg, "pull access denied for dittobench-sub")) {
+		// The request-scoped tag is the screened image as this host holds it,
+		// so report the fleet-recognized screened_image_unavailable code and
+		// keep the precise cause in diagnostics. Validators that predate a
+		// dedicated code reject it as unknown and charge the miner for a tag
+		// this host lost (ditto-subnet#2959).
 		return &store.Failure{
 			Kind:      "validator_infrastructure",
-			Code:      "sandbox_image_unavailable",
+			Code:      "screened_image_unavailable",
 			Retryable: true,
+			Diagnostics: map[string]any{
+				"sandbox_cause": "request_image_tag_missing",
+			},
 		}
 	}
 	if !strings.Contains(msg, "network") || !strings.Contains(msg, "not found") {

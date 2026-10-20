@@ -4126,6 +4126,60 @@ class TestRunOnce:
         dittobench.score_tarball.assert_not_awaited()
         platform.submit_score.assert_not_awaited()
         chain.put_weights.assert_awaited_once_with({"5Champ" + "x" * 42: 1.0})
+        # ditto-subnet#2967: Platform's inconsistent pin is not the agent's
+        # doing, so it must not spend the miner's base attempt as scoring_error.
+        # The top-five lane already reports the same refusal as infrastructure.
+        platform.report_ticket_failed.assert_awaited_once_with(
+            job, "infrastructure", "seed_binding_mismatch", container_log_tail=None
+        )
+        assert "slot-0" not in worker._healthy_slots
+
+    async def test_unsupported_bench_version_ticket_is_infrastructure(self) -> None:
+        job = _job("5MinerA" + "x" * 41).model_copy(update={"bench_version": 999})
+        platform = _platform_with_ledger(jobs=[job], ledger=[])
+        dittobench = MagicMock(score_tarball=AsyncMock())
+        worker = ValidatorWorker(
+            config=_config(),
+            platform=platform,
+            dittobench=dittobench,
+            chain=MagicMock(put_weights=AsyncMock()),
+            keypair=MagicMock(),
+        )
+
+        await worker.run_once()
+
+        dittobench.score_tarball.assert_not_awaited()
+        platform.report_ticket_failed.assert_awaited_once_with(
+            job, "infrastructure", "unsupported_bench_version", container_log_tail=None
+        )
+
+    async def test_private_dataset_outage_stops_the_slot_without_charging_miners(
+        self,
+    ) -> None:
+        # ditto-subnet#2967: a 503 on the private dataset fetch used to hand
+        # back every claimed lease as scoring_error, one after another, because
+        # the generic branch neither stops the slot nor ends the sweep.
+        jobs = [_job(f"5Miner{index}" + "x" * 42) for index in range(3)]
+        platform = _platform_with_ledger(jobs=jobs, ledger=[])
+        worker = ValidatorWorker(
+            config=_config(),
+            platform=platform,
+            dittobench=MagicMock(score_tarball=AsyncMock()),
+            chain=MagicMock(put_weights=AsyncMock()),
+            keypair=MagicMock(),
+        )
+        worker._score_job = AsyncMock(  # type: ignore[method-assign]
+            side_effect=PlatformInfrastructureError(
+                "private dataset download unavailable (503)"
+            )
+        )
+
+        await worker.run_once()
+
+        worker._score_job.assert_awaited_once()
+        platform.report_ticket_failed.assert_awaited_once()
+        assert platform.report_ticket_failed.await_args.args[1] == "infrastructure"
+        assert "slot-0" not in worker._healthy_slots
 
     async def test_derived_seed_ticket_is_scored(self) -> None:
         # The companion arm: a ticket whose seed DOES re-derive proceeds.

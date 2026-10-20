@@ -216,6 +216,13 @@ _SANDBOX_INFRASTRUCTURE_CODES = {
     # not the agent's fault, so it must end the sweep and back off rather than
     # blame and re-lease the agent in a tight resubmit loop.
     "sandbox_network_unavailable",
+    # ``docker run`` could not find the scorer's own request-scoped
+    # ``dittobench-sub:`` tag at container start or compatibility restart: a host
+    # image prune, disk-pressure cleanup, or restart race removed it after Build.
+    # The tag is validator-owned, so the miner is not at fault. Current scorers
+    # send ``screened_image_unavailable`` for this so validators that predate
+    # this entry also back off; it is listed for scorers that still send it.
+    "sandbox_image_unavailable",
     # The ticket inference route failed or its upstream provider degraded
     # mid-run. Also validator-side infrastructure, so
     # back off instead of failing the agent and re-leasing it in a loop.
