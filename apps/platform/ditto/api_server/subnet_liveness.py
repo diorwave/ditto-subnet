@@ -229,8 +229,11 @@ class AdmissionState:
     zero_since: datetime | None
 
 
+# A malformed stored value reads as the model default 0 instead of failing the
+# whole read on a cast error (ditto-code review on #2619).
 _CONCURRENCY_SQL = (
-    "COALESCE((settings->>'screening_concurrency')::int, 0)"  # model default 0
+    "COALESCE(CASE WHEN settings->>'screening_concurrency' ~ '^[0-9]+$' "
+    "THEN (settings->>'screening_concurrency')::int END, 0)"  # model default 0
 )
 
 _ZERO_STREAK_SQL = text(

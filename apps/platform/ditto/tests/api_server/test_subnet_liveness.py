@@ -9,6 +9,7 @@ that is irrelevant to the signal under test.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -112,7 +113,7 @@ async def _node(
     session_maker: async_sessionmaker[AsyncSession],
     *,
     now: datetime,
-    revisions: list[tuple[int, datetime]],
+    revisions: Sequence[tuple[int | str, datetime]],
     heartbeat_at: datetime | None,
     index: int = 1,
     status: str = "active",
@@ -219,6 +220,35 @@ class TestScreeningAdmission:
         assert admission.since == oldest
         assert admission.value == pytest.approx(3600)
         assert liveness.status == "breach"
+
+    async def test_malformed_stored_concurrency_reads_as_zero(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """A nonnumeric historical value must not fail the read on a cast.
+
+        The newest revision is parsed by the same model the claim path uses, so
+        only an older row can carry one; the zero streak counts it as 0.
+        """
+        now = _now()
+        await _node(
+            session_maker,
+            now=now,
+            revisions=[
+                (2, now - timedelta(hours=5)),
+                ("all", now - timedelta(hours=3)),
+                (0, now - timedelta(hours=2)),
+            ],
+            heartbeat_at=now - timedelta(seconds=10),
+        )
+        await _agent(
+            session_maker,
+            status=AgentStatus.UPLOADED,
+            created_at=now - timedelta(hours=4),
+        )
+
+        admission = _signal(await _read(session_maker, now), "screening_admission")
+        assert admission.status == "breach"
+        assert admission.detail["zero_since"] == (now - timedelta(hours=3)).isoformat()
 
     async def test_a_short_zero_warns_before_it_breaches(
         self, session_maker: async_sessionmaker[AsyncSession]
