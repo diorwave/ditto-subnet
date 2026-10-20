@@ -1,4 +1,4 @@
-"""Canonical audited v472/v473 effect decoders, without money authority.
+"""Canonical audited collector effect decoders, without money authority.
 
 Both the signer journal and Platform's receipt reader must independently bind
 the block, runtime fingerprint and historical identities before using these
@@ -19,30 +19,69 @@ FINNEY_GENESIS = "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab3
 HISTORICAL_COLLECTOR_CODE_HASH = (
     "0x43bc67be9df30636d7e948e7bdb1ed065f2fb92029458cc939abf89d76d8ada3"
 )
-AUDITED_COLLECTOR_CODE_HASH = (
+V473_COLLECTOR_CODE_HASH = (
     "0x7773f5c0a6d6e9ea9ff347edcc491246eec08a5cf441d964ee96f40d7fa65a08"
 )
-AUDITED_COLLECTOR_RECEIPT_HASHES = frozenset(
-    (HISTORICAL_COLLECTOR_CODE_HASH, AUDITED_COLLECTOR_CODE_HASH)
+V475_COLLECTOR_CODE_HASH = (
+    "0x557634c8c31bc639ea6552e297dcfb781cd7d9bdd491a5352c151305db33d3a0"
 )
+V476_COLLECTOR_CODE_HASH = (
+    "0x12a5ec0b0d4d1f72281a4e41a926ccce6c4cfda6134adf40eeb13847b6a8cd12"
+)
+V477_COLLECTOR_CODE_HASH = (
+    "0x18b52484d9c5d7523f704c86b17b2ab959fffbc6edb6766a77e9877f0ad19387"
+)
+V478_COLLECTOR_CODE_HASH = (
+    "0x7e722b3aa5c9192c98665a5d65fa91364bf9055e21fc90efce6d59bf4ef414e1"
+)
+# Untagged v479 is admitted for historical effect reading only: its consumed
+# receipt interface was measured against audited v478 (see the v481 manifest).
+# No v479 artifact/source equivalence or signing authority is inferred.
+V479_READONLY_CODE_HASH = (
+    "0x44e952fd1cebe9bd15c0c55cee6e1d7c6c97b44d941b79127343118dbbd342bc"
+)
+AUDITED_COLLECTOR_CODE_HASH = (
+    "0x5fb504c1c793a3ddb5456f189ddef98b5146853aea6ff998501f1b6c6eb720bc"
+)
+# Official current artifact/source: docs/audits/collector-finney-v481.
+# No v474/v480 fingerprint is inferred; unknown/reverse states still refuse.
+COLLECTOR_RUNTIME_ORDER = (
+    HISTORICAL_COLLECTOR_CODE_HASH,
+    V473_COLLECTOR_CODE_HASH,
+    V475_COLLECTOR_CODE_HASH,
+    V476_COLLECTOR_CODE_HASH,
+    V477_COLLECTOR_CODE_HASH,
+    V478_COLLECTOR_CODE_HASH,
+    V479_READONLY_CODE_HASH,
+    AUDITED_COLLECTOR_CODE_HASH,
+)
+COLLECTOR_READABLE_RUNTIME_HASHES = frozenset(COLLECTOR_RUNTIME_ORDER)
+# Keep Platform's artifact admission distinct from its measured interface
+# admission. In particular, never report v479 as a verified official artifact.
+AUDITED_COLLECTOR_RECEIPT_HASHES = COLLECTOR_READABLE_RUNTIME_HASHES - {
+    V479_READONLY_CODE_HASH
+}
+# Native filter shape for exact historical observations, NOT signing authority.
+# The observed v479 Registration filter includes pow_register and its consensus
+# is Yuma (v481 audit manifest); omitting it would expect the wrong 3-call filter.
+# guard_runtime independently requires an audited v481 policy and, for current
+# signing, the exact same v481 chain hash before consulting this shape set.
+COLLECTOR_POW_REGISTRATION_HASHES = frozenset(COLLECTOR_RUNTIME_ORDER[2:])
 
 
 def collector_receipt_runtime(parent: str, post: str) -> str:
-    """Return execution runtime for known states and the reviewed forward upgrade.
+    """Return execution runtime for known states and reviewed forward upgrades.
 
     The code-changing block executes under its parent's runtime. Its collector
-    event contracts are unchanged in v473; reverse or unknown transitions refuse.
+    event contracts are unchanged on the reviewed path; reverse/unknown refuse.
     This is read-only receipt interpretation, never signing authorization.
     """
     if (
-        parent not in AUDITED_COLLECTOR_RECEIPT_HASHES
-        or post not in AUDITED_COLLECTOR_RECEIPT_HASHES
+        parent not in COLLECTOR_READABLE_RUNTIME_HASHES
+        or post not in COLLECTOR_READABLE_RUNTIME_HASHES
     ):
         raise ValueError("receipt runtime is not audited")
-    if parent != post and (parent, post) != (
-        HISTORICAL_COLLECTOR_CODE_HASH,
-        AUDITED_COLLECTOR_CODE_HASH,
-    ):
+    if COLLECTOR_RUNTIME_ORDER.index(parent) > COLLECTOR_RUNTIME_ORDER.index(post):
         raise ValueError("receipt crosses an unaudited runtime transition")
     return parent
 

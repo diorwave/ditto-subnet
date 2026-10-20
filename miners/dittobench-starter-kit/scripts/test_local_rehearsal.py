@@ -893,11 +893,54 @@ class ProvenanceNormaliserTest(unittest.TestCase):
             exempt |= GATES.value_tokens(case["question"])
             served = response.get("answer") or response["final_text"]
             verdict = GATES.evaluate_claim(
-                served, GATES.claim_alternatives(case), ledger, exempt
+                served, GATES.claim_groups(case), ledger, exempt
             )
             self.assertTrue(verdict["applicable"], name)
             self.assertEqual(verdict["model_emitted"], want_emitted, name)
             self.assertEqual(verdict["answer_in_prompt"], want_in_prompt, name)
+
+    def test_any_accepted_form_of_a_claim_unit_counts_as_emitted(self) -> None:
+        """``claimGroupsEmitted``: the model may write a different accepted
+        form of the served unit than the harness served."""
+        cases = [
+            # served "3", the model wrote "three"
+            ({"answer_kind": "number", "expected_answer": "3"}, "3", "I count three."),
+            # served one accept_any form, the model wrote another
+            (
+                {"answer_kind": "value", "expected_answer": "Tokyo", "accept_any": ["Osaka"]},
+                "Tokyo",
+                "It moved to Osaka.",
+            ),
+            # served one accepted direction phrase, the model wrote another
+            (
+                {"bench_version": 13, "answer_kind": "direction", "expected_answer": "increase"},
+                "went up",
+                "It increased.",
+            ),
+        ]
+        for case, served, completion in cases:
+            ledger = GATES.ClaimSpanLedger()
+            ledger.record_call([], [completion])
+            verdict = GATES.evaluate_claim(served, GATES.claim_groups(case), ledger)
+            self.assertTrue(verdict["applicable"], case)
+            self.assertTrue(verdict["model_emitted"], case)
+
+    def test_each_list_item_needs_its_own_emitted_form(self) -> None:
+        case = {
+            "answer_kind": "list",
+            "answer_items": ["Rome", "Paris"],
+            "answer_item_accept_any": [["Roma"], []],
+        }
+        groups = GATES.claim_groups(case)
+        self.assertEqual(groups, [["Rome", "Roma"], ["Paris"]])
+        ledger = GATES.ClaimSpanLedger()
+        ledger.record_call([], ["Roma and Paris."])
+        self.assertTrue(GATES.evaluate_claim("Rome, Paris", groups, ledger)["model_emitted"])
+        ledger = GATES.ClaimSpanLedger()
+        ledger.record_call([], ["Roma, and somewhere else."])
+        self.assertFalse(GATES.evaluate_claim("Rome, Paris", groups, ledger)["model_emitted"])
+        with self.assertRaises(TypeError):
+            GATES.claim_groups_emitted("Rome", ["Rome"], set())
 
     def test_v14_replay_accepts_a_typographic_hyphen_identifier(self) -> None:
         """#2734: the v14 grader folds the model's U+2011 before crediting
@@ -915,7 +958,7 @@ class ProvenanceNormaliserTest(unittest.TestCase):
                 ledger = GATES.ClaimSpanLedger()
                 ledger.record_call([question], ["Your handle is VK\u201148HJXP6A63."])
                 verdict = GATES.evaluate_claim(
-                    served, GATES.claim_alternatives(case), ledger, GATES.value_tokens(question)
+                    served, GATES.claim_groups(case), ledger, GATES.value_tokens(question)
                 )
                 if version == 13 and served != "VK-48HJXP6A63":
                     # V13 does not fold, so the U+2011 slot is no claim span.
@@ -927,7 +970,7 @@ class ProvenanceNormaliserTest(unittest.TestCase):
         ledger = GATES.ClaimSpanLedger()
         ledger.record_call([question], ["I could not find that handle."])
         case = {"bench_version": 14, "answer_kind": "value", "expected_answer": "VK-48HJXP6A63"}
-        verdict = GATES.evaluate_claim("VK-48HJXP6A63", GATES.claim_alternatives(case), ledger)
+        verdict = GATES.evaluate_claim("VK-48HJXP6A63", GATES.claim_groups(case), ledger)
         self.assertFalse(verdict["model_emitted"])
         self.assertEqual(
             GATES.claim_alternatives({"bench_version": 13, "expected_answer": "VK-48HJXP6A63"}),

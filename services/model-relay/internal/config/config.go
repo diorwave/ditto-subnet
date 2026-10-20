@@ -226,6 +226,10 @@ type ChainConfig struct {
 	DevAllowUnpermittedValidator bool
 }
 
+// NetuidInt32 is NETUID as a Postgres int4. Load rejects any value outside
+// [0, 2147483647], so the conversion never truncates.
+func (c ChainConfig) NetuidInt32() int32 { return int32(c.Netuid) }
+
 // InferenceProxyConfig mirrors the Python InferenceProxyConfig (section 10 of
 // the DB contract / section 9 of the API contract). All limits validated with
 // the same bounds; non-numeric numerics fail boot.
@@ -251,9 +255,9 @@ type InferenceProxyConfig struct {
 	TicketConcurrency    int // DB-policy fallback default 16
 	ValidatorConcurrency int // DB-policy fallback default 48
 	GlobalConcurrency    int // DB-policy fallback default 96, cap 128
-	TicketRPM            int // DITTO_INFERENCE_TICKET_RPM, default 240
-	ValidatorRPM         int // DITTO_INFERENCE_VALIDATOR_RPM, default 960
-	GlobalRPM            int // DITTO_INFERENCE_GLOBAL_RPM, default 2880, cap 100000
+	TicketRPM            int // DITTO_INFERENCE_TICKET_RPM, default 1920
+	ValidatorRPM         int // DITTO_INFERENCE_VALIDATOR_RPM, default 7680
+	GlobalRPM            int // DITTO_INFERENCE_GLOBAL_RPM, default 23040, cap 100000
 
 	RequestBodyBytes  int64 // DITTO_INFERENCE_REQUEST_BODY_BYTES, default 4 MiB, max 8 MiB
 	ResponseBodyBytes int64 // DITTO_INFERENCE_RESPONSE_BODY_BYTES, default 2 MiB, max 8 MiB
@@ -437,6 +441,9 @@ func Load(lookup Lookup) (*Config, error) {
 		IdentityToken:                r.str("PYLON_IDENTITY_TOKEN", ""),
 		DevAllowUnpermittedValidator: r.boolval("DITTO_DEV_ALLOW_UNPERMITTED_VALIDATOR", false),
 	}
+	if cfg.Chain.Netuid < 0 || cfg.Chain.Netuid > 2147483647 {
+		r.fail("NETUID must be between 0 and 2147483647, got %d", cfg.Chain.Netuid)
+	}
 	if (cfg.Chain.IdentityName == "") != (cfg.Chain.IdentityToken == "") {
 		r.fail("PYLON_IDENTITY_NAME and PYLON_IDENTITY_TOKEN must be provided together")
 	}
@@ -545,9 +552,9 @@ func loadInferenceProxy(r *envReader) InferenceProxyConfig {
 		TicketConcurrency:    16,
 		ValidatorConcurrency: 48,
 		GlobalConcurrency:    96,
-		TicketRPM:            r.intval("DITTO_INFERENCE_TICKET_RPM", 240),
-		ValidatorRPM:         r.intval("DITTO_INFERENCE_VALIDATOR_RPM", 960),
-		GlobalRPM:            r.intval("DITTO_INFERENCE_GLOBAL_RPM", 2880),
+		TicketRPM:            r.intval("DITTO_INFERENCE_TICKET_RPM", 1920),
+		ValidatorRPM:         r.intval("DITTO_INFERENCE_VALIDATOR_RPM", 7680),
+		GlobalRPM:            r.intval("DITTO_INFERENCE_GLOBAL_RPM", 23040),
 
 		RequestBodyBytes:  r.int64val("DITTO_INFERENCE_REQUEST_BODY_BYTES", 4*1024*1024),
 		ResponseBodyBytes: r.int64val("DITTO_INFERENCE_RESPONSE_BODY_BYTES", 2*1024*1024),

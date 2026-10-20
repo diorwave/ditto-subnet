@@ -1,3 +1,13 @@
+import {
+  contributorHotkeyInputSchema, githubAccountInputSchema, claPolicyReadInputSchema,
+  claPolicyWriteInputSchema, claPublishInputSchema,
+  githubRevocationReadInputSchema, githubRevocationWriteInputSchema,
+} from '../lib/contributor.schemas'
+import {
+  fetchMinerGithubLink, fetchGithubContributor, fetchMinerClaStatus, fetchClaPolicy,
+  updateClaPolicy, publishClaVersion,
+  fetchGithubRevocationPreflight, revokeMinerGithubLink,
+} from './admin.service'
 import { treasuryActivationPreflightInputSchema } from '../lib/treasury-ledger.schemas'
 import { conversationAssessmentInputSchema, conversationSettingsInputSchema, conversationRetryInputSchema } from '../lib/conversation.schemas'
 import { scheduleV13ReviewClockInputSchema } from '../lib/review-clock.schemas'
@@ -10,15 +20,37 @@ import {
   v13ReplayPackageWriteInputSchema,
 } from '../lib/v13-private.schemas'
 import { fetchConversationAssessments, setConversationSettings, authorizeConversationRetry } from './admin.service'
+import { bountyBoardInputSchema, bountyCatalogInputs, bountyQueueInputSchema } from '../lib/bounty.schemas'
+import {
+  approveBountyObligation,
+  awardBountyClaim,
+  controlBountySlot,
+  decideBountyAppeal,
+  dispatchBountyObligation,
+  fetchBounty,
+  fetchBountyBoard,
+  fetchBountyClaim,
+  fetchBountyPayoutPolicy,
+  fetchBountyQueue,
+  previewBountyRevision,
+  publishBountyRevision,
+  reassignBountyReviewer,
+  reconcileBountyTransfer,
+  recordBountyFact,
+  reviewBountySubmission,
+  setBountyClaimsPaused,
+  setBountyPayoutPolicy,
+} from './bounty.service'
 import { fetchV13ScorerCohort, fetchV13ScorerCohortPreflight, fetchV13ScorerCohortHistory, fetchV13ReportOnlyCurrentPacket, activateV13ScorerCohort, rotateV13ScorerCohort } from './admin.service'
 import '@tanstack/react-start/server-only'
 import { observerGrant } from './treasury-observer-access.server'
 import { createTreasuryObserverServer } from './treasury-observer-mcp.server'
 import { recordTreasurySettingsInputSchema, treasuryPreviewInputSchema, treasuryQuoteInputSchema } from '../lib/treasury.schemas'
 import { treasuryReceiptInputSchema } from '../lib/treasury-receipts.schemas'
-import { fetchTreasuryReceipts, recordTreasuryReceipt, fetchTreasuryReceiptPreflight, fetchTreasuryManualTransfers } from './admin.service'
+import { fetchTreasuryLedger, fetchTreasuryReceipts, recordTreasuryReceipt, fetchTreasuryReceiptPreflight, fetchTreasuryManualTransfers } from './admin.service'
 import { fetchTreasuryActivationPreflight, fetchTreasuryLedgerReadiness, fetchTreasuryQuote, fetchTreasurySettings, fetchTreasuryObserverSettings, previewTreasuryTopup, recordTreasurySettings } from './admin.service'
-import { fetchTreasuryRuntime, recordTreasuryRuntime } from './admin.service'
+import { fetchRuntimeInterfaceReport, fetchTreasuryRuntime, recordTreasuryRuntime } from './admin.service'
+import { runtimeInterfaceReportInputSchema } from '../lib/runtime-interface.schemas'
 import { recordTreasuryRuntimeInputSchema } from '../lib/treasury-ledger.schemas'
 
 import { issueBenchmarkCanaryInputSchema, getBenchmarkCanaryInputSchema,
@@ -168,6 +200,8 @@ import {
 import {
   fetchCopyReviewSourceDiff,
   fetchCopyReviewSourceDiffFile,
+  fetchLineageSourceDiff,
+  fetchLineageSourceDiffFile,
   fetchAthReview,
   fetchAthPrecedents,
   fetchQuarantineBaselineDiff,
@@ -267,6 +301,7 @@ import {
   fetchScoringLeaseSettings,
   fetchInferenceRuntimeMetrics,
   fetchSourceReviewQueueSlo,
+  fetchAthReviewQueueSlo,
   fetchOutlierEscalation,
   fetchClaimProvenanceCases,
   fetchOutlierEscalationDryRun,
@@ -471,6 +506,21 @@ export const WRITE_TOOL_NAMES = new Set([
   'authorize_conversation_retry',
   'unban_hotkey',
   'set_source_release_policy',
+  'set_cla_policy',
+  'publish_cla_version',
+  'revoke_miner_github_link',
+  'publish_bounty_revision',
+  'set_bounty_claims_paused',
+  'review_bounty_submission',
+  'reassign_bounty_reviewer',
+  'control_bounty_slot',
+  'decide_bounty_appeal',
+  'award_bounty_claim',
+  'set_bounty_payout_policy',
+  'approve_bounty_obligation',
+  'dispatch_bounty_obligation',
+  'reconcile_bounty_transfer',
+  'record_bounty_fact',
   'set_burn_settings',
   'set_confirmation_bundle_settings',
   'authorize_confirmation_bundle_retest',
@@ -498,6 +548,9 @@ export const TOOL_SCOPE_REQUIREMENTS = new Map<string, string>([
   // so they gate on the same dedicated artifact scope.
   ['get_copy_review_source_diff', BACKROOM_ARTIFACT_SCOPE],
   ['read_copy_review_source_diff_file', BACKROOM_ARTIFACT_SCOPE],
+  // Lineage diffs render the same two-submission source for any operator-named
+  // pair, so they gate identically.
+  ['get_lineage_source_diff', BACKROOM_ARTIFACT_SCOPE],
   // Baseline diffs render miner source against the starter kit, so they gate on
   // the same dedicated artifact scope.
   ['get_screening_baseline_diff', BACKROOM_ARTIFACT_SCOPE],
@@ -663,6 +716,13 @@ function toolAnnotations(kind: 'read' | 'write', destructive = false) {
   }
 }
 
+// Agent ids on the artifact-scope source readers publish as plain
+// `format: uuid`, without zod's ~170-byte uuid regex, to hold the catalog byte
+// budget. Each tool's service function parses its input with the strict
+// `z.string().uuid()` schema before any Platform request, so validation is
+// unchanged; only the advertised JSON Schema is shorter.
+const sourceAgentId = () => z.string().meta({ format: 'uuid' })
+
 // Tool descriptions are injected into model context before any tool is used.
 // Keep the catalog decision-grade; the original, detailed operation notes stay
 // available on demand through `get_backroom_tool_help`.
@@ -671,6 +731,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   refresh_benchmark_contract: 'Rescreen exact contract with guards; expire tickets, preserve scores/owner. Write scope; see help.',
   get_copy_review_source_diff:
     'Per-file held/reference source diff with rename and normalized identity. Artifact scope; bodies via file reader.',
+  get_lineage_source_diff: 'Any two agents, reference->agent. Artifact scope; see help.',
   apply_copy_court_settings:
     'Write complete copy-court posture with expected revision and exact confirmation. Inert or complete signal semantics; see tool help.',
   expand_benchmark_rollout_cohort:
@@ -762,17 +823,17 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_l2_report_canary_preflight:
     'Evaluate each exact-source canary guard; scheduling rechecks them.',
   get_v13_scorer_cohort:
-    'Read the immutable three-validator V13 scorer pin, including exact signed runtime packet.',
+    'Read the immutable 3-16 validator V13 scorer pin, including exact signed runtime packet.',
   get_v13_scorer_cohort_preflight:
-    'Read signed V13 fleet, admission and drain before pinning.',
+    'Read signed V13 fleet, membership, authority packet, admission and drain.',
   get_v13_scorer_cohort_history:
     'Read immutable V13 cohort and packet rotations.',
   get_v13_report_only_current_packet:
-    'Read unanimous live V13 packet; no authority change.',
+    'Read live-majority V13 packet and routable members; no authority change.',
   activate_v13_scorer_cohort:
-    'One-way pin of three exact managed V13 validators after nonmembers pause and live tickets drain.',
+    'One-way pin of 3-16 exact managed V13 validators after nonmembers pause and live tickets drain.',
   rotate_v13_scorer_cohort:
-    'Rotate pinned V13 cohort to unanimous signed packet after all V13 tickets drain; keeps pin history.',
+    'Append a V13 cohort rotation changing packet and/or 3-16 members; majority-signed, guarded, keeps history.',
   schedule_l2_report_canary:
     'Queue one isolated exact-artifact non-authoritative report. reviewSettingsRevision pins only canary scopes, never node scopes. See tool help.',
 
@@ -811,13 +872,13 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_inference_runtime_metrics:
     'Read inference load and relay health.',
   get_source_review_queue_slo:
-    'Read ordinary source-review queue age, throughput, and reconciliation ghosts.',
+    'Read ordinary source-review and ATH/copy-review queue age, throughput, and ghosts.',
   get_claim_provenance_cases:
     'Read exact-artifact V13 provenance evidence.',
   get_outlier_escalation:
     'Read outlier escalation mode, each setting\'s env source, and audit-chain holds.',
   get_outlier_escalation_dry_run:
-    'Replay outlier escalation on the scored ledger: would-trigger count and agents.',
+    'Replay outlier escalation on the scored ledger: rows it would hold.',
   get_inference_failure_taxonomy:
     'Read inference outcome groups and report-only 429 bursts; unknown routes retained.',
   start_runtime_profile:
@@ -827,6 +888,32 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   list_inference_traces: 'Page trace archive objects by partition.',
   download_inference_trace: 'Presigned trace URL; artifact scope.',
   peek_inference_trace: 'Peek trace records; artifact scope.',
+  get_miner_github_link: 'Read active verified GitHub/hotkey proof. See help.',
+  get_github_link_revocation_preflight: 'Read exact-link revoke guard, audit and confirmation. See help.',
+  revoke_miner_github_link: 'Revoke exact link; actor, reason and confirmation. Write; see help.',
+  get_github_contributor_status: 'Numeric GitHub ID to hotkey and CLA; never payee authority. See help.',
+  get_miner_cla_status: 'Read effective CLA and hotkey consent receipt. See help.',
+  get_cla_policy: 'Read CLA mode, notice, history and adoption. See help.',
+  set_cla_policy: 'Set CLA mode with revision and confirmation. Write; see help.',
+  publish_cla_version: 'Publish approved pinned CLA; no activation. Write; see help.',
+  get_bounty_board: 'List build bounties: terms, slots, pause, awards.',
+  get_bounty: 'Operator view of one bounty: claims, appeals, full private audit.',
+  get_bounty_claim: 'Read one bounty claim: submissions, obligations, facts.',
+  get_bounty_queue: 'Review queue (overdue first) or settlement queue with approvers.',
+  get_bounty_payout_policy: 'Read approval thresholds in force, or one exact revision; null when unset.',
+  preview_bounty_revision: 'Digest, exact phrase and refusals for a revision; writes nothing.',
+  publish_bounty_revision: 'Publish a previewed bounty revision. Write; see help.',
+  set_bounty_claims_paused: 'Pause or resume new holds. Write; see help.',
+  review_bounty_submission: 'Accept, request changes, or reject one submission. Write; see help.',
+  reassign_bounty_reviewer: 'Name the reviewer in force. Write; see help.',
+  control_bounty_slot: 'Cancel (refunds) or reopen (retains) a slot. Write; see help.',
+  decide_bounty_appeal: 'Uphold or deny an appeal; not its reviewer. Write; see help.',
+  award_bounty_claim: 'Award accepted work within its claim\'s pool. Write; see help.',
+  set_bounty_payout_policy: 'Append approval thresholds. Write; see help.',
+  approve_bounty_obligation: 'Approve exact payee, amount, policy. Write; see help.',
+  dispatch_bounty_obligation: 'Dispatch an approved round once. Write; see help.',
+  reconcile_bounty_transfer: 'Settle a dispatched or uncertain transfer. Write; see help.',
+  record_bounty_fact: 'Record a merge, deploy or adoption fact. Write; see help.',
   get_owner_attestations:
     'Read signed direct owner links/revocations; non-transitive copy-review evidence.',
   list_lease_revocations:
@@ -914,10 +1001,13 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_treasury_settings: 'Read shadow buckets/history; no weights or funds.',
   get_treasury_activation_preflight: 'Read managed Gamma readiness; no activation. See tool help.',
   get_treasury_runtime: 'Read durable Gamma control; not dispatch proof.',
+  get_runtime_interface_report:
+    'Read whether a Subtensor runtime upgrade is admitted and which calls/entries moved; no approval.',
   record_treasury_runtime: 'Control Gamma with CAS, policy and managed roster; no transfers. See tool help.',
   get_treasury_ledger_readiness: 'Read epoch/policy readiness; no activation.',
-  record_treasury_settings: 'Record shadow buckets with CAS/confirmation; no weights or funds.',
+  record_treasury_settings: 'Record buckets with CAS; in-range Gamma % under signed range moves next epoch.',
   get_treasury_receipts: 'Read treasury receipt history/publication.',
+  get_treasury_ledger: 'Read per-epoch Gamma earnings, balance, lock and unreceipted outflow.',
   get_treasury_manual_transfers: 'Read manual custody readiness, requests and public receipts; no funds.',
   get_treasury_receipt_preflight: 'Read exact receipt readiness/archive checkpoint; no writes.',
   record_treasury_receipt: 'Ingest finalized receipt; no signing/provider credit.',
@@ -977,10 +1067,11 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read source range (max 400 lines); locate via search_screening_source or finding citations. Artifact scope.',
 }
 
-// Exactly three scorer hotkeys as a plain bounded array. z.tuple serializes to
-// draft-07 array-form `items`, which some MCP clients (Codex) cannot import, so
-// they silently drop the whole tool from a refreshed catalog (#2490, #2559).
-const v13ScorerCohortHotkeysSchema = z.array(z.string()).length(3)
+// Three to sixteen scorer hotkeys as a plain bounded array. The per-agent
+// quorum stays three. z.tuple serializes to draft-07 array-form `items`, which
+// some MCP clients (Codex) cannot import, so they silently drop the whole tool
+// from a refreshed catalog (#2490, #2559).
+const v13ScorerCohortHotkeysSchema = z.array(z.string()).min(3).max(16)
 
 export function createBackroomMcpServer(props: McpGrantProps) {
   if (observerGrant(props.scopes)) return createTreasuryObserverServer(props)
@@ -1167,7 +1258,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         '`count` is the number of readable file rows the platform made available to page and `file_count` remains the platform\'s total archive-file count, so read `returned` for the rows in this response and `has_more` for whether a later offset holds paths this response does not. `has_more` is the only field that reports MCP paging: `truncated` means the platform omitted paths before MCP paging, so no later offset can recover them. Never treat a manifest with `has_more` or `truncated` set as the complete inventory of a submission. ' +
         'Unreadable binary or oversized `opaque_blobs` metadata remains whole on every page because it is separate review evidence. Requires the dedicated backroom:artifact:read scope because miner source is sensitive.',
       inputSchema: {
-        agentId: z.string().uuid(),
+        agentId: sourceAgentId(),
         ...MCP_SOURCE_MANIFEST_PAGINATION_INPUT,
       },
       annotations: toolAnnotations('read'),
@@ -1196,7 +1287,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       description:
         'Read a bounded line range (max 400 lines) from one file inside a quarantined submission tarball. Pair with the flagged path:line evidence from get_screening_quarantine_context to inspect exactly the suspicious code. When you do not have a line number yet, do NOT bisect with successive 400-line windows — call search_screening_source, which scans the whole artifact in one request and returns the path:line to read here. Requires the dedicated backroom:artifact:read scope because miner source is sensitive.',
       inputSchema: {
-        agentId: z.string().uuid(),
+        agentId: sourceAgentId(),
         path: z.string().min(1).max(240),
         startLine: z.number().int().min(1).default(1),
         endLine: z.number().int().min(1).default(400),
@@ -1297,7 +1388,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Preview ATH rulings batch',
       description:
-        'Dry-run a batch of up to 50 ATH rulings without changing anything. Pass either uploadKey (from create_ath_rulings_upload) or the same document\'s `rulings` inline (Platform wire shape, snake_case). Every item is re-read from live state: agent_status, artifact SHA-256 and score count against the ruling\'s expected_sha256 / expected_score_count guards (stale_guard=true and disposition stale_guard when they moved), plus the review row, so the disposition says what execute will do: ready (with `steps`, e.g. a reject on a scored agent is ["open","reject"], on a held agent ["reject"]), already_applied (idempotent replay), conflict (conflict_reason is the 409 the underlying route would answer), not_found, or invalid (a reject without evidence_references). The crown arithmetic is the board the operator sees: the validator-equivalent KOTH fold (eligible ledger with stderr, quorum, confirmation and efficiency inputs) under the same fleet-gated tie-weighting and ceiling-band-clamp flags the public leaderboard applies, returned as `board` (champion, raw leader, fingerprint). `would_change_crown` marks rulings that hold or reject the champion / raw leader, or clear an agent whose canonical score would re-enter as champion or raw leader -- judged CUMULATIVELY against the board after the earlier items in the batch, so rejecting the champion in item 0 flags the runner-up a later item removes (a batch that empties the top five flags every row). The preview_token is HMAC-signed, bound to the signed-in operator, the rulings digest, the upload key, and the crown outcome, and expires after 10 minutes. Inline previews must resend the identical `rulings` to execute. Requires backroom:read.',
+        'Dry-run a batch of up to 50 ATH rulings without changing anything. Pass either uploadKey (from create_ath_rulings_upload) or the same document\'s `rulings` inline (Platform wire shape, snake_case). Every item is re-read from live state: agent_status, artifact SHA-256 and score count against the ruling\'s expected_sha256 / expected_score_count guards (stale_guard=true and disposition stale_guard when they moved), plus the review row, so the disposition says what execute will do: ready (with `steps`, e.g. a reject on a scored agent is ["open","reject"], on a held agent ["reject"]; a clear on a held agent is ["clear"], and a clear on an unheld scored or live agent with no ATH review is ["attest"]: it records the terminal clear without holding the row, so the agent never leaves the board and would_change_crown is always false; a reject is also accepted on an agent still evaluating below quorum, as ["open","reject"], and ends its live validator tickets so the remaining runs are not paid for, while a bare open still needs scored or live), already_applied (idempotent replay), conflict (conflict_reason is the 409 the underlying route would answer), not_found, or invalid (a reject without evidence_references). The crown arithmetic is the board the operator sees: the validator-equivalent KOTH fold (eligible ledger with stderr, quorum, confirmation and efficiency inputs) under the same fleet-gated tie-weighting and ceiling-band-clamp flags the public leaderboard applies, returned as `board` (champion, raw leader, fingerprint). `would_change_crown` marks rulings that hold or reject the champion / raw leader, or clear a held agent whose canonical score would re-enter as champion or raw leader -- judged CUMULATIVELY against the board after the earlier items in the batch, so rejecting the champion in item 0 flags the runner-up a later item removes (a batch that empties the top five flags every row). The preview_token is HMAC-signed, bound to the signed-in operator, the rulings digest, the upload key, and the crown outcome, and expires after 10 minutes. Inline previews must resend the identical `rulings` to execute. Requires backroom:read.',
       inputSchema: previewAthRulingsBatchInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -1314,7 +1405,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Execute ATH rulings batch',
       description:
-        'Apply exactly the rulings a current preview token describes; confirmation must be "APPLY ATH RULINGS BATCH". The Platform verifies the token (operator, digest, TTL), re-downloads the uploaded document (or requires the identical inline `rulings`), RE-READS THE BOARD, and re-previews every item before touching it. Each ruling is then applied independently through the same open_ath_review / resolve_ath_review code path -- a reject on a scored agent opens the hold and resolves it in one item -- with the board re-read from Postgres after every ruling that lands, so item i is judged against the real board after items < i (not the preview\'s simulation); each is separately audited: the AthReview provenance and the clear/reject action rows carry batch_id, index, evidence_references, the rulings digest, the upload key, and the board fingerprint. Rows come back as applied / already_applied / failed with the refusal reason, so a partial batch is safe to preview and re-run. An applied row with `annotated: false` LANDED -- only the batch_id / evidence_references annotation on its audit rows failed; never re-run it. An item is refused when its guards moved, or when its crown outcome differs from the preview (would_change_crown flipped, or the champion / raw leader changed and the item touches the crown) -- preview again and read the new `board`. board_before and board_after report the crown around the batch. Requires backroom:write.',
+        'Apply exactly the rulings a current preview token describes; confirmation must be "APPLY ATH RULINGS BATCH". The Platform verifies the token (operator, digest, TTL), re-downloads the uploaded document (or requires the identical inline `rulings`), RE-READS THE BOARD, and re-previews every item before touching it. Each ruling is then applied independently through the same open_ath_review / resolve_ath_review code path -- a reject on a scored agent opens the hold and resolves it in one item, and an ["attest"] clear writes a resolved-clear review for an unheld scored or live agent without changing its status -- with the board re-read from Postgres after every ruling that lands, so item i is judged against the real board after items < i (not the preview\'s simulation); each is separately audited: the AthReview provenance and the clear/reject action rows carry batch_id, index, evidence_references, the rulings digest, the upload key, and the board fingerprint. Rows come back as applied / already_applied / failed with the refusal reason, so a partial batch is safe to preview and re-run. An applied row with `annotated: false` LANDED -- only the batch_id / evidence_references annotation on its audit rows failed; never re-run it. An item is refused when its guards moved, or when its crown outcome differs from the preview (would_change_crown flipped, or the champion / raw leader changed and the item touches the crown) -- preview again and read the new `board`. board_before and board_after report the crown around the batch. Requires backroom:write.',
       inputSchema: executeAthRulingsBatchInputSchema,
       annotations: toolAnnotations('write', true),
     },
@@ -1332,7 +1423,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       title: 'Get copy-review source diff',
       description:
         'Return a per-file diff manifest between a held (ath_pending_review) agent and the agent it was matched against: every path classified as added, removed, modified, identical, or renamed (from_path → to_path) with added/removed line counts and a normalized-identical flag (true when the code matches once comments and whitespace are canonicalized — a reformatted copy). Use it to see at a glance which files were copied verbatim before reading individual diffs. Requires the dedicated backroom:artifact:read scope because miner source is sensitive.',
-      inputSchema: { agentId: z.string().uuid() },
+      inputSchema: { agentId: sourceAgentId() },
       annotations: toolAnnotations('read'),
     },
     async (input) =>
@@ -1350,7 +1441,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       description:
         'Return the bounded unified diff (reference -> candidate) for one file between a held agent and the agent it copied. Pair with get_copy_review_source_diff to pick a modified file, then read its exact line-level changes. Requires the dedicated backroom:artifact:read scope because miner source is sensitive.',
       inputSchema: {
-        agentId: z.string().uuid(),
+        agentId: sourceAgentId(),
         path: z.string().min(1).max(240),
       },
       annotations: toolAnnotations('read'),
@@ -1360,12 +1451,34 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_lineage_source_diff',
+    {
+      description:
+        'Diff the source of ANY two stored agents, reference -> agent, with no copy review required: typically a resubmission (agentId) against the rejected ancestor it claims to have fixed (referenceAgentId), to check whether a rejected mechanism was really removed. Without path it returns the per-file manifest in the get_copy_review_source_diff shape: every path added, removed, modified, identical, or renamed (from_path → to_path), line counts, a normalized-identical flag, and omitted_paths the bounded read skipped (not compared, never a removal). With path (from that manifest) it returns that one file\'s bounded unified diff instead. The two ids must differ. Platform audits the source read of both agents. Requires the dedicated backroom:artifact:read scope because miner source is sensitive.',
+      inputSchema: {
+        agentId: sourceAgentId(),
+        referenceAgentId: sourceAgentId(),
+        path: z.string().min(1).max(240).optional(),
+      },
+      annotations: toolAnnotations('read'),
+    },
+    async ({ path, ...pair }) =>
+      artifact(async () =>
+        path === undefined
+          ? compacted(await fetchLineageSourceDiff(pair, props.session.email), {
+              files: { pin: ['path'] },
+            })
+          : fetchLineageSourceDiffFile({ ...pair, path }, props.session.email),
+      ),
+  )
+
+  registerTool(
     'get_screening_baseline_diff',
     {
       title: 'Get starter-kit baseline diff',
       description:
         "Return a per-file diff manifest between one submission and the official starter kit every miner begins from. Each path is classified added, removed, modified, or identical, and carries a stock_kit flag that is true when the content is kit code at ANY revision in the pinned lineage — not merely identical to the tip — so a miner who forked an older commit is not credited with authoring it. The headline custom_added_lines counts only lines that are neither baseline nor kit code, i.e. the surface the miner actually wrote, summed over every compared file. When custom_added_lines_complete is false that total is a lower bound: the files in omitted_paths (omitted_file_count in all) were past the platform's bounded source read and were NOT compared, so they appear in no row or count; read them with read_screening_source_file. Start a quarantine review here: it turns reading a whole crate into reading a small delta, and it distinguishes a real custom harness from a kit variant with a few lines changed. Pair with read_screening_baseline_diff_file for line-level changes. Requires the dedicated backroom:artifact:read scope because miner source is sensitive.",
-      inputSchema: { agentId: z.string().uuid() },
+      inputSchema: { agentId: sourceAgentId() },
       annotations: toolAnnotations('read'),
     },
     async (input) =>
@@ -1379,7 +1492,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       description:
         'Return the bounded unified diff (starter kit -> submission) for one file in a submission. Pair with get_screening_baseline_diff to pick a non-stock file, then read exactly what the miner changed or added relative to the kit. Requires the dedicated backroom:artifact:read scope because miner source is sensitive.',
       inputSchema: {
-        agentId: z.string().uuid(),
+        agentId: sourceAgentId(),
         path: z.string().min(1).max(240),
       },
       annotations: toolAnnotations('read'),
@@ -1590,6 +1703,164 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     async (input) => result(await fetchV13ReplayPrivateStatistics(input)),
   )
 
+
+  registerTool('get_github_link_revocation_preflight', {
+    title: 'Inspect GitHub link',
+    description: 'Read an exact linkId, its original signed identity proof, revocation blocker and exact confirmation. Returns the append-only operator audit after revocation. Use for a hostile or compromised link; no signing key or OAuth token is exposed. Requires backroom:read.',
+    // The service still validates UUIDs; the catalog needs only their format.
+    inputSchema: githubRevocationReadInputSchema.extend({ linkId: z.string().meta({ format: 'uuid' }) }), annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchGithubRevocationPreflight(input)))
+
+  registerTool('revoke_miner_github_link', {
+    title: 'Revoke GitHub link',
+    description: 'Revoke exactly linkId using REVOKE GITHUB LINK {linkId} and an operator reason. Writes an immutable audit with the current signed-in operator and preserves the original miner signature. The preflight and mutation share the same active-link guard; a link revoked by someone else fails, while a retry of your own revocation returns it. If the outcome cannot be decided, retry with the same input. Frees the GitHub account for a new verified link and never changes payees or submissions. Requires backroom:write.',
+    inputSchema: githubRevocationWriteInputSchema.extend({ linkId: z.string().meta({ format: 'uuid' }) }), annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => revokeMinerGithubLink(props.session.email, input)))
+
+  registerTool('get_miner_github_link', {
+    title: 'Get verified miner GitHub link',
+    description: 'Read the active signed link between a miner hotkey and an OAuth-verified numeric GitHub user id. Login is a recorded display label; renames require re-linking. The receipt includes its signature, nonce, issue time, and finalized Owner(hotkey) snapshot. No OAuth state, tokens or secrets are returned. Identity only; never derive payment destinations from this link. Requires backroom:read.',
+    inputSchema: contributorHotkeyInputSchema, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchMinerGithubLink(input)))
+
+  registerTool('get_github_contributor_status', {
+    title: 'Get GitHub contributor identity and CLA',
+    description: 'Resolve an authenticated GitHub PR author numeric id to its active linked hotkey and current CLA status. Always use the numeric author id, never a login string: logins can be renamed or reused. is_current reports effective-version consent, not a bounty award or payee authorization. An unlinked account returns link=null and cla=null. If only the CLA read fails, the identity is still returned with cla=null and cla_error naming the failure; never read that as unsigned. Requires backroom:read.',
+    inputSchema: githubAccountInputSchema, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchGithubContributor(input)))
+
+  registerTool('get_miner_cla_status', {
+    title: 'Get miner CLA consent',
+    description: 'Read the currently effective immutable CLA version and this hotkey signature receipt. is_current means a matching version/digest receipt exists; a historical signature alone does not meet a newly effective version. A pending future version does not supersede the current one. The signature is consent only and cannot redirect payment. Requires backroom:read.',
+    inputSchema: contributorHotkeyInputSchema, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchMinerClaStatus(input)))
+
+  registerTool('get_cla_policy', {
+    title: 'Get CLA rollout and adoption',
+    description: 'Read the append-only CLA off/shadow/enforce policy, current effective version, newest-first paged history and adoption counts. active_hotkeys_basis=non_retired_submissions counts distinct hotkeys with a non-rejected, non-banned, non-retired submission, not current chain registrations. Unsigned includes outdated receipts. unsigned_shadow_uploads counts unsigned artifacts accepted in shadow mode, recorded in the same transaction as the upload; rejected requests and exact retries add no observations. Requires backroom:read and changes nothing.',
+    inputSchema: claPolicyReadInputSchema, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchClaPolicy(input)))
+
+  registerTool('set_cla_policy', {
+    title: 'Set CLA rollout mode',
+    description: 'Append a CLA policy revision using the exact expectedRevision, operator reason, and confirmation SET CLA GATE OFF, SET CLA GATE SHADOW or SET CLA GATE ENFORCE. Enforce requires published currently effective maintainer-approved text, and every current or scheduled version needs 24 hours notice first; get_cla_policy reports earliest_enforcement_at. Start off, measure adoption in shadow and announce the date before enforcing. Existing scored agents remain unchanged. Returns the committed revision as applied with the refreshed policy. If the outcome cannot be decided (timeout, 5xx or lost connection, and the revision is not visible yet), applied is null and refresh_error says it may have committed: retry with the same input, which returns your revision once visible. A definite refusal fails and applied nothing. Write outcomes in docs/mcp.md. Requires backroom:write.',
+    inputSchema: claPolicyWriteInputSchema, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => updateClaPolicy(props.session.email, input)))
+
+  registerTool('publish_cla_version', {
+    title: 'Publish approved pinned CLA text',
+    description: 'Publish the exact UTF-8 bytes of maintainer-approved docs/legal/CLA-vN.md with its SHA-256, version, effective date and operator reason. Supply confirmation PUBLISH CLA {version} {sha256}. Text and digest are immutable; versions and effective dates advance monotonically. Never publish test fixtures or draft legal wording. This only publishes the registry entry and does not change rollout mode. If the outcome cannot be decided, it fails with may have committed: retry with the same input, which returns an already committed publication instead of failing. Write outcomes in docs/mcp.md. Requires backroom:write.',
+    // The service still parses effectiveAt strictly; the catalog needs only its format.
+    inputSchema: claPublishInputSchema.extend({ effectiveAt: z.string().meta({ format: 'date-time' }) }), annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => publishClaVersion(props.session.email, input)))
+
+  registerTool('get_bounty_board', {
+    title: 'List build bounties',
+    description: 'Page the public build-bounty board: each bounty with its current revision terms, effective slot counts, claims pause, overdue reviews and recorded awards. Filter by repo and issue to find one. Requires backroom:read.',
+    inputSchema: bountyBoardInputSchema, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchBountyBoard(input)))
+
+  registerTool('get_bounty', {
+    title: 'Get bounty operator view',
+    description: 'One bounty with everything public views hide: the reviewer in force, each revision\'s operator, reviewer and reason, every claim with submissions, obligations and facts, appeal statements, and a chronological audit of every operator record (publication, pause, reassignment, review, appeal decision, cancel, reopen, award, approval, dispatch, fact) with actor and reason, plus a source-safe report with settlement checks. Use it before any bounty write and to verify one after. Requires backroom:read.',
+    inputSchema: bountyCatalogInputs.bounty, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchBounty(input)))
+
+  registerTool('get_bounty_claim', {
+    title: 'Get bounty claim',
+    description: 'Read one claim: its hold, fee receipts, slot status, exact-commit submissions and decisions, appeals, obligations with derived settlement state and transfers, and delivery facts. Requires backroom:read.',
+    inputSchema: bountyCatalogInputs.claim, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchBountyClaim(input)))
+
+  registerTool('get_bounty_queue', {
+    title: 'Get bounty work queue',
+    description: 'queue=reviews lists submissions awaiting a decision, the most overdue first, with the reviewer in force; overdueOnly narrows it. queue=settlement lists obligations still needing an operator (awaiting_approval, over_policy_limit, approved, dispatched, uncertain, failed) with the operators who approved the current round; state narrows it, and state=confirmed shows paid ones. Requires backroom:read.',
+    inputSchema: bountyQueueInputSchema, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchBountyQueue(input)))
+
+  registerTool('get_bounty_payout_policy', {
+    title: 'Get bounty payout policy',
+    description: 'Read the payout policy revision in force: amounts up to single_approver_max_alpha_rao need one approver, up to dual_approver_max_alpha_rao two distinct approvers, and nobody may approve more. Returns null before the first revision, when no obligation can be approved. Pass revision to read that exact revision instead, or null when it does not exist. Requires backroom:read.',
+    inputSchema: bountyCatalogInputs.policyRead, annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchBountyPayoutPolicy(input)))
+
+  registerTool('preview_bounty_revision', {
+    title: 'Preview bounty revision',
+    description: 'Return the exact spec digest, the confirmation phrase PUBLISH BOUNTY {repo}#{issue} REVISION {n} {digest}, and every refusal for these terms. Writes nothing. Repos are lowercase owner/name; v1 requires rehearsal funding, three slots and distinct escrow keys. Requires backroom:read.',
+    inputSchema: bountyCatalogInputs.preview, annotations: toolAnnotations('read'),
+  }, async (input) => result(await previewBountyRevision(props.session.email, input)))
+
+  registerTool('publish_bounty_revision', {
+    title: 'Publish bounty revision',
+    description: 'Publish revision expectedRevision+1 with the exact phrase from preview_bounty_revision, the private reviewerActor and an operator reason. Revision 1 opens round 1 with three slots; later revisions never change existing slots. A changed revision fails; an uncertain outcome is settled by reading the revision back, so retry with the same input. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.publish, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => publishBountyRevision(props.session.email, input)))
+
+  registerTool('set_bounty_claims_paused', {
+    title: 'Pause or resume bounty claims',
+    description: 'Pause (PAUSE BOUNTY CLAIMS {repo}#{issue}) or resume (RESUME BOUNTY CLAIMS {repo}#{issue}) new holds with an operator reason. Existing holds still complete so no paid fee is stranded. The operator and reason stay private. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.pause, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => setBountyClaimsPaused(props.session.email, input)))
+
+  registerTool('review_bounty_submission', {
+    title: 'Review bounty submission',
+    description: 'Only the reviewer in force decides one exact submissionId: accept (ACCEPT BOUNTY CLAIM {repo}#{issue} {claimId}; optional public attribution; refunds the fee), changes_requested (REQUEST CHANGES ON ...; reworkDays sets the recorded rework deadline) or reject (REJECT ...; fee retained when the slot is reopened; appealable). The reason is public, the reviewer private. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.review, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => reviewBountySubmission(props.session.email, input)))
+
+  registerTool('reassign_bounty_reviewer', {
+    title: 'Reassign bounty reviewer',
+    description: 'Name a new reviewer in force with REASSIGN BOUNTY REVIEWER {repo}#{issue} and a reason. Overdue reviews get one more review window. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.reassign, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => reassignBountyReviewer(props.session.email, input)))
+
+  registerTool('control_bounty_slot', {
+    title: 'Cancel or reopen bounty slot',
+    description: 'action=cancel (CANCEL BOUNTY SLOT {repo}#{issue} ROUND {r} SLOT {p}; kind team or system_fault) cancels an open, claimed, submitted or rework slot and refunds a paid fee in full; a held slot is refused. action=reopen (REOPEN BOUNTY SLOT ...) reopens an expired, withdrawn, rejected or cancelled slot for a new claim, records a retained fee for a rejected, expired or withdrawn claim, and is refused while an appeal is pending. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.slot, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => controlBountySlot(props.session.email, input)))
+
+  registerTool('decide_bounty_appeal', {
+    title: 'Decide bounty appeal',
+    description: 'Uphold (UPHOLD BOUNTY APPEAL {appealId}; restoreDays required) or deny (DENY BOUNTY APPEAL {appealId}) an appeal of a rejection or missed deadline. The reviewer of the appealed rejection may not decide it. Upholding restores the claim to claimed with a fresh delivery window. Read the statement with get_bounty first. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.appeal, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => decideBountyAppeal(props.session.email, input)))
+
+  registerTool('award_bounty_claim', {
+    title: 'Award bounty claim',
+    description: 'Award accepted work amountAlphaRao with public attribution and a private reason (AWARD BOUNTY CLAIM {claimId} {amount} ALPHA RAO). Awards never exceed the pool of the revision the claim signed; a shared award awards each accepted claim. Recording an award moves no money. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.award, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => awardBountyClaim(props.session.email, input)))
+
+  registerTool('set_bounty_payout_policy', {
+    title: 'Set bounty payout policy',
+    description: 'Append payout policy revision expectedRevision+1 (SET BOUNTY PAYOUT POLICY {revision}) with single- and dual-approver limits in alpha rao. Approvals under an older revision stop counting. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.policy, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => setBountyPayoutPolicy(props.session.email, input)))
+
+  registerTool('approve_bounty_obligation', {
+    title: 'Approve bounty obligation',
+    description: 'Approve one obligation round binding its exact payee, amount and the policy revision in force (APPROVE BOUNTY OBLIGATION {obligationId} ROUND {r} {amount} ALPHA RAO TO {payee}). Whoever decided the award or accepted the work may not approve it; amounts above the single limit need a second, distinct approver. An award is held while its hotkey owner is not its payee. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.approve, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => approveBountyObligation(props.session.email, input)))
+
+  registerTool('dispatch_bounty_obligation', {
+    title: 'Dispatch bounty obligation',
+    description: 'Dispatch an approved round once (DISPATCH BOUNTY OBLIGATION {obligationId} ROUND {r}). The dispatch is recorded before sending; a held award is refused. A failed or expired transfer needs fresh approvals for the next round; an unknown outcome is uncertain and must be reconciled first. v1 is simulated: rehearsalOutcome names the outcome (confirmed, failed or unknown) and is required; no funds move. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.dispatch, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => dispatchBountyObligation(props.session.email, input)))
+
+  registerTool('reconcile_bounty_transfer', {
+    title: 'Reconcile bounty transfer',
+    description: 'Settle a dispatched or uncertain transfer from what the executor (chain) shows (RECONCILE BOUNTY TRANSFER {transferId}). Never resend an uncertain transfer; reconcile it. rehearsalOutcome is required, and each reconciliation is audited with its operator. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.reconcile, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => reconcileBountyTransfer(props.session.email, input)))
+
+  registerTool('record_bounty_fact', {
+    title: 'Record bounty delivery fact',
+    description: 'Record a public merged, deployed or adopted fact for accepted work (RECORD BOUNTY {KIND} {claimId}). Facts are never payment conditions. Requires backroom:write.',
+    inputSchema: bountyCatalogInputs.fact, annotations: toolAnnotations('write', true),
+  }, async (input) => write(() => recordBountyFact(props.session.email, input)))
 
   registerTool(
     'get_owner_attestations',
@@ -2243,7 +2514,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get public source-release policy',
       description:
-        "Read the subnet-wide policy governing whether miners' submitted source is ever published, and how soon: disclosure ('public' — source enters the normal release path — or 'never' — no source is published at all), embargo_hours (the window measured from completed winner-emission confirmation, 6 to 8760, retained but inert while disclosure is 'never'), the current append-only revision, and the history with the actor and reason behind every change. Uniform for every submission: there is no per-miner or per-submission setting, so this one value describes the whole subnet. Release is king-only regardless — only the exact submission that held the crown and earned winner emissions in a completed tempo is ever eligible — so a 'public' policy does not mean every submission is published. The release_gate field, when present, reports the served gate version, automatic_confirmation_enabled, the durable collector cursor and runtime hash, last payout attribution or blocking reason, pending receipt and unresolved payout counts, pending and confirmed king counts, and up to 25 exact-agent payout receipt summaries (confirmed first, then newest crowns); rows_has_more signals truncation. The receipt_diagnostics list contains up to 64 latest signed validator relay observations with received_at and stale; receipt_diagnostics_has_more signals truncation. Schema-v2 last_validation contains only bounded field/type/rule codes and the error count of the last invalid claim in the latest recovery page; a new page clears it, and absence on v1 means unknown. These are self-reported diagnostic stages, never payout evidence; missing observations mean unknown, not healthy. Missing release_gate means this response cannot prove the new gate is deployed. Positive revealed weights alone are not earnings proof. Requires backroom:read and changes nothing.",
+        "Read the subnet-wide policy governing whether miners' submitted source is ever published, and how soon: disclosure ('public' — source enters the normal release path — or 'never' — no source is published at all), embargo_hours (the window measured from completed winner-emission confirmation, 6 to 8760, retained but inert while disclosure is 'never'), the current append-only revision, and the history with the actor and reason behind every change. Uniform for every submission: there is no per-miner or per-submission setting, so this one value describes the whole subnet. Release is king-only regardless — only the exact submission that held the crown and earned winner emissions in a completed tempo is ever eligible — so a 'public' policy does not mean every submission is published. The release_gate field, when present, reports the served gate version, automatic_confirmation_enabled, archive_provider (configured host, auth mode, and credential presence only; never a URL or key, and not a provider health or authentication result), the durable collector cursor and runtime hash, last payout attribution or blocking reason, pending receipt and unresolved payout counts, pending and confirmed king counts, and up to 25 exact-agent payout receipt summaries (confirmed first, then newest crowns); rows_has_more signals truncation. The receipt_diagnostics list contains up to 64 latest signed validator relay observations with received_at and stale; receipt_diagnostics_has_more signals truncation. Schema-v2 last_validation contains only bounded field/type/rule codes and the error count of the last invalid claim in the latest recovery page; a new page clears it, and absence on v1 means unknown. These are self-reported diagnostic stages, never payout evidence; missing observations mean unknown, not healthy. Missing archive_provider means the configured provider is unknown. Missing release_gate means this response cannot prove the new gate is deployed. Positive revealed weights alone are not earnings proof. reveal_plan_shadow, when present, is the running check of the reveal-anchored range planner against the event planner: missed > 0 means it skipped a block the full reader acted on and must not be promoted; calls/blocks is its chain cost per block. Requires backroom:read and changes nothing.",
       inputSchema: MCP_SETTINGS_HISTORY_INPUT,
       annotations: toolAnnotations('read'),
     },
@@ -2942,7 +3213,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get validator fleet',
       description:
-        'Read the platform public validator heartbeat view with the identity the slot-cap console drops. Each row keeps software_version, protocol_version, stack component revisions (ditto_subnet, dittobench_api, model_relay, sandbox), scorer probe identity, updater current/candidate versions and updater self-refresh evidence, bench_serviceability, host metrics, live work counts, and claimed_slots (signed occupancy before ticket confirmation). active_benchmarks includes up to eight ticket-bound aggregate progress entries: agent_id, slot_id, bench_version, started_at, stage, completed_checks, total_checks, percent, stalled, and purpose. Missing progress is unknown, not zero; pair with reported_at and online before judging freshness. Calibration manifests, private run tokens, and per-case data are stripped. The rollout histogram is computed on the whole fleet before any hotkey filter or page, so online_serving_count and version buckets answer "is this SHA on enough validators" without paging. A missing updater_status is heartbeat protocol older than v23, not a failed update; self_refresh_installed is explicit from v26 onward. software_obsolete validators are issued no scoring work. Requires backroom:read; a failed fleet read is an error, never an empty fleet.',
+        'Read the platform public validator heartbeat view with the identity the slot-cap console drops. Each row keeps software_version, protocol_version, stack component revisions (ditto_subnet, dittobench_api, model_relay, sandbox), scorer probe identity, updater current/candidate versions and updater self-refresh evidence, bench_serviceability, host metrics, host_specs (CPUs, RAM MiB, root disk GiB, architecture; heartbeat v32+, null on older validators), live work counts, and claimed_slots (signed occupancy before ticket confirmation). active_benchmarks includes up to eight ticket-bound aggregate progress entries: agent_id, slot_id, bench_version, started_at, stage, completed_checks, total_checks, percent, stalled, and purpose. Missing progress is unknown, not zero; pair with reported_at and online before judging freshness. Calibration manifests, private run tokens, and per-case data are stripped. The rollout histogram is computed on the whole fleet before any hotkey filter or page, so online_serving_count and version buckets answer "is this SHA on enough validators" without paging. A missing updater_status is heartbeat protocol older than v23, not a failed update; self_refresh_installed is explicit from v26 onward. software_obsolete validators are issued no scoring work. Requires backroom:read; a failed fleet read is an error, never an empty fleet.',
       inputSchema: {
         validatorHotkey: z.string().min(1).max(64).optional(),
         ...MCP_PAGINATION_INPUT,
@@ -3040,7 +3311,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_v13_scorer_cohort',
     {
       title: 'Get V13 scorer cohort pin',
-      description: 'Read the exact immutable three-validator scorer pin and signed runtime packet. Null means no pin and no signed L2 lease. Requires backroom:read.',
+      description: 'Read the exact immutable scorer pin (3-16 validators; each agent is still scored by three distinct members) and its last operator-approved signed runtime packet. Null means no pin and no signed L2 lease. Requires backroom:read.',
       inputSchema: z.object({}),
       annotations: toolAnnotations('read'),
     },
@@ -3051,7 +3322,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_v13_scorer_cohort_preflight',
     {
       title: 'Get V13 scorer cohort preflight',
-      description: 'Read current signed packets, accepting capacity, issuance pauses, and live V13 ticket counts for exact activation. Requires backroom:read.',
+      description: 'Read current signed packets, accepting capacity, issuance pauses, live V13 ticket counts and pin membership per validator, plus the pinned hotkeys and the authority packet (signed by a strict majority, and at least three, of the live members) with its signers. Only signers of the authority packet are issued V13 work. Requires backroom:read.',
       inputSchema: z.object({}),
       annotations: toolAnnotations('read'),
     },
@@ -3062,7 +3333,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_v13_scorer_cohort_history',
     {
       title: 'Get V13 scorer cohort history',
-      description: 'Read the original immutable pin and all append-only packet rotations. Requires backroom:read.',
+      description: 'Read the original immutable pin and all append-only packet and membership rotations. Requires backroom:read.',
       inputSchema: z.object({}),
       annotations: toolAnnotations('read'),
     },
@@ -3073,7 +3344,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_v13_report_only_current_packet',
     {
       title: 'Get V13 report-only current packet',
-      description: 'Read unanimous current signed scorer packet for the pinned three validators, including whether it matches the effective primary pin. Never changes authority. Requires backroom:read.',
+      description: 'Read the current authority packet of the pinned members (signed by a live majority of at least three) while at least three of its signers are routable, the routable hotkeys, and whether it matches the effective primary pin. Never changes authority. Requires backroom:read.',
       inputSchema: z.object({}),
       annotations: toolAnnotations('read'),
     },
@@ -3084,7 +3355,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'activate_v13_scorer_cohort',
     {
       title: 'Activate V13 scorer cohort pin',
-      description: 'One-way pin of three sorted exact managed validator hotkeys and their signed scorer packet. The Platform refuses unless all other fresh V13 validators are issuance-paused and all nonmember V13 tickets have drained. Requires current validator slot settings revision/checksum and confirmation PIN V13 SCORER COHORT. Requires backroom:write.',
+      description: 'One-way pin of 3-16 sorted, distinct, exact managed validator hotkeys and their signed scorer packet; every member must sign it. The Platform refuses unless all other fresh V13 validators are issuance-paused and all nonmember V13 tickets have drained. Requires current validator slot settings revision/checksum and confirmation PIN V13 SCORER COHORT. Requires backroom:write.',
       inputSchema: z.object({
         hotkeys: v13ScorerCohortHotkeysSchema,
         packet: z.object({
@@ -3107,8 +3378,8 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   registerTool(
     'rotate_v13_scorer_cohort',
     {
-      title: 'Rotate V13 scorer cohort packet',
-      description: 'Append one guarded scorer packet rotation for the same three sorted validators. Requires exact current packet and rotation ID, fresh unanimous signed target packet, current slot settings, accepting members, paused nonmembers, zero live V13 tickets, and confirmation ROTATE V13 SCORER PACKET. Requires backroom:write.',
+      title: 'Rotate V13 scorer cohort packet or membership',
+      description: 'Append one guarded rotation that changes the scorer packet, the 3-16 sorted member hotkeys, or both. Requires the exact current packet, rotation ID and (to change membership) expectedCurrentHotkeys; every new member signing the target packet, unpaused and accepting; the target signed by a live majority of at least three proposed members, three of them routable; current slot settings; paused nonmembers; and confirmation ROTATE V13 SCORER PACKET. A packet change needs zero live V13 tickets; a membership-only change needs only removed members drained. Requires backroom:write.',
       inputSchema: z.object({
         hotkeys: v13ScorerCohortHotkeysSchema,
         packet: z.object({
@@ -3126,6 +3397,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
           injected_keys: z.array(z.string()).min(1),
         }),
         expectedCurrentRotationId: z.number().int().min(1).optional(),
+        expectedCurrentHotkeys: v13ScorerCohortHotkeysSchema.optional(),
         expectedSlotSettingsRevision: z.number().int().min(1),
         expectedSlotSettingsChecksum: z.string().regex(/^[0-9a-f]{64}$/),
         reason: z.string().min(8),
@@ -3263,10 +3535,29 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Get source-review queue-age SLO',
       description:
-        'Read the ordinary (pre-score) source-review queue-age SLO: p50/p95/oldest actionable age in seconds, throughput (completions per hour over a fixed window), and the current backlog broken out by reason -- active_work (a screener is claimed and running), capacity_wait (uploaded, no screener has claimed it yet), infrastructure_backoff (the last attempt ended retryable_infra/inconclusive and is fail-closed parked for an operator-authorized retry), and escalation (an active anti-cheat quarantine hold, which wins regardless of what the underlying attempt itself reports, e.g. a rescreen that then failed). Age is the stable queue-entry clock (the submission\'s own upload time); a retry never resets it, so a long-overdue item stays overdue through every rescreen. Also reports four reconciliation counts that are visible but NEVER folded into the metrics above: stale_running_ghost_count (a screening attempt still looks running though its agent already reached a terminal or later status), resolved_quarantine_ghost_count (an agent stuck at quarantined status with no active quarantine row), terminal_quarantine_ghost_count (an active quarantine whose agent is already banned or rejected; close it with a fenced batch reject), and attempt_status_drift_ghost_count (the latest attempt reports a status this SLO\'s reason classification does not cover, e.g. a terminal verdict on an agent whose own status never advanced). overdue_count and p95_exceeds_threshold are null until an operator configures a threshold (there is no shipped default); this tool enforces nothing -- no alert, no operator escalation action. Covers ORDINARY screening review only: stronger top-agent review, copy review, ATH review, and human escalation are separate review classes with their own clocks, not yet built. Requires backroom:read and changes nothing.',
+        'Read the ordinary (pre-score) source-review queue-age SLO: p50/p95/oldest actionable age in seconds, throughput (completions per hour over a fixed window), and the current backlog broken out by reason -- active_work (a screener is claimed and running), capacity_wait (uploaded, no screener has claimed it yet), infrastructure_backoff (the last attempt ended retryable_infra/inconclusive and is fail-closed parked for an operator-authorized retry), and escalation (an active anti-cheat quarantine hold, which wins regardless of what the underlying attempt itself reports, e.g. a rescreen that then failed). Age is the stable queue-entry clock (the submission\'s own upload time); a retry never resets it, so a long-overdue item stays overdue through every rescreen. Also reports four reconciliation counts that are visible but NEVER folded into the metrics above: stale_running_ghost_count (a screening attempt still looks running though its agent already reached a terminal or later status), resolved_quarantine_ghost_count (an agent stuck at quarantined status with no active quarantine row), terminal_quarantine_ghost_count (an active quarantine whose agent is already banned or rejected; close it with a fenced batch reject), and attempt_status_drift_ghost_count (the latest attempt reports a status this SLO\'s reason classification does not cover, e.g. a terminal verdict on an agent whose own status never advanced). overdue_count and p95_exceeds_threshold are null until an operator configures a threshold (there is no shipped default); this tool enforces nothing -- no alert, no operator escalation action. The top level covers ORDINARY screening review only. ath_review is the post-score ATH-hold queue (every pending ath_reviews hold; null with ath_review_error if that read failed): ath aggregates all holds, copy_review is the copy clock (legacy holds with no review_kind included), and classes gives one entry each for copy, benchmark_overfit, deferred_source_review, integrity_double_check (the top-five deep review), and anomalous_score, with the same reasons, oldest_agent_id/oldest_reason, resolved-review throughput, and null-until-configured thresholds. Its clock is COALESCE(reopened_at, opened_at): a deep-review retry never resets it, a reopen does. Copy, overfit, and anomalous-score holds are always escalation; deferred and double-check holds follow the newest screening attempt since the clock started until that pass concludes. Pending reviews whose agent is no longer ath_pending_review are stranded_terminal_ghost_count (banned/rejected) or stranded_hold_ghost_count (needs unsticking; resolving 409s), and held_without_review_ghost_count counts held agents with no pending row; none is backlog. Human escalation has no clock yet. Requires backroom:read and changes nothing.',
       annotations: toolAnnotations('read'),
     },
-    async () => result(await fetchSourceReviewQueueSlo()),
+    async () => {
+      // The ordinary snapshot keeps its top-level shape; the ATH/copy-review
+      // snapshot rides beside it so one catalog entry serves both clocks. A
+      // Platform without the ATH endpoint must not break the ordinary read.
+      const [ordinary, ath] = await Promise.all([
+        fetchSourceReviewQueueSlo(),
+        fetchAthReviewQueueSlo().then(
+          (value) => ({ value, error: null }),
+          (error: unknown) => ({
+            value: null,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        ),
+      ])
+      return result({
+        ...ordinary,
+        ath_review: ath.value,
+        ...(ath.error === null ? {} : { ath_review_error: ath.error }),
+      })
+    },
   )
 
   registerTool(
@@ -3289,8 +3580,8 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       title: 'Get outlier escalation posture',
       description:
         'Read the anomalous-score outlier escalation (issue #476), which can open ATH holds (review_kind anomalous_score) on an out-of-band high composite. It is configured ONLY by environment variables read once per Platform API process at startup (env_vars lists the names; settings_loaded_at is when this process read them), so this is the one place to see what scoring is actually using. ' +
-        'settings is the effective policy: mode off (never computed), observe (would-be holds recorded, nobody held) or enforce (holds opened), plus min_bench_version, min_cohort_size, modified_z_threshold and min_composite_floor; defaults is the shipped policy. sources gives each field\'s origin: env (set and parsed), default (unset) or default_invalid_env (SET BUT REJECTED, so the shipped default is silently in force -- e.g. a mistyped mode leaves the gate off). invalid_env_fields lists those fields; the rejected text is never echoed. A null threshold means the env set nan/inf, which scoring is using. ' +
-        'activity reads the append-only score audit chain: observed_total / enforced_total over all time, the same counts inside window_hours (168), and the recent_limit (20) newest entries with agent_id, recorded_at, enforced, bench_version and the recorded cohort evidence (composite, cohort median/MAD, modified_z, thresholds). recent_truncated means older entries exist beyond the page; the counts are exact. pending_review_count is pending ATH reviews of kind anomalous_score; open them with get_ath_review. ' +
+        'settings is the effective policy: mode off (never computed), observe (would-be holds recorded, nobody held) or enforce (holds opened), plus min_bench_version, min_cohort_size, modified_z_threshold, min_composite_floor and per_axis_enforce (false: a per-axis tool_mean/memory_mean outlier is recorded as evidence only; true: it can also hold); defaults is the shipped policy. sources gives each field\'s origin: env (set and parsed), default (unset) or default_invalid_env (SET BUT REJECTED, so the shipped default is silently in force -- e.g. a mistyped mode leaves the gate off). invalid_env_fields lists those fields; the rejected text is never echoed. A null threshold means the env set nan/inf, which scoring is using. ' +
+        'activity reads the append-only score audit chain: observed_total / enforced_total over all time, the same counts inside window_hours (168), and the recent_limit (20) newest entries with agent_id, recorded_at, enforced, bench_version and the recorded cohort evidence (composite, cohort median/MAD, modified_z, thresholds). recent_truncated means older entries exist beyond the page; the counts are exact. Per-axis evidence entries (a tool_mean or memory_mean outlier the composite gate did not hold) are counted separately as axis_evidence_total / axis_evidence_in_window and listed newest first in recent_axis_evidence (recent_axis_evidence_truncated likewise); the audit chain keeps only each axis and whether it was an outlier, never its cohort statistics. pending_review_count is pending ATH reviews of kind anomalous_score; open them with get_ath_review. ' +
         'Not /admin/score-outliers (validator disagreement inside one quorum). Changing a value needs an env change and a Platform restart; this tool changes nothing. Requires backroom:read.',
       annotations: toolAnnotations('read'),
     },
@@ -3303,8 +3594,8 @@ export function createBackroomMcpServer(props: McpGrantProps) {
       title: 'Dry-run outlier escalation',
       description:
         'Replay the anomalous-score outlier escalation over the CURRENT scored ledger for one benchmark version (default: active) and report which rows it would hold, whatever the mode -- the false-positive check before switching observe to enforce or retuning a threshold. It calls the same decision function scoring calls at finalization, over the same ledger scoring reads there (one scored row per owner, median-row composite). Each row is judged against every other row; held and banned agents are outside that ledger and are not replayed. ' +
-        'settings is the policy replayed: the effective settings (get_outlier_escalation) with any override applied -- minCohortSize, modifiedZThreshold, minCompositeFloor -- and overridden_fields names them. mode is reported but not applied. bench_version_in_scope false means the live gate never runs at that version (below min_bench_version). ' +
-        'Returns ledger_size, cohort_size (peers per candidate), cohort_too_small (then nothing can trigger), ledger_median / ledger_mad over all composites, would_trigger_count (exact), and up to limit (20, max 100) would_trigger rows, highest composite first, each with agent_id, miner_hotkey and the same evidence the gate records (composite, leave-one-out cohort median/MAD, modified_z, thresholds). truncated means more rows would trigger. ' +
+        'settings is the policy replayed: the effective settings (get_outlier_escalation) with any override applied -- minCohortSize, modifiedZThreshold, minCompositeFloor, perAxisEnforce -- and overridden_fields names them. Set perAxisEnforce true to preview per-axis holds before enabling DITTO_OUTLIER_ESCALATION_PER_AXIS_ENFORCE. mode is reported but not applied. bench_version_in_scope false means the live gate never runs at that version (below min_bench_version). ' +
+        'Returns ledger_size, cohort_size (peers per candidate), cohort_too_small (then nothing can trigger), ledger_median / ledger_mad over all composites, would_trigger_count (exact), and up to limit (20, max 100) would_trigger rows, highest composite first, each with agent_id, miner_hotkey and the same evidence the gate records (composite, leave-one-out cohort median/MAD, modified_z, thresholds). truncated means more rows would trigger. axis_evidence_count / axis_evidence (axis_evidence_truncated) list rows with a per-axis outlier the replayed policy would record but not hold, with per_axis value, cohort median/MAD and modified_z. A zero-MAD axis cohort flags any above-median value on that axis. ' +
         'It is a replay of today\'s ledger, not history: a row\'s cohort at its own finalization was the ledger then, and included its owner\'s earlier best. Past observe/enforce triggers are in get_outlier_escalation activity. Opens no hold, writes nothing, and changes no setting. Requires backroom:read.',
       inputSchema: outlierEscalationDryRunInputSchema,
       annotations: toolAnnotations('read'),
@@ -3457,7 +3748,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_treasury_settings',
     {
       title: 'Get SN118 treasury shadow policy',
-      description: 'Read shadow-only treasury proposals and revision history. Optional revision returns only that immutable raw settings/checksum row; missing or invalid history refuses without defaults. V1 preserves separate GM/maintenance shares and the 500 bps combined limit. V2 describes one collector and configurable holding wallets under a combined 1000 bps pool, reserved before miner-remainder burn. Includes distribution interval, exact payee rules and publication controls; private billing references are available only in authenticated settings. Weight effect is none; funding, signing and payment observation are not activated. Requires backroom:read.',
+      description: 'Read shadow-only treasury proposals and revision history. Optional revision returns only that immutable raw settings/checksum row; missing or invalid history refuses without defaults. V1 preserves separate GM/maintenance shares and the 500 bps combined limit. V2 describes one collector and configurable holding wallets under a combined 10000 bps pool, reserved before miner-remainder burn. Includes distribution interval, exact payee rules and publication controls; private billing references are available only in authenticated settings. Weight effect is none; funding, signing and payment observation are not activated. Requires backroom:read.',
       annotations: toolAnnotations('read'),
       inputSchema: { revision: z.number().int().min(1).max(2_147_483_647).optional() },
     },
@@ -3470,6 +3761,16 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'get_treasury_receipts',
     { title: 'Read verified treasury receipts', description: 'Read up to 100 independently finalized receipt records, including publication-off observations, historical policy digest, source selector and provider-credit not_proven state. No spending authority. Requires backroom:read.', annotations: toolAnnotations('read') },
     async () => result(await fetchTreasuryReceipts()),
+  )
+  registerTool(
+    'get_treasury_ledger',
+    {
+      title: 'Read the Gamma collector ledger',
+      description: 'Read per-epoch finalized public readings of the Gamma collector: earnings per epoch, balance, conviction-lock mass and mode, owner-hotkey conviction, holding-wallet balances, and each interval where alpha left the collector, split into receipted and unreceipted amounts. An unreceipted outflow stays listed until record_treasury_receipt ingests its verified receipt. Amounts are rao (1e-9 alpha). Includes sampler status. No writes. Requires backroom:read.',
+      inputSchema: { limit: z.number().int().min(1).max(480).optional().describe('Epochs to read, newest first; default 72.') },
+      annotations: toolAnnotations('read'),
+    },
+    async (input) => result(await fetchTreasuryLedger(input.limit ?? 72)),
   )
   registerTool(
     'get_treasury_manual_transfers',
@@ -3503,6 +3804,12 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     description: 'Read current append-only Gamma public-proof producer control and audit. Configuration is separate from independently verified current enforcing epoch and actual weight dispatch. It cannot start transfers or timers. Requires backroom:read.',
     annotations: toolAnnotations('read'),
   }, async () => result(await fetchTreasuryRuntime()))
+  registerTool('get_runtime_interface_report', {
+    title: 'Read Subtensor runtime upgrade report',
+    description: 'Read how the runtime at a finalized block (default: head) compares with audited runtimes. For source attribution and treasury receipt reading it reports admitted_by (audited_artifact, interface, or null = refused), the nearest audited release and the consumed storage/event/call entries that moved. For the treasury signer it reports whether the runtime is the one its cold-signed policy binds and every Pallet.call added, removed or reshaped since that baseline, which is what a new cold approval must review. Admission by interface is read-only: the signer never signs on a runtime its policy does not name. Changes nothing. Requires backroom:read.',
+    inputSchema: runtimeInterfaceReportInputSchema,
+    annotations: toolAnnotations('read'),
+  }, async (input) => result(await fetchRuntimeInterfaceReport(input)))
   registerTool('record_treasury_runtime', {
     title: 'Control guarded Gamma producer',
     description: 'Append a durable public-proof control with expectedRevision and exact GAMMA <OBSERVE|ENFORCE|PAUSE> <policy digest> confirmation. Provide only public approvalJson, immutable emission/collector digests and reason. Observe configures finalized ledger observation without weights. Enforce requires an existing matching approval, matching public bucket allocation, immutable epoch mode and fresh exact-policy queued V2 guard for every explicitly configured managedValidatorHotkeys member, with current chain permission; independent validators do not block activation; activationEpoch must be the next independently observed epoch. Copy-weight history is not proof. Pause retains the approval and refuses V2 ledger dispatch; it does not disarm transport fences, cancel already queued tasks, undo finalized weights or restore legacy dispatch. Old epoch pins remain immutable; missing producer/fleet proof refuses without legacy fallback. Neither action starts custody timers, signs or transfers funds. Requires backroom:write.',
@@ -3524,7 +3831,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     'record_treasury_settings',
     {
       title: 'Record SN118 treasury shadow policy',
-      description: 'Append a shadow treasury proposal with expectedRevision, reason and exact confirmation RECORD TREASURY SHADOW POLICY. V1 retains its 500 bps cap and released-miner-share denominator. V2 uses one collector and distinct holding wallets under a combined 1000 bps service pool reserved before burn; billing references are optional for manual purchases. Wallet/rule changes enter public admin activity, excluding private billing references. Public addresses only; never provide seeds. Recording settings cannot change weights, sign transfers or activate observation. Requires backroom:write.',
+      description: 'Append a shadow treasury proposal with expectedRevision, reason and exact confirmation RECORD TREASURY SHADOW POLICY. V1 retains its 500 bps cap and released-miner-share denominator. V2 uses one collector and distinct holding wallets under a combined 10000 bps service pool reserved before burn; billing references are optional for manual purchases. Wallet/rule changes enter public admin activity, excluding private billing references. Public addresses only; never provide seeds. While Gamma enforces a coldkey-signed range, an in-range Gamma % change applies from the next epoch (weight_effect next_epoch); settings never sign transfers or activate observation. Requires backroom:write.',
       inputSchema: recordTreasurySettingsInputSchema,
       annotations: toolAnnotations('write', true),
     },
@@ -3558,7 +3865,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Set emission burn',
       description:
-        'Apply one append-only revision of the SN118 emission burn live, with no validator release. Supply burn_share (0 releases the full miner emission through KOTH, 1 burns all of it — the same all-to-burn vector the fold already submits when no agent holds a positive score), expectedRevision exactly as get_burn_settings reports it (0 when no revision has ever been written) as an optimistic-concurrency guard, an operator reason, and the confirmation string "APPLY BURN SETTINGS". This is the one control here that moves TAO directly, which is why the revision log records who set it and why. It scales the competitive vector without re-ordering it: the remainder is normalized across the eligible miner weights, so no miner share of what miners receive changes. It is not instantaneous — a validator that already submitted weights this epoch keeps that vector until its next one, so budget roughly an epoch for the subnet-wide effect. Requires backroom:write.',
+        'Apply one append-only revision of the SN118 emission burn live, with no validator release. Supply burn_share (0 releases the full miner emission through KOTH, 1 burns all of it — the same all-to-burn vector the fold already submits when no agent holds a positive score), expectedRevision exactly as get_burn_settings reports it (0 when no revision has ever been written) as an optimistic-concurrency guard, an operator reason, and the confirmation string "APPLY BURN SETTINGS". This is the one control here that moves TAO directly, which is why the revision log records who set it and why. Optionally supply rank_shares, the KOTH payout curve for the champion then the four tail slots (five positive, non-increasing shares summing to 1, e.g. [0.5, 0.2, 0.13, 0.1, 0.07]). Omitting rank_shares keeps the current curve; null clears it to the frozen 65/14/10/7/4. Platform serves a curve to validators only once every recently-live weight setter reports protocol 31, so a mixed fleet never folds two curves; get_burn_settings reports effective.rank_shares_served, and until it is true the leaderboard keeps the frozen curve. Resend the current burn_share when changing only the curve. It scales the competitive vector without re-ordering it: the remainder is normalized across the eligible miner weights, so no miner share of what miners receive changes. It is not instantaneous — a validator that already submitted weights this epoch keeps that vector until its next one, so budget roughly an epoch for the subnet-wide effect. Requires backroom:write.',
       inputSchema: setBurnSettingsInputSchema,
       annotations: toolAnnotations('write', true),
     },
