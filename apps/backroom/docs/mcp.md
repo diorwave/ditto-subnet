@@ -119,6 +119,15 @@ disputes, validator queue/slot/inference policy, the scoring lease TTL,
 benchmark rollouts, scoring policy, scores and leaderboards, and the emission
 burn.
 
+`get_source_release_policy` reads the public source policy and completed-payout
+gate diagnostics. `release_gate.archive_provider`, when present, reports the
+running Platform's configured archive host, authentication mode (`none`,
+`query`, or `path`), and credential presence. It never returns the
+provider URL or key. This is configuration evidence, not a provider health or
+authentication result; older responses without the field mean unknown. Use
+the durable collector cursor and exact-agent payout receipts to verify source
+release recovery. Requires `backroom:read` and changes nothing.
+
 `get_scoring_lease_settings` / `set_scoring_lease_settings` (#1156) read and
 revise the deadline stamped on new canonical and score-retest replacement
 tickets (default 180 minutes, bounded 60-240 so it stays inside the validator
@@ -151,7 +160,7 @@ and a small `detail` map. The top-level `status` is the worst signal.
 | `screening_admission` | seconds effective admission has been 0 while a claimable upload waits; `detail.effective_slots` sums `screening_concurrency` over ready enrolled nodes, plus ready legacy GCP workers while that route is open | 5 / 15 min | `get_screener_capacity` node controls and heartbeats (a leftover `screening_concurrency=0` revision caused #2474) |
 | `oldest_claimable_upload` | age of the oldest upload a production claim could take now | 1 / 4 h | `get_source_review_queue_slo`, `get_screener_capacity` |
 | `scoring_throughput` | seconds without an accepted validator score while leaseable work waits (the allocator's fleet-wide candidate filter, so withdrawn, retired and closed-era `evaluating` rows do not count); `detail.scores_last_hour`, `scoring_queue`, `open_validator_leases` | 1 / 3 h | `v13_scorer_cohort_pin`, `get_validator_capacity`, `agent_scoring_readiness` |
-| `v13_scorer_cohort_pin` | pinned members declined v13 work (#2490); null when no pin governs dispatch. `detail.members_without_fresh_packet` are offline, restarting or unmanaged validators, and rotation is refused for them. `detail.members_with_different_packet` are fresh members on another release | breach at 1 with the three-member pin and quorum 3 | no fresh packet: bring the validator back. Different packet with `fresh_packets_agree`: `get_v13_report_only_current_packet`, then `rotate_v13_scorer_cohort`. Packets disagree: converge releases first |
+| `v13_scorer_cohort_pin` | pinned members declined new v13 work; null when no pin governs dispatch. A member is admitted only while it signs the authority packet, the one a strict majority of at least a quorum of live members sign. Without an authority every member is declined. `detail.members_without_fresh_packet` are offline, restarting or unmanaged validators; `detail.members_on_other_packet` are fresh members outside the authority packet; `detail.authority_packet` says whether one exists | warn at 1; breach once no authority can remain (members minus quorum plus one; 1 for a three-member pin) | no fresh packet: bring the validator back, and rotate it out only if it is gone for good. Other packet: update it to the authority packet. No authority with split fresh packets: converge releases (`get_v13_scorer_cohort_preflight`) |
 | `oldest_actionable_hold` | age of the oldest active screening quarantine or pending ATH review, excluding holds whose agent is already banned or rejected (#2554) | 24 / 72 h | `get_screening_review_queue` |
 | `lease_overrun` | seconds the most overdue validator ticket or screening attempt has stayed open past its deadline. Tickets expire only when a `/job` poll reaches ticket issuance, so either nothing polls or every poll is declined first (pin, pause, allocator, provider outage). Attempts expire on screener claims and controller heartbeats | 5 / 30 min | `get_validator_capacity`, `v13_scorer_cohort_pin`, `get_screener_capacity` |
 | `source_emission_collector` | age of the finalized-block cursor (#2231); `detail.blocked_reason_class` names only the exception class, never its message | 15 / 60 min | `get_source_release_policy` release gate, Platform logs |
@@ -174,6 +183,14 @@ nothing and pages nobody. Alert delivery is a #2600 follow-up that should
 consume this endpoint rather than re-derive it.
 
 ## Authorization
+
+`get_treasury_ledger_readiness` includes bounded `chain_reads` diagnostics for
+completed epoch-schedule and requester-activation reads in this Platform
+process. Counts reset on process restart and include background schedule reads;
+they are not an endpoint availability metric. The last failure retains its
+request ID, elapsed time, fixed stage, step and category after a later success.
+Provider messages and URLs are omitted. These observations grant no weight or
+spending authority and do not replace fresh chain permission checks.
 
 `get_coding_private_v2_releases` reads native private-v2 registration digests and
 quarantine/retirement audit state through Platform's existing admin endpoint.
@@ -242,7 +259,7 @@ Three scopes, in ascending sensitivity:
 | Scope | Grants |
 |---|---|
 | `backroom:read` | Every read. Required for any connection. |
-| `backroom:artifact:read` | Miner-submitted source and sensitive diagnostics: tarball URLs, file listings, source search, copy/baseline diffs, and sanitized private screening failure details. |
+| `backroom:artifact:read` | Miner-submitted source and sensitive diagnostics: tarball URLs, file listings, source search, copy/lineage/baseline diffs, and sanitized private screening failure details. |
 | `backroom:write` | Mutations, including `set_burn_settings`, which moves TAO. |
 
 Two independent gates apply to every privileged call. The grant must carry the
@@ -259,7 +276,7 @@ operator selected on consent, and the account's live level. Consent can narrow
 a request but never widen it: a `scope=backroom:read` request yields a
 read-only grant whatever is selected, and a client that needs more must
 reconnect and request the broader scope (the step-up challenge above names it).
-The unauthenticated `/mcp` 401 challenge advertises all three scopes, because
+The unauthenticated `/mcp` 401 challenge advertises all three ordinary scopes, because
 MCP clients request exactly the challenged scope: a first connection asks for
 everything, and the operator narrows it on consent. The consent screen always
 shows all four levels and disables any this request or account cannot receive,
@@ -282,6 +299,42 @@ and write access at once. `get_backroom_access` reports that access-token
 `expires_at`. Signed artifact download URLs stay on their own short lifetime
 and are not extended with the session. There is no refresh path for the
 identity itself — when the session ends, the operator authorizes again.
+
+### Dedicated treasury receipt observer
+
+An observer must explicitly request **only** `backroom:treasury:observe`. This
+scope is excluded from both OAuth discovery metadata and the ordinary 401
+scope bundle: general MCP clients may request every advertised scope, while
+mixing observer access with read, source or write is refused. All root and
+`/mcp` authorization-server and protected-resource metadata advertise only
+the three ordinary scopes. The staff member
+must explicitly select receipt observation and remain write-level at consent,
+code exchange, refresh and each MCP request. The original seven-day staff
+session and token TTL limits still apply; blocking, removing write entitlement
+or revoking the grant prevents further observation. No grant is issued by
+deploying this code.
+
+The dedicated server exposes exactly two tools, without the general read floor:
+
+- `get_treasury_settings` **requires** an exact positive `revision`. It returns
+  a singleton `history` containing the immutable revision, checksum and raw
+  settings JSON (at most 64 KiB), including future fields needed to verify the
+  checksum. It omits actor, reason and unrelated history. Corrupt or oversized
+  history is refused, never replaced by default settings. The ordinary read
+  tool keeps its existing current/history response when revision is omitted.
+- `record_treasury_receipt` verifies one finalized selection, requires the exact
+  receipt confirmation, and attributes it to the authorizing staff email.
+  Platform's chain, policy, replay and append-only checks are unchanged. Vendor
+  payment is not proof of provider credits or authority to spend.
+
+Only stateless POST initialize/initialized/ping/tools-list and calls to those
+two tools are permitted. Direct requests for other tools, resource reads,
+downloads, JSON-RPC batches and bodies over 64 KiB fail before Platform access.
+The observer performs fresh tool discovery and refuses a broader catalog; its
+local allowlist alone is not credential custody protection. An operator must
+separately approve and obtain the dedicated grant through ordinary browser
+consent. No desktop credential copying, mint/refresh helper, secret provisioning
+or observer activation is included.
 
 ## Bindings
 
@@ -312,6 +365,17 @@ call, so a new capability is one `registerTool` entry:
    scope) so the pre-flight scope challenge covers it.
 4. Add it to the expected catalog list in `mcp.server.test.ts`. That list is
    exhaustive on purpose: a tool that is not named there fails the suite.
+
+Keep input schemas portable. A client that cannot parse one tool's JSON
+Schema drops that tool from its imported catalog without an error, even after
+a fresh connect, while the server's `tools/list` and `get_backroom_tool_help`
+still show it. Do not use `z.tuple`: it serializes to draft-07 array-form
+`items`, which is what kept `activate_v13_scorer_cohort` and
+`rotate_v13_scorer_cohort` out of refreshed Codex catalogs (#2490, #2559). Use
+a bounded array such as `z.array(z.string()).min(3).max(16)` instead. The catalog
+test fails on any array-form `items`, `prefixItems`, or `additionalItems`.
+The catalog itself does not depend on scope: a read-only connection lists the
+write tools too, and the scope check refuses the call.
 
 Keep the catalog description in `MCP_CATALOG_DESCRIPTIONS` short — the whole
 catalog is loaded into model context before any call, and the test bounds both
@@ -472,3 +536,155 @@ hitting its own match cap, and the manifest returns whole by default so no path
 hides behind an offset. `opaque_skipped` counts the members no search can
 reach — a `.onnx` or `.bin` weights file is never searched, and a search that
 never opened one cannot clear it.
+
+## Diffing two submissions
+
+`get_copy_review_source_diff` pairs a held agent only with the reference its
+copy review names, and `get_screening_baseline_diff` only with the starter kit.
+To check whether a resubmission really removed a rejected mechanism, diff it
+against the rejected ancestor directly with
+`get_lineage_source_diff(agentId, referenceAgentId, path?)`. It works for any
+two stored agents, reference -> agent, with no hold on either:
+
+- Without `path` it returns the per-file manifest in the copy-review shape:
+  `added` / `removed` / `modified` / `identical` / `renamed` (with `from_path` /
+  `to_path`), line counts, `normalized_identical`, and `omitted_paths` the
+  bounded read skipped (not compared, so never read as a removal).
+- With `path` (taken from that manifest) it returns that one file's bounded
+  unified diff instead.
+
+One tool covers both modes to keep the catalog inside its byte budget. It needs
+`backroom:artifact:read`, and the two ids must differ. Platform writes one
+artifact-fetch audit row per agent read (`admin.get_lineage_source_diff` or
+`admin.get_lineage_source_diff_file`, each tagged candidate or reference), so
+"who read this source" answers for the ancestor too.
+
+The source readers publish their agent ids as plain `format: uuid` rather than
+zod's long uuid regex, also for the byte budget. Each service function still
+parses its input with the strict uuid schema before calling Platform.
+
+
+## Build bounties
+
+The build-bounty tools (#2942) operate the v1 workflow: signed revisions, paid
+slots, exact-commit review, appeals, and settlement records. v1 runs in
+rehearsal funding only: fees and transfers are simulated, and no funds move.
+
+**Reads** (`backroom:read`, change nothing):
+
+- `get_bounty_board`: each bounty's current terms, effective slot counts, claims
+  pause, overdue reviews and recorded awards. Filter by `repo` and `issue`.
+- `get_bounty`: one bounty with everything public views hide: the reviewer in
+  force, each revision's operator and reason, every claim, appeal statements, and
+  a chronological `audit` of every operator record with its actor and reason.
+  Its `report` is a source-safe account of fees, awards, transfers, reviews and
+  appeals, with settlement checks that should all pass; the
+  [operator runbook](../../../docs/bounty-operations.md#read-the-report)
+  explains each field. Read it before a write and to verify one after.
+- `get_bounty_claim`: one claim's hold, receipts, submissions and decisions,
+  appeals, obligations (with derived settlement state and transfers) and facts.
+- `get_bounty_queue`: `queue=reviews` lists submissions awaiting a decision,
+  most overdue first; `queue=settlement` lists obligations still needing an
+  operator, with who approved the current round.
+- `get_bounty_payout_policy`: the approval thresholds in force, or `null`. Pass
+  `revision` to read that exact revision; a write's read-back uses it to find
+  its own revision however many followed it.
+- `preview_bounty_revision`: the exact digest, the confirmation phrase and every
+  refusal for proposed terms. It is a POST but writes nothing.
+
+**Writes** (`backroom:write`, each with its exact confirmation phrase):
+
+| Tool | What it records |
+|---|---|
+| `publish_bounty_revision` | revision `expectedRevision + 1`; revision 1 opens three slots |
+| `set_bounty_claims_paused` | pause or resume new holds; paid holds still complete |
+| `review_bounty_submission` | the reviewer in force decides one exact submission |
+| `reassign_bounty_reviewer` | a new reviewer; overdue reviews get one more window |
+| `control_bounty_slot` | cancel (refunds a paid fee) or reopen (retains a final one) |
+| `decide_bounty_appeal` | uphold (fresh delivery window) or deny; never by its reviewer |
+| `award_bounty_claim` | an award on accepted work, within the pool its claim signed |
+| `set_bounty_payout_policy` | a new revision of the approval thresholds |
+| `approve_bounty_obligation` | one approval binding payee, amount and policy revision |
+| `dispatch_bounty_obligation` | one dispatch of an approved round |
+| `reconcile_bounty_transfer` | the settled outcome of a dispatched or uncertain transfer |
+| `record_bounty_fact` | a public merge, deployment or adoption fact |
+
+Every write follows the outcome rule below (`src/server/platform-write.ts`).
+Each read-back recognises the exact record its write creates (your revision,
+review, award, approval, transfer round, fact, or your audit entry), so an
+unknown outcome is safe to retry with the same input. Never resend a dispatch
+whose transfer is recorded: reconcile it. Money moves only through approved,
+dispatched transfers; awards, refunds and facts record facts and move nothing.
+An award's approval and dispatch are refused with `payout held` while the claim
+hotkey's finalized owner is not the payee of record; the refusal names both
+coldkeys. Fee refunds return to the coldkey that paid and are never held. An
+amount above the payout policy's limit reads `over_policy_limit` until a policy
+revision raises it. Dispatch and reconcile require an explicit
+`rehearsalOutcome` in rehearsal, and every reconciliation is recorded in the
+audit (`transfer_reconciled`) with its operator.
+
+The catalog publishes compact input schemas (ids as `format: uuid`, terms as an
+object) for its byte budget; each service function parses its input strictly.
+
+## Contributor identity and CLA
+
+`get_miner_github_link` reads an active OAuth-verified numeric GitHub id and its
+signed hotkey link. `get_github_contributor_status` resolves a numeric PR author
+id to its linked hotkey and current CLA status; logins alone are not identity.
+If only the CLA read fails, it still returns the identity with `cla: null` and
+a `cla_error` naming the failure, which never means unsigned.
+`get_miner_cla_status` reads the effective version and exact consent receipt.
+These are identity/consent evidence, never payment routing or bounty awards.
+
+`get_cla_policy` reads the audited off/shadow/enforce mode, paged history,
+effective version and signed/unsigned adoption. Its active-hotkey basis is
+non-rejected, non-banned, non-retired submissions, not chain registrations. All reads use
+`backroom:read`. `set_cla_policy` and `publish_cla_version` require
+`backroom:write`, the account's live write level, exact confirmation and the
+signed-in operator's audit identity. Publication preserves exact UTF-8 text and
+SHA-256 and never activates enforcement. Maintain approved versioned text in
+`docs/legal`; never publish a test fixture or draft legal wording.
+### Write outcomes
+
+`set_cla_policy`, `publish_cla_version` and `revoke_miner_github_link` share
+one outcome rule (`src/server/platform-write.ts`), so none of them reports a
+possible commit as a failure or a definite refusal as a possible commit:
+
+- **Applied:** Platform answered 2xx, or the write was found by reading its
+  target back. The tool returns the committed result.
+- **Nothing applied:** the request never reached Platform (configuration,
+  invalid URL or header, or no connection), Platform refused it (auth or
+  4xx), Platform refused it before
+  writing (the 503 "CLA policy is busy with in-flight uploads"), or the read-
+  back shows a different write already holds the target (another operator's
+  revision `expectedRevision + 1`, a different text for the version, or a link
+  revoked by someone else). The error says so.
+- **Unknown:** a timeout, 5xx, lost connection or redirect after sending
+  (writes never follow one), and the write is not visible yet (Platform may still commit it) or could not be read
+  back. `set_cla_policy` returns `applied: null`, the observed `policy` and a
+  `refresh_error`; the other two fail with "may have committed".
+
+In every unknown case, retry with the same input. Each write is recognisable
+on read-back (the revision that follows `expectedRevision` with your actor,
+mode and reason; the version with your digest and effective date; your
+revocation audit), so a retry that meets its own earlier commit returns it
+instead of failing, including when Platform answers that retry with 409.
+
+When enforcement is on, new versions require at least 24 hours notice.
+`get_cla_policy` returns `minimum_enforced_notice_seconds` and
+`earliest_enforced_effective_at`; the publication transaction rechecks that
+deadline under the policy lock. Turning enforcement on requires the same notice:
+the current version must have been published at least 24 hours earlier, and
+each scheduled version at least 24 hours before its effective date.
+`earliest_enforcement_at` reports the earliest allowed switch (null while
+enforcing or before an effective version exists), and `set_cla_policy` rechecks
+it under the policy lock.
+
+For a hostile or compromised identity link, read
+`get_github_link_revocation_preflight` with the exact `linkId`. It returns the
+original proof, current blocker, confirmation and any operator recovery audit.
+`revoke_miner_github_link` requires `backroom:write`, an operator reason and
+`REVOKE GITHUB LINK {linkId}`. It records the signed-in operator in append-only
+history, preserves the miner's original signature, and frees the account for a
+fresh OAuth-verified link. Stale targets cannot revoke a replacement link.
+Revocation does not change payments or previously accepted submissions.

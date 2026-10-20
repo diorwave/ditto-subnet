@@ -11,6 +11,7 @@ import os
 import sqlite3
 import struct
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 from typing import IO, Any
@@ -25,6 +26,7 @@ from ditto_screener.source_reachability import ReachabilityState, analyze_reacha
 from ditto_screener.source_review import (
     OpenRouterSourceReviewAgent,
     TarSourceRepository,
+    l1_verdict_unsettled,
     ledger_disposition,
 )
 from ditto_screener.source_signals import (
@@ -4043,7 +4045,7 @@ def test_policy_v10_prompt_teaches_independent_strict_invariants() -> None:
 
     assert _prompt_revision(11) == "source-review-v24-policy-v11"
     assert _prompt_revision(12) == "source-review-v24-policy-v12"
-    assert _prompt_revision(13) == "source-review-v30-policy-v13"
+    assert _prompt_revision(13) == "source-review-v32-policy-v13"
     required = {
         "I1 MODEL INVOCATION",
         "I2 EVIDENCE RETENTION",
@@ -4291,6 +4293,17 @@ def test_written_policy_makes_policy_v10_invariants_implementable() -> None:
         "planned_deck",
         "declarative-preference-turn-directive",
         "keep-continuity-capability-rekey",
+        "tool-name-execution-cap",
+        "successful-duplicate-suppression",
+        "catalog-retired-after-step",
+        "sticky-capability-veto",
+        "uncertainty-narrows-route",
+        "tool-argument-grammar-sheet",
+        "review-turn-argument-template",
+        "self-reported-benchmark-fitting",
+        "length-cut-draft-fallback",
+        "prompt-only-record-dedupe",
+        "generator-construction-admission",
     }
 
     assert all(fragment in policy for fragment in required)
@@ -4834,6 +4847,7 @@ def test_review_leads_skip_exact_starter_files(tmp_path: Path) -> None:
         "files_scanned",
         "bytes_scanned",
         "truncated",
+        "scan_truncated",
     ):
         assert leads[key] == untrusted[key], key
 
@@ -4931,6 +4945,57 @@ def test_review_leads_not_starved_by_non_source_noise(
             {"path": path, "line": 3, "role": "retrieval-override"},
         ],
     } in leads["items"]
+
+
+def test_review_lead_dossier_reports_padding_and_omissions(tmp_path: Path) -> None:
+    from tests.test_emulation_fingerprints import _RUST_EMULATOR
+
+    files = {
+        f"src/a{index}.py": b"# phrasing probe-selected over trial N\n" * 4
+        for index in range(6)
+    }
+    files["src/zz.rs"] = _RUST_EMULATOR.encode()
+    leads = TarSourceRepository(str(_archive_files(tmp_path, files))).review_leads(())
+
+    assert leads["files_scanned"] == 7
+    assert leads["scan_truncated"] is False
+    assert leads["truncated"] is False
+    assert leads["fingerprint_selection"]["truncated"] is True
+    assert leads["fingerprint_selection"]["omitted_by_kind"] == {
+        "self-reported-benchmark-fitting": 18
+    }
+    assert leads["fingerprint_selection"]["saturation_leads"][0]["kind"] == (
+        "raw-fingerprint-kind-saturation"
+    )
+    assert {"bench-version-equality-gate", "zero-token-answer-constructor"} <= {
+        finding["kind"] for finding in leads["emulation_fingerprints"]
+    }
+
+
+def test_review_lead_kind_padding_cannot_hide_later_distinct_kind(
+    tmp_path: Path,
+) -> None:
+    decoy = (
+        b"def route(question, memories):\n"
+        b'    if contains(question, "canary"):\n'
+        b"        memories.inject(question)\n"
+        b"    return memories\n"
+    )
+    files = {f"src/a{index:02}.py": decoy for index in range(40)}
+    files["src/zz.rs"] = (
+        b"fn temporal_template(question: &str) -> String {\n"
+        b"    return resolve(question);\n}\n"
+    )
+    leads = TarSourceRepository(str(_archive_files(tmp_path, files))).review_leads(())
+
+    assert len(leads["items"]) <= 32
+    assert leads["item_selection"]["truncated"] is True
+    assert any(
+        lead["kind"] == "deterministic-challenge-resolver"
+        and location["path"] == "src/zz.rs"
+        for lead in leads["items"]
+        for location in lead["locations"]
+    )
 
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
@@ -5175,7 +5240,7 @@ async def test_malformed_or_unavailable_reviewer_is_retryable_not_reject(
         ),
     ],
 )
-async def test_internally_inconsistent_review_is_retryable_not_a_weak_finding(
+async def test_internally_inconsistent_review_holds_as_unsettled_not_a_weak_finding(
     tmp_path: Path, final: dict[str, object], expected_error_code: str
 ) -> None:
     key = tmp_path / "key"
@@ -5189,6 +5254,12 @@ async def test_internally_inconsistent_review_is_retryable_not_a_weak_finding(
 
     assert not observation.ok
     assert observation.error_code == expected_error_code
+    # The reviewer, not infrastructure, ran out: hold with the exact ledger
+    # instead of burning an infra retry on the same model and source.
+    assert observation.failure_disposition == "inconclusive"
+    assert observation.review_audit is not None
+    assert observation.review_audit["budget_stop_reason"] == "step"
+    assert l1_verdict_unsettled(observation)
 
 
 async def test_expired_lease_deadline_stops_review_before_first_call(
@@ -5224,6 +5295,11 @@ async def test_expired_lease_deadline_stops_review_before_first_call(
         "source-review-lease-budget-exhausted"
     )
     assert observation.review_audit["steps_used"] == 0
+    # L1 ran out of its own time with nothing to settle on: the deep review
+    # still owes a decision, so the stop is marked for v13 escalation.
+    assert observation.failure_disposition == "inconclusive"
+    assert observation.review_audit["budget_stop_reason"] == "time"
+    assert l1_verdict_unsettled(observation)
 
 
 async def test_deadline_expiry_mid_turn_is_lease_budget(tmp_path: Path) -> None:
@@ -5285,6 +5361,9 @@ async def test_deadline_expiry_mid_turn_is_lease_budget(tmp_path: Path) -> None:
         "source-review-lease-budget-exhausted"
     )
     assert 1 <= observation.review_audit["steps_used"] <= 4
+    # A ledger that admits on its own coverage is settled, not escalated.
+    assert observation.review_audit["budget_stop_reason"] == "time"
+    assert not l1_verdict_unsettled(observation)
 
 
 async def test_provider_timeout_with_open_lease_stays_retryable(
@@ -6677,6 +6756,25 @@ async def test_http_429_logs_the_provider_limit_without_publishing_it(
         assert limit not in line
 
 
+async def test_http_402_names_exhausted_review_credits(tmp_path: Path) -> None:
+    """An unfunded review account is reported as such, not as a bare status."""
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    os.chmod(key, 0o600)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(402, request=request, json={"error": "balance"})
+
+    observation = await _agent(key, httpx.MockTransport(handler)).review(
+        str(_archive(tmp_path, "fn main() { call_model(); }")),
+        artifact_sha256=_SHA,
+    )
+
+    assert not observation.ok
+    assert observation.error_code == "source-review-provider-credits-exhausted"
+    assert observation.failure_disposition == "retryable_infra"
+
+
 async def test_http_429_parks_after_three_bounded_posts(tmp_path: Path) -> None:
     """A persistent HTTP 429 parks after the fixed same-turn retry grant."""
     key = tmp_path / "key"
@@ -6698,6 +6796,120 @@ async def test_http_429_parks_after_three_bounded_posts(tmp_path: Path) -> None:
     assert observation.error_code == "source-review-http-429"
     assert observation.failure_disposition == "retryable_infra"
     assert calls == 3
+
+
+async def test_router_deploy_401_window_is_waited_out_in_the_same_review(
+    tmp_path: Path,
+) -> None:
+    """A brief 401 window (router blue/green cutover) keeps the review alive."""
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    os.chmod(key, 0o600)
+    calls = 0
+    final = _with_policy_v10_invariants(_BENIGN_REVIEW)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return httpx.Response(401, request=request, json={"error": "invalid key"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [_tool("submit", "submit_review", final)],
+                        }
+                    }
+                ]
+            },
+        )
+
+    agent = OpenRouterSourceReviewAgent(
+        api_key_file=str(key),
+        model="openai/gpt-5.6-luna",
+        base_url="https://openrouter.test/api/v1",
+        timeout_seconds=10,
+        max_steps=1,
+        transport=httpx.MockTransport(handler),
+        auth_retry_delays=(0, 0, 0),
+    )
+    observation = await agent.review(
+        str(_archive(tmp_path, "fn main() {}")), artifact_sha256=_SHA
+    )
+
+    assert observation.ok
+    assert calls == 3
+
+
+async def test_persistent_401_parks_after_the_bounded_auth_wait(
+    tmp_path: Path,
+) -> None:
+    """A key that stays rejected still parks as a retryable infra failure."""
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    os.chmod(key, 0o600)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, request=request, json={"error": "invalid key"})
+
+    agent = OpenRouterSourceReviewAgent(
+        api_key_file=str(key),
+        model="openai/gpt-5.6-luna",
+        base_url="https://openrouter.test/api/v1",
+        timeout_seconds=10,
+        max_steps=4,
+        transport=httpx.MockTransport(handler),
+        transport_retry_delays=(0, 0),
+        auth_retry_delays=(0, 0),
+    )
+    observation = await agent.review(
+        str(_archive(tmp_path, "fn main() { call_model(); }")),
+        artifact_sha256=_SHA,
+    )
+
+    assert not observation.ok
+    assert observation.error_code == "source-review-http-401"
+    assert observation.failure_disposition == "retryable_infra"
+    assert calls == 3
+
+
+async def test_auth_wait_never_sleeps_past_the_turn_budget(tmp_path: Path) -> None:
+    """The 401 wait is bounded by the review deadline, not just its count."""
+    key = tmp_path / "key"
+    key.write_text("sk-test-private-review")
+    os.chmod(key, 0o600)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, request=request, json={"error": "invalid key"})
+
+    agent = OpenRouterSourceReviewAgent(
+        api_key_file=str(key),
+        model="openai/gpt-5.6-luna",
+        base_url="https://openrouter.test/api/v1",
+        timeout_seconds=10,
+        max_steps=4,
+        transport=httpx.MockTransport(handler),
+        transport_retry_delays=(),
+        auth_retry_delays=(60.0,),
+    )
+    started = time.monotonic()
+    observation = await agent.review(
+        str(_archive(tmp_path, "fn main() { call_model(); }")),
+        artifact_sha256=_SHA,
+    )
+
+    assert observation.error_code == "source-review-http-401"
+    assert calls == 1
+    assert time.monotonic() - started < 5
 
 
 def _note_call(

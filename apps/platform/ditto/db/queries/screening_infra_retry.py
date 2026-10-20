@@ -74,15 +74,19 @@ from ditto.db.models import (
     SubmissionImageBuild,
 )
 from ditto.db.queries.screening_retry import latest_screening_attempt_id
+from ditto_screening_protocol import reason_codes
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 # Retried automatically, the one exception to #1201's operator-authorized retry.
-# Exact codes only, each one fleet-owned and provably independent of the
-# submitted artifact: every producer of the code must be reachable only from
-# fleet, transport, or lock state. A reviewer or model failure, a budget or lease
-# outcome, or a catch-all code a submission can reach (``worker-lease-orphaned``,
+# The codes are the ``FLEET_INFRA`` class of the shared screening registry
+# (``ditto_screening_protocol.reason_codes``), which the worker imports too, so
+# the producer and this allowlist cannot drift apart. Exact codes only, each one
+# fleet-owned and provably independent of the submitted artifact: every producer
+# of the code must be reachable only from fleet, transport, or lock state. A
+# reviewer or model failure, a budget or lease outcome, or a catch-all code a
+# submission can reach (``worker-lease-orphaned``,
 # ``worker-platform-request-failed``, ``l2-cache-lock-timeout``,
 # ``source-review-model-timeout``, see #2449) stays on the operator retry, or a
 # hostile archive could loop the fleet. Deliberately separate from
@@ -90,7 +94,8 @@ if TYPE_CHECKING:
 # toward the inconclusive park cap. Adding a code here means updating the partial
 # index ``screening_attempts_infra_failed_idx`` (models.py, its migration, and
 # ``_infra_failure_filters``) in the same change, or the breaker scan silently
-# goes back to a sequential scan under the claim lock.
+# goes back to a sequential scan under the claim lock. Reclassifying a code in
+# the registry is that same policy change.
 #
 # ``l2-runtime-evidence-unavailable`` reaches here only as a retryable failure,
 # which the worker emits only when Platform attached no signed scorer-cohort lease
@@ -111,10 +116,7 @@ if TYPE_CHECKING:
 # report ``source-review-unavailable`` instead, which stays on the operator
 # retry (#2449).
 INFRA_AUTO_RETRY_REASON_CODES: tuple[str, ...] = (
-    "docker-build-infrastructure",
-    "worker-claim-not-started",
-    "l2-runtime-evidence-unavailable",
-    "source-review-adjudicator-key-unavailable",
+    reason_codes.INFRA_AUTO_RETRY_REASON_CODES
 )
 
 INFRA_RETRY_BASE_BACKOFF = timedelta(minutes=10)

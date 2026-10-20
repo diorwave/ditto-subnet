@@ -22,6 +22,10 @@ from ditto.api_models.inference_concurrency_settings import (
     MAX_CHAT_TOKEN_BUDGET,
     MAX_EMBEDDING_GLOBAL_CONCURRENCY,
 )
+from ditto.api_server.ath_review_queue_slo_config import (
+    AthReviewQueueSloConfig,
+    parse_ath_review_queue_slo_config_from_env,
+)
 from ditto.api_server.coding_hosted_signer_config import (
     HostedControlSignerConfig,
     check_hosted_signer_config,
@@ -41,6 +45,7 @@ from ditto.api_server.embedding import (
     parse_embedding_config_from_env,
 )
 from ditto.api_server.errors import ApiServerConfigError
+from ditto.api_server.github_link import GithubLinkConfig
 from ditto.api_server.pricing import PricingConfig, parse_pricing_config_from_env
 from ditto.api_server.private_benchmark_preparation import (
     PrivatePreparationConfig,
@@ -86,6 +91,12 @@ def _http_origin(value: str) -> tuple[str, str, int] | None:
 DEFAULT_CAPACITY_EVENT_RETENTION_DAYS = 30
 # Floor for a non-zero window so a typo cannot erase incident-review history.
 MIN_CAPACITY_EVENT_RETENTION_DAYS = 7
+# Transport cap on a request body with no tighter route cap. 32 MiB matches the
+# largest body any endpoint accepts today (a validator's transcript) and clears
+# the 16 MiB canonical private-v2 publication receipt an admin registers. The
+# floor keeps a typo from refusing every ordinary JSON request.
+DEFAULT_REQUEST_BODY_MAX_BYTES = 32 << 20
+MIN_REQUEST_BODY_MAX_BYTES = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -405,6 +416,9 @@ class ApiServerConfig:
     )
     """Sign in with Ditto relying-party settings; disabled until configured."""
 
+    github_link: GithubLinkConfig = field(default_factory=GithubLinkConfig)
+    """Server-side GitHub OAuth; disabled until an identity-only app is configured."""
+
     coding_catalog_curator_hotkeys: tuple[str, ...] = ()
     """Offline curator keys allowed to register signed coding catalogs.
 
@@ -499,14 +513,28 @@ class ApiServerConfig:
     """Observability-only overdue thresholds for the ordinary source-review
     queue-age SLO (ditto-subnet#2042). Both thresholds default unset."""
 
+    ath_review_queue_slo: AthReviewQueueSloConfig = field(
+        default_factory=AthReviewQueueSloConfig
+    )
+    """Observability-only overdue thresholds for the ATH-hold and copy-review
+    queue-age SLO (ditto-subnet#2042, slice 2). Every threshold defaults unset."""
+
     source_emission_confirmation_enabled: bool = True
     """Allow verified payout attribution to arm the embargo; collection stays on."""
+
+    treasury_ledger_sampler_enabled: bool = True
+    """Record one public Gamma collector reading per epoch (read-only chain state)."""
 
     public_rate_limit_per_minute: int = 0
     """Per-client-IP requests per minute on the unauthenticated upload,
     retrieval, and public read routes (``DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE``).
     ``0``, the default, installs no limiter. See
     :mod:`ditto.api_server.middleware.public_rate_limit`."""
+
+    request_body_max_bytes: int = DEFAULT_REQUEST_BODY_MAX_BYTES
+    """Byte cap on any request body without a tighter route cap
+    (``DITTO_REQUEST_BODY_MAX_BYTES``). See
+    :mod:`ditto.api_server.middleware.request_body_limit`."""
 
 
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
@@ -861,6 +889,22 @@ def parse_api_server_config_from_env(commit_hash: str) -> ApiServerConfig:
             "DITTO_PUBLIC_RATE_LIMIT_PER_MINUTE must be non-negative (0 disables)"
         )
 
+    try:
+        request_body_max_bytes = int(
+            os.environ.get(
+                "DITTO_REQUEST_BODY_MAX_BYTES", str(DEFAULT_REQUEST_BODY_MAX_BYTES)
+            )
+        )
+    except ValueError as error:
+        raise ApiServerConfigError(
+            "DITTO_REQUEST_BODY_MAX_BYTES must be an integer"
+        ) from error
+    if request_body_max_bytes < MIN_REQUEST_BODY_MAX_BYTES:
+        raise ApiServerConfigError(
+            "DITTO_REQUEST_BODY_MAX_BYTES must be at least "
+            f"{MIN_REQUEST_BODY_MAX_BYTES}"
+        )
+
     treasury_policy = parse_treasury_shadow_policy()
     treasury_approval, treasury_approved_digest, collector_policy_digest = (
         parse_treasury_shadow_approval(treasury_policy)
@@ -881,6 +925,10 @@ def parse_api_server_config_from_env(commit_hash: str) -> ApiServerConfig:
         in _TRUTHY,
         source_emission_confirmation_enabled=(
             os.environ.get("DITTO_SOURCE_EMISSION_CONFIRMATION_ENABLED", "true").lower()
+            in _TRUTHY
+        ),
+        treasury_ledger_sampler_enabled=(
+            os.environ.get("DITTO_TREASURY_LEDGER_SAMPLER_ENABLED", "true").lower()
             in _TRUTHY
         ),
         treasury_shadow_policy=treasury_policy,
@@ -919,6 +967,7 @@ def parse_api_server_config_from_env(commit_hash: str) -> ApiServerConfig:
         inference_proxy=inference_proxy,
         admin_api_token=os.environ.get("DITTO_ADMIN_API_TOKEN") or None,
         ditto_link=parse_ditto_link_config_from_env(),
+        github_link=parse_github_link_config_from_env(),
         coding_catalog_curator_hotkeys=tuple(
             value
             for item in os.environ.get(
@@ -941,7 +990,9 @@ def parse_api_server_config_from_env(commit_hash: str) -> ApiServerConfig:
         top5_backoff_cap=top5_backoff_cap,
         efficiency_bonus=efficiency_bonus,
         source_review_queue_slo=parse_source_review_queue_slo_config_from_env(),
+        ath_review_queue_slo=parse_ath_review_queue_slo_config_from_env(),
         public_rate_limit_per_minute=public_rate_limit_per_minute,
+        request_body_max_bytes=request_body_max_bytes,
     )
 
 
@@ -1058,6 +1109,7 @@ def check_config(config: ApiServerConfig) -> None:
     check_hosted_signer_config(config.coding_hosted_signer)
     check_private_preparation_config(config.private_preparation)
     check_ditto_link_config(config.ditto_link)
+    check_github_link_config(config.github_link)
     if not 1 <= config.port <= 65535:
         raise ApiServerConfigError(f"port out of range: {config.port}")
     if config.log_level not in _VALID_LOG_LEVELS:
@@ -1432,4 +1484,63 @@ def check_config(config: ApiServerConfig) -> None:
     if not 0.0 <= efficiency.memory_floor <= 1.0:
         raise ApiServerConfigError(
             "DITTO_EFFICIENCY_BONUS_MEMORY_FLOOR must be in [0, 1]"
+        )
+
+
+def parse_github_link_config_from_env() -> GithubLinkConfig:
+    enabled = os.environ.get("GITHUB_LINK_ENABLED", "false").strip().lower() in _TRUTHY
+    # A disabled feature's unused timeout never blocks startup.
+    timeout = 10.0
+    if enabled:
+        try:
+            timeout = float(
+                os.environ.get("GITHUB_LINK_TIMEOUT_SECONDS", "").strip() or "10"
+            )
+        except ValueError as error:
+            raise ApiServerConfigError(
+                "GITHUB_LINK_TIMEOUT_SECONDS must be numeric"
+            ) from error
+    return GithubLinkConfig(
+        enabled=enabled,
+        client_id=os.environ.get("GITHUB_LINK_CLIENT_ID", "").strip() or None,
+        client_secret=os.environ.get("GITHUB_LINK_CLIENT_SECRET", "").strip() or None,
+        redirect_url=os.environ.get("GITHUB_LINK_REDIRECT_URL", "").strip(),
+        timeout_seconds=timeout,
+    )
+
+
+def check_github_link_config(config: GithubLinkConfig) -> None:
+    if not config.enabled:
+        return
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(config.redirect_url)
+        _ = parts.port  # urlsplit defers numeric/range validation until access.
+        valid_origin = parts.scheme == "https" or (
+            parts.scheme == "http"
+            and parts.hostname in ("localhost", "127.0.0.1", "::1")
+        )
+        valid_path = parts.path == "/api/v1/miner-auth/github/callback"
+        invalid_extra = bool(
+            parts.username or parts.password or parts.query or parts.fragment
+        )
+        # Requests compare Origin with this value; an IDNA-invalid host must
+        # fail startup rather than every consent request.
+        _ = config.origin
+    except (ValueError, UnicodeError):
+        raise ApiServerConfigError("GITHUB_LINK_REDIRECT_URL is invalid") from None
+    if not config.client_id or not config.client_secret:
+        raise ApiServerConfigError(
+            "GITHUB_LINK_CLIENT_ID and GITHUB_LINK_CLIENT_SECRET are required "
+            "when linking is enabled"
+        )
+    if not parts.hostname or not valid_origin or not valid_path or invalid_extra:
+        raise ApiServerConfigError(
+            "GITHUB_LINK_REDIRECT_URL must be the HTTPS callback (HTTP is "
+            "allowed only on loopback)"
+        )
+    if not 1 <= config.timeout_seconds <= 60:
+        raise ApiServerConfigError(
+            "GITHUB_LINK_TIMEOUT_SECONDS must be between 1 and 60"
         )

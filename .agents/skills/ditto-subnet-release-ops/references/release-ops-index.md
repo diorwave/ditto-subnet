@@ -17,6 +17,7 @@
 | Host convergence | `infra/ansible/` |
 | Platform app VM disk | `.agents/skills/ditto-subnet-release-ops/references/platform-host-disk.md`, `app_boot_disk_gb` |
 | Validator updater | `scripts/validator-stack-auto-update.sh` |
+| Screener fleet updater (rolling activation, drain fallback) | `scripts/screener-fleet-auto-update.sh`, `scripts/screener-fleet-drain.py`, `docs/hetzner-screener-fleet.md` |
 | Subnet liveness (incident triage) | `apps/platform/ditto/api_server/subnet_liveness.py`, Backroom MCP `get_subnet_liveness`, `apps/backroom/docs/mcp.md` |
 
 ## Release graph expectations
@@ -69,11 +70,14 @@ naming the next read:
 - `screening_admission` breach: a node at `screening_concurrency` 0, not
   ready, or on the wrong policy while uploads wait (#2474). Read
   `get_screener_capacity` node controls before touching the controller.
-- `scoring_throughput` breach with `v13_scorer_cohort_pin` breach: read the
-  pin `detail`. `members_with_different_packet` with `fresh_packets_agree`
-  is the #2490 stale pin: rotate it, do not restart validators.
-  `members_without_fresh_packet` is an offline or restarting validator:
-  bring it back, because rotation is refused for a member with no packet.
+- `scoring_throughput` breach with `v13_scorer_cohort_pin` breach: no
+  authority packet, so every pinned member is declined new v13 work. Read the
+  pin `detail` and `get_v13_scorer_cohort_preflight`.
+  `members_without_fresh_packet` is an offline or restarting validator: bring
+  it back, and rotate it out only if it is gone for good.
+  `members_on_other_packet` without an authority means fresh members split
+  across releases: converge them. A warn (authority present) keeps scoring on
+  the quorum; update the declined members.
 - `lease_overrun` breach: no expiry sweep ran. Validator tickets expire only
   when a `/job` poll reaches ticket issuance, so either nothing polls or every
   poll is declined first (pin, pause, allocator, provider outage). Check

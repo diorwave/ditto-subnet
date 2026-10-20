@@ -21,14 +21,40 @@ from ditto.treasury.collector import (
     Observation,
     Settlement,
     SignedOperation,
-    canonical,
 )
 from ditto.treasury.service_allocation import ServiceDestination
+from ditto_screening_protocol.collector_receipts import (
+    AUDITED_COLLECTOR_CODE_HASH,
+    COLLECTOR_POW_REGISTRATION_HASHES,
+    COLLECTOR_READABLE_RUNTIME_HASHES,
+    FINNEY_GENESIS,
+    collector_gross_incentive,
+    collector_receipt_runtime,
+    collector_transfer_effect,
+    liquid_collector_credit,
+)
 
-FINNEY_GENESIS = "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
-# Official compressed v470 WASM bytes independently matched to finalized :code.
-# See docs/service-collector-automation.md for artifact/source fingerprints.
-AUDITED_CODE_HASH = "0x5675b684d69a07f6f224c2ba9cabef719804911fba40fbe1a2295198c9cb7c47"
+# Exact v481 official artifact and reviewed source. Historical receipt hashes
+# are accepted only on the observation path, never for preparation/broadcast.
+AUDITED_CODE_HASH = AUDITED_COLLECTOR_CODE_HASH
+
+
+class CollectorRuntimeRefused(ValueError):
+    """Fixed public diagnostic; never carries RPC payloads or credentials."""
+
+    def __init__(self, code, message, expected, observed=None):
+        super().__init__(message)
+        self.code = code
+        self.expected = (
+            expected
+            if isinstance(expected, str) and re.fullmatch(r"0x[0-9a-f]{64}", expected)
+            else None
+        )
+        self.observed = (
+            observed
+            if isinstance(observed, str) and re.fullmatch(r"0x[0-9a-f]{64}", observed)
+            else None
+        )
 
 
 class NoCredentialRedirect(HTTPRedirectHandler):
@@ -106,21 +132,41 @@ class PublicCollectorChain:
             self.substrate.query(module, name, params=params, block_hash=block_hash)
         )
 
-    def guard_runtime(self, policy, block_hash):
+    def guard_runtime(self, policy, block_hash, *, historical=False):
         s = self.substrate
         if (policy.genesis_hash, policy.runtime_code_hash) != (
             FINNEY_GENESIS,
             AUDITED_CODE_HASH,
         ):
-            raise ValueError("runtime policy lacks independent byte/source audit")
+            raise CollectorRuntimeRefused(
+                "policy_runtime_unreviewed",
+                "runtime policy lacks independent byte/source audit",
+                policy.runtime_code_hash,
+            )
         if s.get_block_hash(0) != policy.genesis_hash:
             raise ValueError("wrong chain genesis")
         code_hash = s.rpc_request(
             "state_getStorageHash", ["0x3a636f6465", block_hash]
         ).get("result")
-        if code_hash != policy.runtime_code_hash:
-            raise ValueError("runtime changed; stop for independent contract audit")
-        # SDK 10.5.0's singular helper does not match the live v470 API.
+        allowed = (
+            COLLECTOR_READABLE_RUNTIME_HASHES
+            if historical
+            else {policy.runtime_code_hash}
+        )
+        if code_hash not in allowed:
+            raise CollectorRuntimeRefused(
+                "runtime_changed",
+                "runtime changed; stop for independent contract audit",
+                policy.runtime_code_hash,
+                code_hash,
+            )
+        if (
+            code_hash in COLLECTOR_POW_REGISTRATION_HASHES
+            and self.query("SubtensorModule", "SubnetEpochConsensus", [118], block_hash)
+            != "Yuma"
+        ):
+            raise ValueError("collector requires audited Yuma consensus")
+        # SDK 10.5.0's singular helper does not match the audited plural API.
         filters = unwrap(
             s.runtime_call(
                 "ProxyFilterRuntimeApi",
@@ -143,6 +189,8 @@ class PublicCollectorChain:
                 ("SubtensorModule", "transfer_stake_and_hotkey"),
             },
         }
+        if code_hash in COLLECTOR_POW_REGISTRATION_HASHES:
+            expected["Registration"].add(("SubtensorModule", "pow_register"))
         for name, allowed in expected.items():
             entries = [e for e in filters if e.get("name") == name]
             if len(entries) != 1 or entries[0].get("deprecated") is not False:
@@ -157,19 +205,49 @@ class PublicCollectorChain:
                 (c.get("pallet_name"), c.get("call_name")) for c in calls
             } != allowed or len(calls) != len(allowed):
                 raise ValueError("proxy scope differs from audited allowlist")
+        return code_hash
 
-    def identity(self, policy, block_hash):
+    def identity(self, policy, block_hash, *, allow_unowned=False):
         owner = self.query(
             "SubtensorModule", "Owner", [policy.collector_hotkey], block_hash
         )
-        subnet_owner = self.query("SubtensorModule", "SubnetOwner", [118], block_hash)
-        if owner != policy.collector_coldkey or subnet_owner == owner:
-            raise ValueError(
-                "collector ownership changed or is subnet-owner associated"
-            )
         uid = self.query(
             "SubtensorModule", "Uids", [118, policy.collector_hotkey], block_hash
         )
+        return self._identity_binding(
+            policy, block_hash, owner=owner, uid=uid, allow_unowned=allow_unowned
+        )
+
+    def _identity_binding(self, policy, block_hash, *, owner, uid, allow_unowned=False):
+        """Verify freshly read values at this hash; no retained identity cache."""
+        subnet_owner = self.query("SubtensorModule", "SubnetOwner", [118], block_hash)
+        if subnet_owner == policy.collector_coldkey:
+            raise ValueError(
+                "collector ownership changed or is subnet-owner associated"
+            )
+        if owner != policy.collector_coldkey:
+            # The first register_limit creates Owner. Its ValueQuery default is
+            # an account address, not None; only raw storage absence proves this
+            # hotkey is new. This exception is registration-only and cannot
+            # authorize earnings or a transfer, or accept an existing owner/UID.
+            if not allow_unowned or self.role != "registration" or uid is not None:
+                raise ValueError("collector ownership changed")
+            key = self.substrate.create_storage_key(
+                "SubtensorModule",
+                "Owner",
+                [policy.collector_hotkey],
+                block_hash=block_hash,
+            )
+            result = self.substrate.rpc_request(
+                "state_getStorageAt", [key.to_hex(), block_hash]
+            )
+            if (
+                result.get("error")
+                or "result" not in result
+                or result["result"] is not None
+            ):
+                raise ValueError("collector ownership present or unavailable")
+            return None
         if uid is not None:
             uid = uint(uid)
             if (
@@ -206,6 +284,11 @@ class PublicCollectorChain:
         locked = uint(collateral["locked"]) if collateral is not None else 0
         if locked > stake:
             raise ValueError("invalid collateral position")
+        # The audited runtime omits zero-stake/zero-lock entries from aggregate
+        # availability. A brand-new collector has no position to spend; do not
+        # require a nonexistent map entry before its first registration.
+        if not stake:
+            return 0
         availability = unwrap(
             self.substrate.runtime_call(
                 "StakeInfoRuntimeApi",
@@ -229,7 +312,7 @@ class PublicCollectorChain:
         block_hash = s.get_chain_finalised_head()
         block = s.get_block_number(block_hash)
         self.guard_runtime(policy, block_hash)
-        uid = self.identity(policy, block_hash)
+        uid = self.identity(policy, block_hash, allow_unowned=role == "registration")
         delegate = (
             policy.registration_delegate
             if role == "registration"
@@ -272,98 +355,146 @@ class PublicCollectorChain:
             self.alpha(policy, policy.collector_coldkey, block_hash),
         )
 
+    def _earnings_identity(self, policy, block_hash):
+        """Historical absence may prove no earnings; it never authorizes spending."""
+        uid = self.query(
+            "SubtensorModule", "Uids", [118, policy.collector_hotkey], block_hash
+        )
+        owner = self.query(
+            "SubtensorModule", "Owner", [policy.collector_hotkey], block_hash
+        )
+        if uid is not None or owner == policy.collector_coldkey:
+            # These values were just read at the same immutable historical hash.
+            # Verify every remaining binding without rereading Owner/Uids. Current
+            # observations and subsequent blocks still fetch fresh values.
+            return self._identity_binding(policy, block_hash, owner=owner, uid=uid)
+        if (
+            self.query("SubtensorModule", "SubnetOwner", [118], block_hash)
+            == policy.collector_coldkey
+        ):
+            raise ValueError("collector is subnet-owner associated")
+        key = self.substrate.create_storage_key(
+            "SubtensorModule",
+            "Owner",
+            [policy.collector_hotkey],
+            block_hash=block_hash,
+        )
+        result = self.substrate.rpc_request(
+            "state_getStorageAt", [key.to_hex(), block_hash]
+        )
+        if (
+            result.get("error")
+            or "result" not in result
+            or result["result"] is not None
+        ):
+            raise ValueError("historical collector ownership present or unavailable")
+        return None
+
     def earnings(self, policy, block):
         s = self.substrate
         if block > s.get_block_number(s.get_chain_finalised_head()):
             raise ValueError("emission block is not finalized")
         block_hash = s.get_block_hash(block)
-        self.guard_runtime(policy, block_hash)
-        uid = self.identity(policy, block_hash)
-        parent_uid = self.identity(policy, s.get_block_hash(block - 1))
-        if uid is None or uid != parent_uid:
+        code = self.guard_runtime(policy, block_hash, historical=True)
+        parent_hash = s.get_block_hash(block - 1)
+        # A successful adjacent scan already proved this immutable parent.
+        # Keep exactly one in-memory state, bound to the complete policy and
+        # exact hash. Replays, gaps and changed hashes/policies read it anew.
+        # Current observations/preparation never consult this receipt cache.
+        previous = getattr(self, "_last_receipt_state", None)
+        reuse_parent = previous is not None and previous[:3] == (
+            policy.digest,
+            block - 1,
+            parent_hash,
+        )
+        parent_code = (
+            previous[3]
+            if reuse_parent and previous is not None
+            else self.guard_runtime(policy, parent_hash, historical=True)
+        )
+        collector_receipt_runtime(parent_code, code)
+        uid = self._earnings_identity(policy, block_hash)
+        parent_uid = (
+            previous[4]
+            if reuse_parent and previous is not None
+            else self._earnings_identity(policy, parent_hash)
+        )
+        events = s.get_events(block_hash)
+        result = None
+        if uid is None and parent_uid is None:
+            # The signed start can predate first registration. An unrelated
+            # miner's tempo is not this collector's earnings. A self-credit
+            # without either UID binding contradicts absence and must halt.
+            liquid_collector_credit(
+                events,
+                collector_hotkey=policy.collector_hotkey,
+                collector_coldkey=policy.collector_coldkey,
+                gross_incentive_rao=0,
+            )
+        elif uid is None or uid != parent_uid:
             # Registration/rebind within payout block makes attribution ambiguous.
             if any(
-                e.get("event_id") == "IncentiveAlphaEmittedToMiners"
-                for e in s.get_events(block_hash)
+                e.get("event_id") == "IncentiveAlphaEmittedToMiners" for e in events
             ):
                 raise ValueError("emission intersects collector identity transition")
-            return None
-        emissions = []
-        for event in s.get_events(block_hash):
-            if (
-                event.get("module_id") != "SubtensorModule"
-                or event.get("event_id") != "IncentiveAlphaEmittedToMiners"
-            ):
-                continue
-            attrs = event.get("event", {}).get("attributes")
-            if not isinstance(attrs, dict) or set(attrs) != {"netuid", "emissions"}:
-                raise ValueError("unsupported emission event schema")
-            if uint(attrs["netuid"]) == 118:
-                if event.get("phase") != "Initialization":
-                    raise ValueError("ambiguous emission phase")
-                amounts = attrs["emissions"]
-                if not isinstance(amounts, list) or uid >= len(amounts):
-                    raise ValueError("missing collector emission UID")
-                emissions.append(uint(amounts[uid]))
-        if len(emissions) > 1:
-            raise ValueError("ambiguous emission attribution")
-        if not emissions:
-            return None
-        # Gross SERVER_EMISSION precedes collateral capture and routing. Only
-        # this exact liquid initialization credit authorizes distribution.
-        for at in (block_hash, s.get_block_hash(block - 1)):
-            if (
-                self.query(
-                    "SubtensorModule",
-                    "AutoStakeDestination",
-                    [policy.collector_coldkey, 118],
-                    at,
+        else:
+            gross = collector_gross_incentive(events, uid)
+            if gross is not None:
+                # Gross SERVER_EMISSION precedes collateral capture and routing.
+                # Only this exact liquid initialization credit authorizes spending.
+                for at in (block_hash, parent_hash):
+                    if (
+                        self.query(
+                            "SubtensorModule",
+                            "AutoStakeDestination",
+                            [policy.collector_coldkey, 118],
+                            at,
+                        )
+                        != policy.collector_hotkey
+                    ):
+                        raise ValueError(
+                            "liquid emission route is not pinned to collector"
+                        )
+                credit = liquid_collector_credit(
+                    events,
+                    collector_hotkey=policy.collector_hotkey,
+                    collector_coldkey=policy.collector_coldkey,
+                    gross_incentive_rao=gross,
                 )
-                != policy.collector_hotkey
-            ):
-                raise ValueError("liquid emission route is not pinned to collector")
-        credits = []
-        for event in s.get_events(block_hash):
-            if (
-                event.get("module_id") != "SubtensorModule"
-                or event.get("event_id") != "AutoStakeAdded"
-            ):
-                continue
-            attrs = event.get("event", {}).get("attributes")
-            if not isinstance(attrs, dict) or set(attrs) != {
-                "netuid",
-                "destination",
-                "hotkey",
-                "owner",
-                "incentive",
-            }:
-                raise ValueError("unsupported liquid credit schema")
-            if (attrs["netuid"], attrs["hotkey"], attrs["owner"]) != (
-                118,
-                policy.collector_hotkey,
-                policy.collector_coldkey,
-            ):
-                continue
-            if (
-                attrs["destination"] != policy.collector_hotkey
-                or event.get("phase") != "Initialization"
-            ):
-                raise ValueError("liquid credit redirected or ambiguous")
-            credits.append(attrs)
-        if len(credits) > 1:
-            raise ValueError("ambiguous liquid emission credits")
-        if not credits:
-            return None
-        amount = uint(credits[0]["incentive"])
-        if amount > emissions[0]:
-            raise ValueError("liquid credit exceeds gross collector incentive")
-        if not amount:
-            return None
-        return FinalizedEarnings(
-            amount,
-            block_hash,
-            hashlib.sha256(canonical(credits[0]).encode()).hexdigest(),
+                result = (
+                    FinalizedEarnings(
+                        credit.amount_rao, block_hash, credit.event_digest
+                    )
+                    if credit is not None
+                    else None
+                )
+        # Publish only after every receipt check succeeded. This never stores
+        # events, route authorization, spending approval or an unfinished proof.
+        self._last_receipt_state = (policy.digest, block, block_hash, code, uid)
+        return result
+
+    def recent_earning_candidates(self, policy):
+        """Schedule hints only. Every candidate still needs full earnings proof.
+
+        Tempo may have changed historically: an absent candidate gives no
+        entitlement and never advances the contiguous audit cursor.
+        """
+        observed = self.observe(policy, "transfer")
+        step = uint(
+            self.query(
+                "SubtensorModule", "LastMechansimStepBlock", [118], observed.block_hash
+            )
         )
+        tempo = uint(self.query("SubtensorModule", "Tempo", [118], observed.block_hash))
+        if not policy.start_block <= step <= observed.block or not 1 <= tempo <= 7200:
+            raise ValueError("recent earning schedule unavailable")
+        return [
+            step - offset * tempo
+            for offset in range(512)
+            if policy.start_block
+            <= step - offset * tempo
+            <= observed.block - policy.distribution_interval_blocks
+        ]
 
     def assert_no_sponsor(self, policy, delegate, block_hash):
         # SCALE Option<()> can decode BOTH absence and presence as None. Only
@@ -438,9 +569,46 @@ class PublicCollectorChain:
             raise ValueError("wrong delegate key; primary coldkey never accepted")
         return key
 
-    def prepare(self, policy, role, call, observation):
+    def prepare_manual(self, policy, call, observation, request):
+        return self.prepare(
+            policy, "transfer", call, observation, manual_request=request
+        )
+
+    def prepare(self, policy, role, call, observation, *, manual_request=None):
         if role != self.role:
             raise ValueError("role mismatch")
+        maximum = policy.max_distribution_rao
+        if manual_request is not None:
+            from ditto.treasury.manual_batch import ManualBatchTransfer
+            from ditto_screening_protocol.treasury_manual_limit import (
+                ManualLimitApproval,
+            )
+
+            if role != "transfer" or not isinstance(
+                manual_request, ManualBatchTransfer
+            ):
+                raise ValueError(
+                    "only an exact manual transfer may use range authority"
+                )
+            approval = ManualLimitApproval.model_validate(
+                manual_request.manual_approval
+            )
+            approval.verify(policy.digest, policy.collector_coldkey)
+            if (
+                approval != getattr(self, "manual_approval", None)
+                or call["params"].get("alpha_amount") != manual_request.amount_rao
+                or not observation.block + 128 <= manual_request.expires_block
+                or manual_request.amount_rao + manual_request.retained_alpha_rao
+                > observation.alpha_rao
+                or not any(
+                    d.bucket_id == manual_request.bucket_id
+                    and d.allocation_bps > 0
+                    and d.holding_coldkey == call["params"].get("destination_coldkey")
+                    for d in policy.destinations
+                )
+            ):
+                raise ValueError("manual signing intent differs from exact approval")
+            maximum = approval.policy.max_amount_rao
         expected_function = (
             "register_limit" if role == "registration" else "transfer_stake"
         )
@@ -469,7 +637,7 @@ class PublicCollectorChain:
             or params["origin_netuid"] != 118
             or params["destination_netuid"] != 118
             or type(params["alpha_amount"]) is not int
-            or not 0 < params["alpha_amount"] <= policy.max_distribution_rao
+            or not 0 < params["alpha_amount"] <= maximum
         ):
             raise ValueError("distribution intent mismatch")
         s = self.substrate
@@ -479,6 +647,30 @@ class PublicCollectorChain:
             or current.block_hash != observation.block_hash
         ):
             raise ValueError("finalized observation changed before signing")
+        if role == "transfer":
+            # v473 checks same-subnet stake's TAO value, not just alpha units.
+            # The price API rounds down to TAO rao per whole alpha: integer
+            # flooring here is conservative relative to the runtime's U64F64.
+            # Never upsize an approved amount or load a key on unknown quotes.
+            minimum = uint(
+                s.get_constant(
+                    "SubtensorModule",
+                    "InitialMinTransfer",
+                    block_hash=current.block_hash,
+                )
+            )
+            price = uint(
+                s.runtime_call(
+                    "SwapRuntimeApi",
+                    "current_alpha_price",
+                    [118],
+                    block_hash=current.block_hash,
+                )
+            )
+            if minimum == 0 or price == 0:
+                raise ValueError("transfer minimum or alpha price unavailable")
+            if params["alpha_amount"] * price // 1_000_000_000 < minimum:
+                raise ValueError("transfer amount below finalized minimum value")
         key = self.key(policy)
         self.guard_runtime(policy, s.get_chain_head())
         inner = s.compose_call(
@@ -498,7 +690,12 @@ class PublicCollectorChain:
         )
         era = {"period": 64, "current": current.block}
         nonce = s.get_account_nonce(key.ss58_address)
-        fee = uint(s.get_payment_info(proxy, key, era=era, nonce=nonce)["partialFee"])
+        # Pinned SDK 10.5 returns TransactionPaymentApi RuntimeDispatchInfo,
+        # whose SCALE field is partial_fee (the JSON RPC uses partialFee).
+        info = s.get_payment_info(proxy, key, era=era, nonce=nonce)
+        if not isinstance(info, dict) or "partial_fee" not in info:
+            raise ValueError("unsupported SDK payment info")
+        fee = uint(info["partial_fee"])
         if fee > policy.max_fee_rao:
             raise ValueError("estimated fee exceeds cap")
         extrinsic = s.create_signed_extrinsic(proxy, key, era=era, nonce=nonce, tip=0)
@@ -529,9 +726,16 @@ class PublicCollectorChain:
         s = self.substrate
         start = max(signed["start_block"], operation["reconciled_through"])
         end = min(observation.block, signed["expires_block"], start + 32)
+        parent_code = (
+            self.guard_runtime(policy, s.get_block_hash(start), historical=True)
+            if end > start
+            else None
+        )
         for block in range(start + 1, end + 1):
             block_hash = s.get_block_hash(block)
-            self.guard_runtime(policy, block_hash)
+            code = self.guard_runtime(policy, block_hash, historical=True)
+            collector_receipt_runtime(parent_code, code)
+            parent_code = code
             raw = s.rpc_request("chain_getBlock", [block_hash])["result"]["block"][
                 "extrinsics"
             ]
@@ -577,13 +781,21 @@ class PublicCollectorChain:
                 ]
                 if len(failures) != 1:
                     raise ValueError("unknown outer outcome; retain durable claim")
-                return Settlement("failed", block, block_hash)
+                return Settlement(
+                    "failed",
+                    block,
+                    block_hash,
+                    extrinsic_index=matches[0],
+                    extrinsic_hash=signed["extrinsic_hash"],
+                )
             if len(outer) != 1 or len(inner) != 1:
                 raise ValueError("missing or ambiguous inner proxy result")
             attrs = inner[0].get("event", {}).get("attributes")
             if not isinstance(attrs, dict) or set(attrs) != {"result"}:
                 raise ValueError("unsupported proxy result schema")
-            if attrs["result"] not in ({"Ok": None}, {"Ok": []}):
+            # SCALE unit is () in the pinned Linux SDK; JSON decoders use []
+            # (and older decoders None). Accept only these empty unit values.
+            if attrs["result"] not in ({"Ok": None}, {"Ok": []}, {"Ok": ()}):
                 error = attrs["result"]
                 if (
                     isinstance(error, dict)
@@ -591,13 +803,22 @@ class PublicCollectorChain:
                     and isinstance(error["Err"], (dict, str))
                     and error["Err"]
                 ):
-                    return Settlement("failed", block, block_hash)
+                    return Settlement(
+                        "failed",
+                        block,
+                        block_hash,
+                        extrinsic_index=matches[0],
+                        extrinsic_hash=signed["extrinsic_hash"],
+                    )
                 raise ValueError("unsupported inner result; retain durable claim")
             uid = self.identity(policy, block_hash)
             if operation["role"] == "registration":
                 if (
                     uid is None
-                    or self.identity(policy, s.get_block_hash(block - 1)) is not None
+                    or self.identity(
+                        policy, s.get_block_hash(block - 1), allow_unowned=True
+                    )
+                    is not None
                 ):
                     raise ValueError("registration effect/binding unproved")
                 registrations = [
@@ -606,51 +827,45 @@ class PublicCollectorChain:
                     if e.get("module_id") == "SubtensorModule"
                     and e.get("event_id") == "NeuronRegistered"
                 ]
-                if len(registrations) != 1 or registrations[0].get("event", {}).get(
-                    "attributes"
-                ) != [118, uid, policy.collector_hotkey]:
+                if len(registrations) != 1:
+                    raise ValueError("missing exact registration effect event")
+                attrs = registrations[0].get("event", {}).get("attributes")
+                # The pinned Linux decoder returns tuple fields; JSON readers
+                # return lists. Bind both to the same exact typed UID effect.
+                if (
+                    not isinstance(attrs, (tuple, list))
+                    or len(attrs) != 3
+                    or type(attrs[0]) is not int
+                    or attrs[0] != 118
+                    or type(attrs[1]) is not int
+                    or attrs[1] != uid
+                    or attrs[2] != policy.collector_hotkey
+                ):
                     raise ValueError("missing exact registration effect event")
                 return Settlement("finalized", block, block_hash, uid)
             destination = operation["destination"]
-            # Exact phase-matched alpha events prove the movement. The stake
-            # API is a rounded share-pool quote; its delta is not an effect.
-            removed = [
-                e
-                for e in events
-                if e.get("module_id") == "SubtensorModule"
-                and e.get("event_id") == "StakeRemoved"
-            ]
-            added = [
-                e
-                for e in events
-                if e.get("module_id") == "SubtensorModule"
-                and e.get("event_id") == "StakeAdded"
-            ]
-            if len(removed) != 1 or len(added) != 1:
-                raise ValueError("missing or ambiguous alpha transfer effect")
-            # Schema is pinned to the independently audited v470 runtime.
-            for event, coldkey in (
-                (removed[0], policy.collector_coldkey),
-                (added[0], destination),
-            ):
-                attrs = event.get("event", {}).get("attributes")
-                if (
-                    not isinstance(attrs, (list, tuple))
-                    or len(attrs) != 6
-                    or attrs[0] != coldkey
-                    or attrs[1] != policy.collector_hotkey
-                    or uint(attrs[2]) < 0
-                    or uint(attrs[3]) != operation["amount"]
-                    or attrs[4] != 118
-                    or uint(attrs[5]) != 0
-                ):
-                    raise ValueError(
-                        "alpha transfer event differs from reserved intent"
-                    )
+            # The same audited decoder is used by the independent ingestion
+            # reader. This function still verifies runtime, fee, identity and
+            # signed extrinsic binding before accepting its decoded effects.
+            collector_transfer_effect(
+                events,
+                extrinsic_index=matches[0],
+                collector_coldkey=policy.collector_coldkey,
+                collector_hotkey=policy.collector_hotkey,
+                recipient_coldkey=destination,
+                amount_rao=operation["amount"],
+            )
             if uid is None:
                 raise ValueError("finalized UID binding unavailable")
             self.alpha(policy, destination, block_hash)
-            return Settlement("finalized", block, block_hash, uid)
+            return Settlement(
+                "finalized",
+                block,
+                block_hash,
+                uid,
+                extrinsic_index=matches[0],
+                extrinsic_hash=signed["extrinsic_hash"],
+            )
         status = (
             "expired"
             if observation.block > signed["expires_block"]
@@ -658,6 +873,67 @@ class PublicCollectorChain:
             else "pending"
         )
         return Settlement(status, scanned_through=end)
+
+    def retryable_transfer_failure(self, policy, operation):
+        """Reprove one finalized v473 AmountTooLow failure without signing.
+
+        Other failures, unknown delivery, expiry and changed stake are refused.
+        The caller supplies a separate explicit bounded operator authorization.
+        """
+        if (
+            self.role != "transfer"
+            or operation["role"] != "transfer"
+            or operation["state"] != "failed"
+        ):
+            raise ValueError("replacement requires a failed transfer")
+        saved = json.loads(operation["settlement_json"])
+        signed = json.loads(operation["signed_json"])
+        block = uint(saved.get("block"))
+        observed = self.observe(policy, "transfer")
+        if (
+            saved.get("status") != "failed"
+            or not signed["start_block"]
+            < block
+            <= signed["expires_block"]
+            < observed.block
+        ):
+            raise ValueError("replacement requires finalized expired mortality")
+        block_hash = self.substrate.get_block_hash(block)
+        if saved.get("block_hash") != block_hash:
+            raise ValueError("failed settlement block changed")
+        # Only the independently audited v473 error index is accepted.
+        self.guard_runtime(policy, block_hash)
+        result = self.reconcile(
+            policy, dict(operation, reconciled_through=block - 1), observed
+        )
+        if (
+            result.status != "failed"
+            or result.block != block
+            or result.block_hash != block_hash
+        ):
+            raise ValueError("failed transfer cannot be reproved")
+        events = [
+            e
+            for e in self.substrate.get_events(block_hash)
+            if e.get("extrinsic_idx") == result.extrinsic_index
+        ]
+        errors = [
+            e.get("event", {}).get("attributes")
+            for e in events
+            if e.get("module_id") == "Proxy" and e.get("event_id") == "ProxyExecuted"
+        ]
+        if errors != [
+            {"result": {"Err": {"Module": {"index": 7, "error": "0x52000000"}}}}
+        ]:
+            raise ValueError("replacement only permits audited AmountTooLow")
+        parent = self.substrate.get_block_hash(block - 1)
+        self.guard_runtime(policy, parent)
+        for coldkey in (policy.collector_coldkey, operation["destination"]):
+            if self.alpha(policy, coldkey, parent) != self.alpha(
+                policy, coldkey, block_hash
+            ):
+                raise ValueError("failed transfer changed stake; replacement refused")
+        return result
 
     @staticmethod
     def fee_evidence(policy, role, events):

@@ -559,8 +559,12 @@ identical weights across asynchronous validator upgrades.
 
 ## Optional observability
 
-Add the shared `WANDB_API_KEY` supplied by Ditto to `.env`, or set
-`WANDB_MODE=disabled`. Never commit the key.
+W&B telemetry is optional and defaults to `WANDB_MODE=disabled`. Enable it only
+after obtaining a dedicated, independently revocable write credential for this
+validator. Set that validator's `WANDB_API_KEY` locally and switch
+`WANDB_MODE=online`; never commit the key or reuse a team-wide key. Operators
+must revoke or rotate the dedicated credential when a validator leaves the
+fleet. Scoring does not depend on W&B telemetry.
 
 The validator also sends a signed public heartbeat with its version, source
 digest, phase, and coarse health; the platform uses it to route compatible
@@ -667,8 +671,10 @@ otherwise ineligible newer generation cannot shadow an older eligible winner.
 
 ### Evidence-tied emission shares
 
-Protocol 20 adds an operator-gated alternative to the fixed
-`65% / 14% / 10% / 7% / 4%` KOTH shares. When the ledger carries
+Protocol 20 adds an operator-gated alternative to the configured KOTH shares
+(frozen default `65% / 14% / 10% / 7% / 4%`; from protocol 31 the ledger may
+serve an operator curve as `rank_shares`, withheld until every recently-live
+weight setter reports v31). When the ledger carries
 `tie_weighting_mode: pool`, validators group contiguous recipients that are
 evidence-tied, pool only the rank shares those recipients occupy, and divide
 that pool equally. Four tied tail recipients therefore receive `8.75%` each;
@@ -779,6 +785,16 @@ If that artifact is the incumbent -- the previous pin's champion's owner has
 no payable generation, only its best withheld one -- the pin serves it as
 `provisional_incumbent`, with `crown_incumbent_agent_id` set to its id. It is
 the only withheld entry that can reach the fold.
+
+Being unpaid does not exempt it from score proofs. It still decides who holds
+the crown and the tail, so the validator verifies it exactly like a payable
+row: at least three signed quorum receipts from distinct validators, each
+bound to this agent, its lease and its benchmark version, with the row equal
+to the lower-median receipt, plus the same v9 confirmation checks. If any of
+that fails, the validator rejects the whole ledger and leaves its weights
+unchanged for the epoch, as it would for an unverifiable entry. It never drops
+the field and folds the rest, because that would quietly crown and pay the
+runner-up.
 
 The fold adds it to the pool as the crown incumbent and derives the champion,
 tail, tie pooling and score-ceiling cohort exactly as above. Every share it is

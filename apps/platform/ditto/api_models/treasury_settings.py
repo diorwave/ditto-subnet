@@ -2,7 +2,7 @@
 
 Neither policy version changes validator weights or authorizes a transfer.
 Version 1 keeps its original 500 bps ceiling; version 2 describes one
-collector and isolated service holding coldkeys under a 1,000 bps
+collector and isolated service holding coldkeys under a 10,000 bps
 aggregate ceiling.
 """
 
@@ -10,18 +10,27 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_TREASURY_BPS = 500
-MAX_SERVICE_BPS = 1_000
+MAX_SERVICE_BPS = 10_000
 PUBLIC_ADDRESS_PATTERN = r"^[1-9A-HJ-NP-Za-km-z]{47,48}$"
 
 
 def public_wallet_address(value: str | None) -> str | None:
     """Legacy policies allowed free text; never publish it as an address."""
     return value if value and re.fullmatch(PUBLIC_ADDRESS_PATTERN, value) else None
+
+
+class TreasuryObserverSettings(BaseModel):
+    """One exact immutable revision for the receipt observer, not latest policy."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+    revision: Annotated[int, Field(gt=0, le=2_147_483_647)]
+    checksum: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    settings: dict[str, Any]
 
 
 class TreasuryPayeeRule(BaseModel):
@@ -135,7 +144,7 @@ class TreasurySettings(BaseModel):
                 sum(bucket.allocation_bps for bucket in self.service_buckets)
                 > MAX_SERVICE_BPS
             ):
-                raise ValueError("combined service allocation exceeds 1000 bps")
+                raise ValueError("combined service allocation exceeds 10000 bps")
             if (
                 self.max_daily_outflow_rao
                 or self.max_single_topup_rao
@@ -187,7 +196,9 @@ class TreasurySettingsControl(BaseModel):
     revision: int
     miner_bps: int
     history: list[TreasurySettingsRevision]
-    weight_effect: Literal["none"] = "none"
+    # "next_epoch": Gamma is enforcing a coldkey-signed range, so the bucket
+    # allocation here is folded into the next epoch pin (like burn).
+    weight_effect: Literal["none", "next_epoch"] = "none"
 
 
 class AdminTreasurySettingsRequest(BaseModel):

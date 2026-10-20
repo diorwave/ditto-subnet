@@ -69,6 +69,10 @@ from ditto_screening_protocol.models import (
     source_review_invariants_for_policy,
     source_review_pass_clauses_for_policy,
 )
+from ditto_screening_protocol.reason_codes import (
+    SOURCE_REVIEW_MODEL_TIMEOUT,
+    SOURCE_REVIEW_PROVIDER_CREDITS_EXHAUSTED,
+)
 from ditto_screening_protocol.review_ledger import (
     MULTI_LOCATION_CATEGORIES,
     concern_threshold_reached,
@@ -84,7 +88,7 @@ _SUPPORTED_POLICY_VERSIONS = tuple(
 def _prompt_revision(policy_version: int) -> str:
     """Prompt revision recorded in findings and audits for one policy version."""
     if policy_version == 13:
-        return "source-review-v30-policy-v13"
+        return "source-review-v32-policy-v13"
     return f"source-review-v24-policy-v{policy_version}"
 
 
@@ -271,6 +275,11 @@ _MIN_MAX_COMPLETION_TOKENS = 2_000
 # among compatible providers, so a third slow post only burns another slice of
 # the lease without adding a distinct recovery path.
 _MODEL_TRANSPORT_RETRY_DELAYS_SECONDS = (1.0,)
+# A Ditto Router blue/green deploy rejects valid endpoint keys with HTTP 401
+# for a few minutes (observed 3-7 minutes after each cutover). Waiting that
+# out keeps a half-finished review instead of discarding it; a key that is
+# really revoked still parks after about five minutes.
+ROUTER_AUTH_RETRY_DELAYS_SECONDS = (15.0, 30.0, 60.0, 90.0, 120.0)
 
 _MAX_INVENTORY_FILES = 512
 _MAX_OPAQUE_BLOBS = 128
@@ -563,9 +572,13 @@ class SourceReviewBudgetExhausted(ValueError):
         read_files_used: int,
         max_read_bytes: int = _MAX_TOTAL_TOOL_CHARS,
         policy_version: int = SCREENING_POLICY_VERSION,
+        verdict_unsettled: bool = False,
+        stop_reason: str | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
+        self.verdict_unsettled = verdict_unsettled
+        self.stop_reason = stop_reason
         self.max_steps = max_steps
         self.steps_used = steps_used
         self.read_bytes_used = read_bytes_used
@@ -582,7 +595,33 @@ class SourceReviewBudgetExhausted(ValueError):
             steps_used=self.steps_used,
             max_read_bytes=self.max_read_bytes,
             read_bytes_used=self.read_bytes_used,
+            budget_stop_reason="step" if self.verdict_unsettled else self.stop_reason,
         )
+
+
+def l1_verdict_unsettled(observation: object) -> bool:
+    """Whether L1 stopped without one host-valid verdict it could settle on.
+
+    Two reviewer-owned stops qualify: spending every step without a valid
+    verdict (the inconsistency stays in ``error_code``), and running out of
+    L1's own time with a ledger that cannot admit or clear on its own. Either
+    way the reviewer, not infrastructure, ran out, and the deep review still
+    owes a decision on the recorded notes.
+    """
+    audit = getattr(observation, "review_audit", None)
+    code = getattr(observation, "error_code", None)
+    if not isinstance(audit, Mapping) or audit.get("stage") != "l1":
+        return False
+    if not isinstance(code, str):
+        return False
+    stop = audit.get("budget_stop_reason")
+    if stop == "step":
+        return code.startswith("source-review-inconsistent-verdict")
+    return (
+        stop == "time"
+        and code == "source-review-lease-budget-exhausted"
+        and getattr(observation, "failure_disposition", None) == "inconclusive"
+    )
 
 
 def policy_v10_static_assessment(
@@ -1294,6 +1333,14 @@ and the two-location evidence bar before citing anything:
   answers the canary shape, so a fixture keyed to the request user is cleared
   even at high density.
 
+The review_leads inventory reports item_selection and fingerprint_selection:
+truncated, omitted_count and omitted_by_kind describe candidates dropped after
+per-rule/file bounds. scan_truncated separately means the archive scan hit its
+file/byte budget. Selection favors high severity, then kind diversity.
+fingerprint_selection.saturation_leads points to repeated raw-scan kinds that
+can be padded with comments or strings. Inspect these as leads, never proof of
+evasion; use source search to follow omitted kinds when needed.
+
 The inventory also carries "emulation_fingerprints": bench-v12 anti-emulation
 leads over served/executable source, each naming a matched fingerprint kind, a
 severity, and location-only path:line roles. They automate the greppable bypass
@@ -1735,6 +1782,14 @@ and the two-location evidence bar before citing anything:
   answers the canary shape, so a fixture keyed to the request user is cleared
   even at high density.
 
+The review_leads inventory reports item_selection and fingerprint_selection:
+truncated, omitted_count and omitted_by_kind describe candidates dropped after
+per-rule/file bounds. scan_truncated separately means the archive scan hit its
+file/byte budget. Selection favors high severity, then kind diversity.
+fingerprint_selection.saturation_leads points to repeated raw-scan kinds that
+can be padded with comments or strings. Inspect these as leads, never proof of
+evasion; use source search to follow omitted kinds when needed.
+
 The inventory also carries "emulation_fingerprints": bench-v12 anti-emulation
 leads over served/executable source, each naming a matched fingerprint kind, a
 severity, and location-only path:line roles. They automate the greppable bypass
@@ -1962,8 +2017,8 @@ case IDs, active seeds, expected answers, dataset hashes, scorer identity, audit
 markers, or `bench_version` from changing substantive retrieval, capability
 ordering, authority, execution, or output beyond the published compatibility
 contract. Complete source proof is enforceable. Behavioral
-degradation alone is a lead until a versioned post-commit, controlled,
-predeclared and replicated test attributes it to evaluation dependence. Use
+degradation alone is a lead, never a breach; screening runs no separate
+behavioral test that could attribute it later. Use
 evaluation_independent_runtime or no_evaluation_identity_branch only after
 tracing the served path; unreachable_nonruntime_code remains available when the
 effective build excludes the path.
@@ -2018,8 +2073,8 @@ source-side allowlist for the validator-supplied field.
 
 Opaque files are not violations by presence. Establish each loaded component's
 actual role and apply the published role-specific verification requirement.
-Private behavioral testing is mandatory only when that role requires it or
-source causality remains unresolved. Tests, diagnostics, and helpers require
+Screening runs no private behavioral test, so settle each role from traced
+source causality. Tests, diagnostics, and helpers require
 effective build/startup/runtime reachability; refuting one dormant lead does
 not clear the rest of the artifact.
 Before labeling an optional environment-gated branch reachable, inspect its
@@ -2796,13 +2851,19 @@ class TarSourceRepository:
                 }
                 for item in static_v2.advisory[:16]
             ]
+        item_selection: dict[str, object] = {}
+        fingerprint_selection: dict[str, object] = {}
+        items = find_source_review_leads(
+            miner_readable, selection_report=item_selection
+        )
+        fingerprints = find_benchmark_emulation_fingerprints(
+            miner_readable, selection_report=fingerprint_selection
+        )
         return {
-            "items": [*find_source_review_leads(miner_readable), *static_advisories][
-                :_MAX_LEAD_SCAN_FILES
-            ],
-            "emulation_fingerprints": find_benchmark_emulation_fingerprints(
-                miner_readable
-            ),
+            "items": [*items, *static_advisories],
+            "item_selection": item_selection,
+            "emulation_fingerprints": fingerprints,
+            "fingerprint_selection": fingerprint_selection,
             "unmatchable_category_guards": guard_report(
                 find_unmatchable_category_guards(
                     (path, mask_lead_comments(text, path)) for path, text in readable
@@ -2817,6 +2878,7 @@ class TarSourceRepository:
             "members_considered": members_considered,
             "bytes_scanned": bytes_scanned,
             "nontext": nontext,
+            "scan_truncated": truncated,
             "truncated": truncated,
         }
 
@@ -3642,6 +3704,7 @@ class OpenRouterSourceReviewAgent:
         transport_retry_delays: Sequence[float] = (
             _MODEL_TRANSPORT_RETRY_DELAYS_SECONDS
         ),
+        auth_retry_delays: Sequence[float] = ROUTER_AUTH_RETRY_DELAYS_SECONDS,
         inference_provider: str = "openrouter",
         max_completion_request_seconds: float | None = None,
     ) -> None:
@@ -3678,6 +3741,9 @@ class OpenRouterSourceReviewAgent:
         self._max_completion_request_seconds = float(request_timeout)
         self._transport_retry_delays = tuple(
             max(0.0, float(delay)) for delay in transport_retry_delays
+        )
+        self._auth_retry_delays = tuple(
+            max(0.0, float(delay)) for delay in auth_retry_delays
         )
         self._static_preflight_v2_mode = static_preflight_v2_mode
         self._provenance_manifest_files = (
@@ -3761,8 +3827,12 @@ class OpenRouterSourceReviewAgent:
             # positive coverage admits it; a clean-but-thin ledger holds and
             # shows exactly how far inspection got. The budgets therefore
             # tune inspection depth, not fate.
+            # A reviewer that never produced a valid verdict holds rather than
+            # admitting on its ledger; policy v13 escalates it to L2/L3.
             disposition = (
-                ledger_disposition(
+                "inconclusive"
+                if budget is not None and budget.verdict_unsettled
+                else ledger_disposition(
                     notes,
                     concern_hold_count=self._concern_hold_count,
                     clear_min_notes=self._clear_min_notes,
@@ -3840,6 +3910,7 @@ class OpenRouterSourceReviewAgent:
                 read_files_used=len(read_files),
                 max_read_bytes=self._max_read_bytes,
                 policy_version=policy_version,
+                stop_reason="time",
             )
 
         if progress is not None:
@@ -4045,7 +4116,25 @@ class OpenRouterSourceReviewAgent:
                 if progress is not None:
                     progress(min(_step + 1, self._max_steps), self._max_steps)
         if last_schema_error is not None:
-            raise last_schema_error
+            # The reviewer kept submitting verdicts the host could not accept
+            # until its steps ran out. That is a reviewer budget outcome with
+            # an exact ledger, not an infrastructure fault: retrying the same
+            # model on the same source burns the attempt without new evidence.
+            logger.warning(
+                "source review verdict never validated: %s: %s",
+                type(last_schema_error).__name__,
+                last_schema_error,
+            )
+            raise SourceReviewBudgetExhausted(
+                _source_review_failure_code(last_schema_error),
+                max_steps=self._max_steps,
+                steps_used=self._max_steps,
+                read_bytes_used=delivered,
+                read_files_used=len(read_files),
+                max_read_bytes=self._max_read_bytes,
+                policy_version=policy_version,
+                verdict_unsettled=True,
+            ) from last_schema_error
         raise SourceReviewBudgetExhausted(
             "source-review-step-budget-exhausted",
             max_steps=self._max_steps,
@@ -4070,7 +4159,9 @@ class OpenRouterSourceReviewAgent:
         """Issue one model turn, healing only bounded transport-class faults."""
         started = asyncio.get_running_loop().time()
         attempts = len(self._transport_retry_delays) + 1
-        for attempt in range(attempts):
+        attempt = 0
+        auth_retries = 0
+        while True:
             remaining_timeout = timeout
             if timeout is not None:
                 remaining_timeout = timeout - (
@@ -4098,6 +4189,21 @@ class OpenRouterSourceReviewAgent:
                 fault = str(status) if status == 429 or status >= 500 else None
                 signature = _http_error_signature(error.response)
                 caught: BaseException = error
+                if status == 401 and auth_retries < len(self._auth_retry_delays):
+                    delay = self._auth_retry_delays[auth_retries]
+                    elapsed = asyncio.get_running_loop().time() - started
+                    if timeout is None or timeout - elapsed > delay:
+                        auth_retries += 1
+                        logger.warning(
+                            "source review model key rejected; waiting out a "
+                            "router deploy: signature=%s retry=%d/%d delay_s=%.1f",
+                            signature,
+                            auth_retries,
+                            len(self._auth_retry_delays),
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
             except (TimeoutError, httpx.TimeoutException) as error:
                 # ``asyncio.timeout`` raises the built-in TimeoutError, which
                 # is not an httpx.RequestError. Treat both deadline sources as
@@ -4140,8 +4246,7 @@ class OpenRouterSourceReviewAgent:
                 delay,
             )
             await asyncio.sleep(delay)
-
-        raise AssertionError("model retry loop exhausted without a result")
+            attempt += 1
 
     def _completion_request_headers(
         self, api_key: str, _effective_timeout: float
@@ -4208,11 +4313,13 @@ def _source_review_failure_code(error: BaseException) -> str:
     instead of losing the failure.
     """
     if isinstance(error, httpx.HTTPStatusError):
+        if error.response.status_code == 402:
+            return SOURCE_REVIEW_PROVIDER_CREDITS_EXHAUSTED
         return f"source-review-http-{error.response.status_code}"
     if isinstance(error, (TimeoutError, httpx.TimeoutException)):
         # A model turn timed out while the lease still had time; lease expiry
         # is raised as ``SourceReviewBudgetExhausted`` instead.
-        return "source-review-model-timeout"
+        return SOURCE_REVIEW_MODEL_TIMEOUT
     message = str(error).strip()
     suffix = _SOURCE_REVIEW_FAILURE_CODES.get(message)
     if suffix is None and message.startswith("source review category "):

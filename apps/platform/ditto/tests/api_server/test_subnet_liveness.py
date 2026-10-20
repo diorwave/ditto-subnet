@@ -22,6 +22,7 @@ from ditto.api_models.subnet_liveness import SubnetLiveness, SubnetLivenessSigna
 from ditto.api_models.ticket_status import TicketStatus
 from ditto.api_server import subnet_liveness
 from ditto.api_server.subnet_liveness import load_subnet_liveness
+from ditto.api_server.v13_scorer_cohort import pinned_validator_allowed
 from ditto.db.models import (
     Agent,
     AgentStatus,
@@ -35,6 +36,7 @@ from ditto.db.models import (
     SourceEmissionCollectorCursor,
     SubmissionRetirement,
     V13ScorerCohortPin,
+    V13ScorerCohortRotation,
     ValidatorHeartbeat,
     ValidatorQueueWithdrawal,
     ValidatorTicket,
@@ -651,6 +653,7 @@ class TestV13ScorerCohortPin:
         now: datetime,
         live_packets: list[dict[str, Any]],
         offline: frozenset[str] = frozenset(),
+        hotkeys: tuple[str, ...] = _PIN_HOTKEYS,
     ) -> None:
         pinned = _packet("a" * 40)
         async with session_maker() as session, session.begin():
@@ -663,22 +666,36 @@ class TestV13ScorerCohortPin:
                         now - timedelta(minutes=10) if hotkey in offline else now,
                         packet,
                     )
-                    for hotkey, packet in zip(_PIN_HOTKEYS, live_packets, strict=True)
+                    for hotkey, packet in zip(hotkeys, live_packets, strict=True)
                 ]
             )
-            session.add(
-                V13ScorerCohortPin(
-                    bench_version=13,
-                    hotkeys=list(_PIN_HOTKEYS),
-                    packet=pinned,
-                    slot_settings_revision=1,
-                    slot_settings_checksum="0" * 64,
-                    reason="liveness test pin",
-                    actor="test",
+            if hotkeys == _PIN_HOTKEYS:
+                session.add(
+                    V13ScorerCohortPin(
+                        bench_version=13,
+                        hotkeys=list(hotkeys),
+                        packet=pinned,
+                        slot_settings_revision=1,
+                        slot_settings_checksum="0" * 64,
+                        reason="liveness test pin",
+                        actor="test",
+                    )
                 )
-            )
+            else:
+                session.add(
+                    V13ScorerCohortRotation(
+                        bench_version=13,
+                        hotkeys=list(hotkeys),
+                        packet=pinned,
+                        previous_packet=pinned,
+                        slot_settings_revision=1,
+                        slot_settings_checksum="0" * 64,
+                        reason="liveness test rotation",
+                        actor="test",
+                    )
+                )
 
-    async def test_every_member_matching_is_ok(
+    async def test_every_member_signing_the_authority_is_ok(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
         now = _now()
@@ -687,24 +704,33 @@ class TestV13ScorerCohortPin:
         signal = _signal(await _read(session_maker, now), "v13_scorer_cohort_pin")
         assert signal.status == "ok"
         assert signal.value == 0
-        assert signal.detail["matching_members"] == 3
+        assert signal.detail["admitted_members"] == 3
+        assert signal.detail["authority_packet"] is True
 
-    async def test_stale_pin_breaches(
+    async def test_fleet_update_past_the_stored_pin_keeps_admitting(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
-        """The #2490 shape: members upgraded, the signed pin did not."""
+        """The #2490 shape no longer stalls: admission follows the live majority.
+
+        Every member moved to a newer packet than the stored pin. Dispatch
+        (``pinned_validator_allowed``) admits them on the majority packet, and
+        the signal must agree instead of reporting a stale pin.
+        """
         now = _now()
         await self._seed(session_maker, now=now, live_packets=[_packet("e" * 40)] * 3)
 
+        async with session_maker() as session:
+            assert all(
+                [
+                    await pinned_validator_allowed(session, hotkey=hotkey, now=now)
+                    for hotkey in _PIN_HOTKEYS
+                ]
+            )
         signal = _signal(await _read(session_maker, now), "v13_scorer_cohort_pin")
-        assert signal.status == "breach"
-        assert signal.value == 3
-        assert signal.detail["matching_members"] == 0
-        assert signal.detail["members_with_different_packet"] == 3
-        assert signal.detail["fresh_packets_agree"] is True
-        assert "rotate_v13_scorer_cohort" in signal.hint
+        assert signal.status == "ok"
+        assert signal.value == 0
 
-    async def test_one_stale_member_breaches_the_quorum(
+    async def test_split_fresh_members_breach(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
         now = _now()
@@ -714,16 +740,25 @@ class TestV13ScorerCohortPin:
             live_packets=[_packet("a" * 40), _packet("a" * 40), _packet("e" * 40)],
         )
 
+        async with session_maker() as session:
+            assert not any(
+                [
+                    await pinned_validator_allowed(session, hotkey=hotkey, now=now)
+                    for hotkey in _PIN_HOTKEYS
+                ]
+            )
         signal = _signal(await _read(session_maker, now), "v13_scorer_cohort_pin")
         assert signal.status == "breach"
-        assert signal.value == 1
-        assert signal.detail["fresh_packets_agree"] is False
+        assert signal.value == 3
+        assert signal.detail["authority_packet"] is False
+        assert signal.detail["fresh_packets_split"] is True
+        assert signal.detail["members_on_other_packet"] == 3
         assert "Converge" in signal.hint
 
-    async def test_offline_member_is_not_reported_as_a_rotatable_pin(
+    async def test_offline_member_is_not_reported_as_a_release_problem(
         self, session_maker: async_sessionmaker[AsyncSession]
     ) -> None:
-        """No fresh packet means bring the validator back; rotation is refused."""
+        """Offline, not mismatched: bring the validator back, do not rotate."""
         now = _now()
         await self._seed(
             session_maker,
@@ -734,11 +769,32 @@ class TestV13ScorerCohortPin:
 
         signal = _signal(await _read(session_maker, now), "v13_scorer_cohort_pin")
         assert signal.status == "breach"
-        assert signal.value == 1
+        assert signal.value == 3
         assert signal.detail["members_without_fresh_packet"] == 1
-        assert signal.detail["members_with_different_packet"] == 0
-        assert "heartbeats" in signal.hint
-        assert "rotate_v13_scorer_cohort" not in signal.hint
+        assert signal.detail["fresh_packets_split"] is False
+        assert "Bring those validators back" in signal.hint
+        assert "Converge" not in signal.hint
+
+    async def test_declined_member_outside_a_live_authority_warns(
+        self, session_maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Four members, one offline: the other three keep the authority."""
+        now = _now()
+        hotkeys = (*_PIN_HOTKEYS, "5" + "D" * 47)
+        await self._seed(
+            session_maker,
+            now=now,
+            live_packets=[_packet("a" * 40)] * 4,
+            offline=frozenset({hotkeys[3]}),
+            hotkeys=hotkeys,
+        )
+
+        signal = _signal(await _read(session_maker, now), "v13_scorer_cohort_pin")
+        assert signal.status == "warn"
+        assert signal.value == 1
+        assert signal.threshold == 2
+        assert signal.detail["admitted_members"] == 3
+        assert "continues on the quorum" in signal.hint
 
     async def test_no_pin_is_not_applicable(
         self, session_maker: async_sessionmaker[AsyncSession]

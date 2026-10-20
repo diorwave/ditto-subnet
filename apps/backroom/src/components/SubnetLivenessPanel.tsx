@@ -12,7 +12,7 @@ const SIGNAL_LABELS: Record<SubnetLivenessSignal['name'], string> = {
   screening_admission: 'Screening admission at 0',
   oldest_claimable_upload: 'Oldest claimable upload',
   scoring_throughput: 'No accepted score',
-  v13_scorer_cohort_pin: 'Stale v13 pin members',
+  v13_scorer_cohort_pin: 'Declined v13 pin members',
   oldest_actionable_hold: 'Oldest actionable hold',
   lease_overrun: 'Lease past deadline',
   source_emission_collector: 'Emission collector cursor',

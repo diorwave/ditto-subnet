@@ -7,8 +7,9 @@ undetected for hours or days while every component reported itself healthy:
 * #2474 -- a leftover per-node settings revision held production screening
   admission at 0 for about 41 hours (``screening_admission``,
   ``oldest_claimable_upload``);
-* #2490 -- a stale signed scorer-cohort pin declined every v13 lease
-  (``v13_scorer_cohort_pin``, ``scoring_throughput``);
+* #2490 -- the scorer-cohort pin declined every v13 lease
+  (``v13_scorer_cohort_pin``, ``scoring_throughput``). Admission now follows
+  the live-majority authority packet; the signal reports members it declines;
 * #2231 -- a chain runtime upgrade halted the source-emission collector
   (``source_emission_collector``);
 * holds and leases that never reach a terminal state (#2100, #1146)
@@ -71,17 +72,16 @@ from ditto.api_server.screener_policy_activation import (
     resolve_screener_policy_activation,
 )
 from ditto.api_server.v13_scorer_cohort import (
-    PinMemberState,
+    authority_from_packets,
     current_pin,
-    packet_for_heartbeat,
-    pin_member_state,
+    member_packets,
+    valid_membership,
 )
 from ditto.db.models import (
     BenchmarkRollout,
     ScreenerHeartbeat,
     ScreenerNode,
     SourceEmissionCollectorCursor,
-    ValidatorHeartbeat,
 )
 from ditto.db.queries.benchmark_admission import admission_rollout_for_active_version
 from ditto.db.queries.benchmark_rollout import active_bench_version, open_rollout
@@ -593,25 +593,38 @@ async def scoring_signal(
 # ─── V13 scorer cohort pin ──────────────────────────────────────────────────
 
 
-def _pin_hint(*, no_fresh: int, different: int, fresh_agree: bool) -> str:
+def _pin_hint(*, authority: bool, no_fresh: int, other: int, split: bool) -> str:
+    if not authority and split:
+        return (
+            "No signed scorer packet has a strict majority of at least a quorum "
+            "of live pinned members, so no member is issued v13 work. Converge "
+            "the members' validator releases; get_v13_scorer_cohort_preflight "
+            "shows each member's packet."
+        )
+    if not authority:
+        return (
+            "Too few pinned members have a fresh signed v13 packet to form a "
+            "quorum: offline, restarting or not reporting a managed scorer. "
+            "Bring those validators back; replace one only if it is gone for "
+            "good (rotate_v13_scorer_cohort with a live signer)."
+        )
+    if no_fresh and other:
+        return (
+            "v13 work continues on the quorum. Some members have no fresh "
+            "packet (check their heartbeats) and some run another release "
+            "(update them to the authority packet)."
+        )
     if no_fresh:
         return (
-            "Pinned members have no fresh signed v13 packet: offline, restarting "
-            "or not reporting a managed scorer. Check those validators' "
-            "heartbeats; rotating cannot fix this and is refused."
+            "v13 work continues on the quorum. Members without a fresh packet "
+            "are offline or restarting; check their heartbeats."
         )
-    if different and fresh_agree:
+    if other:
         return (
-            "Every pinned member reports the same newer signed packet than the "
-            "pin, so each is declined v13 work (#2490). Confirm with "
-            "get_v13_report_only_current_packet, then rotate_v13_scorer_cohort."
+            "v13 work continues on the quorum. Members on another release are "
+            "declined until they update to the authority packet."
         )
-    if different:
-        return (
-            "Fresh pinned members disagree on their signed scorer packet. "
-            "Converge their validator releases before rotating the pin."
-        )
-    return "Every pinned member matches the signed pin."
+    return "Every pinned member signs the authority packet."
 
 
 async def scorer_pin_signal(
@@ -621,23 +634,25 @@ async def scorer_pin_signal(
     active_version: int,
     rollout: BenchmarkRollout | None,
 ) -> SubnetLivenessSignal:
-    """Pinned members declined v13 work, split by why.
+    """Pinned members declined new v13 work, split by why.
 
-    Each member is classified by
-    :func:`~ditto.api_server.v13_scorer_cohort.pin_member_state`, the exact
-    check :func:`~ditto.api_server.v13_scorer_cohort.pinned_validator_allowed`
-    runs on every v13 dispatch. A pin is as large as the scoring quorum, so one
-    declined member stops v13 finalization. The hint separates a member with
-    no fresh packet (bring the validator back) from a fresh member on another
-    release (rotate, but only when fresh members agree).
+    Members are classified with the same functions
+    :func:`~ditto.api_server.v13_scorer_cohort.pinned_validator_allowed` uses
+    through ``cohort_authority``: a member is admitted only while it signs the
+    packet a strict majority of at least ``SCORING_QUORUM`` live members sign.
+    Without that authority every member is declined, so the value equals the
+    membership and breaches; with it, only the members outside it are
+    declined and the signal warns. The hint separates a member with no fresh
+    packet (bring the validator back) from a fresh member on another release
+    (update it).
     """
     targets = {active_version} | (
         {rollout.desired_version} if rollout is not None else set()
     )
     pin = await current_pin(session)
-    # Breach once fewer members match than a quorum needs. The pin table
-    # enforces exactly three members, so with quorum 3 one stale member breaches.
     members = len(pin.hotkeys) if pin is not None else V13_PIN_MEMBERS
+    # Authority needs SCORING_QUORUM signers, so it survives at most
+    # ``members - SCORING_QUORUM`` declined members.
     breach = float(max(1, members - SCORING_QUORUM + 1))
     if V13_SCORER_BENCH_VERSION not in targets or pin is None:
         return _signal(
@@ -654,31 +669,40 @@ async def scorer_pin_signal(
             },
         )
     hotkeys: Sequence[str] = list(pin.hotkeys)
-    states: list[PinMemberState] = []
-    fresh_packets: set[str] = set()
-    for hotkey in hotkeys:
-        heartbeat = await session.get(ValidatorHeartbeat, hotkey)
-        states.append(pin_member_state(heartbeat, pin_packet=pin.packet, now=now))
-        packet = packet_for_heartbeat(heartbeat, now=now)
-        if packet is not None:
-            fresh_packets.add(packet.model_dump_json())
-    no_fresh = states.count("no_fresh_packet")
-    different = states.count("different_packet")
-    fresh_agree = len(fresh_packets) <= 1
+    packets = (
+        await member_packets(session, hotkeys, now=now)
+        if valid_membership(pin.hotkeys)
+        else dict.fromkeys(hotkeys)
+    )
+    authority = authority_from_packets(packets)
+    supporters = set(authority.supporters) if authority is not None else set()
+    no_fresh = sum(1 for packet in packets.values() if packet is None)
+    other = sum(
+        1
+        for hotkey, packet in packets.items()
+        if packet is not None and hotkey not in supporters
+    )
+    split = len({packet for packet in packets.values() if packet is not None}) > 1
     return _signal(
         "v13_scorer_cohort_pin",
-        value=float(no_fresh + different),
+        value=float(members - len(supporters)),
         unit="members",
-        warn=None,
+        warn=1.0,
         breach=breach,
         since=None,
-        hint=_pin_hint(no_fresh=no_fresh, different=different, fresh_agree=fresh_agree),
+        hint=_pin_hint(
+            authority=authority is not None,
+            no_fresh=no_fresh,
+            other=other,
+            split=split,
+        ),
         detail={
-            "pinned_members": len(hotkeys),
-            "matching_members": states.count("match"),
+            "pinned_members": members,
+            "admitted_members": len(supporters),
             "members_without_fresh_packet": no_fresh,
-            "members_with_different_packet": different,
-            "fresh_packets_agree": fresh_agree,
+            "members_on_other_packet": other,
+            "authority_packet": authority is not None,
+            "fresh_packets_split": split,
             "pin_created_at": _iso(_aware(pin.created_at)),
             "active_bench_version": active_version,
         },

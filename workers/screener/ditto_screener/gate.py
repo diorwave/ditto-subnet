@@ -122,6 +122,7 @@ from ditto_screening_protocol import (
     STRICT_TWO_OUTCOME_POLICY_VERSION,
     ScoredRuntimeEvidenceLease,
 )
+from ditto_screening_protocol.reason_codes import DOCKER_BUILD_INFRASTRUCTURE
 
 if TYPE_CHECKING:
     from ditto_screener.config import ScreenerConfig
@@ -1156,6 +1157,11 @@ class BuildGate:
             l3_enabled=config.l3_review_enabled,
             critic_model=config.l3_review_model,
             critic_provider=config.l3_review_provider,
+            # A relayed transport-class fault (rate limit, overloaded, 5xx in a
+            # 200 body) on one turn used to discard every completed analyst,
+            # critic and adjudicator turn of a ~20 minute review and park the
+            # miner on a manual retry. Retry that exact turn once in the lease.
+            retry_provider_body_fault_once=True,
             scorer_capabilities_url=config.scorer_capabilities_url,
             expected_scorer_revision=config.expected_scorer_revision,
             require_signed_runtime_lease=config.require_signed_runtime_lease,
@@ -1709,9 +1715,7 @@ class BuildGate:
                     ScreeningOutcome.RETRYABLE_INFRA
                     if retryable
                     else ScreeningOutcome.DETERMINISTIC_REJECT,
-                    code=(
-                        "docker-build-infrastructure" if retryable else "docker-build"
-                    ),
+                    code=DOCKER_BUILD_INFRASTRUCTURE if retryable else "docker-build",
                     summary=(
                         "Docker build infrastructure failed"
                         if retryable
