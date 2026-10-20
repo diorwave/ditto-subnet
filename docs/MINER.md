@@ -203,8 +203,10 @@ uv run ditto verify \
 
 The archive must be a gzip-compressed tarball no larger than 20 MiB, with its
 `Dockerfile` at the root. It must use safe relative paths and contain no links
-or special files. Cargo metadata is part of the Rust reference implementation,
-not a submission requirement.
+or special files. A `RUN` instruction must not request an insecure build
+entitlement (`--network=host` or `--security=insecure`); screening rejects it
+as `SCR-CONTRACT-004`. Cargo metadata is part of the Rust reference
+implementation, not a submission requirement.
 
 Each source file (`.py`, `.rs`, `.go`, `.c`/`.cpp`/`.h`, `.ts`/`.js` and
 similar) must stay within **10,000 lines**, **1 MiB**, and **4,000 characters
