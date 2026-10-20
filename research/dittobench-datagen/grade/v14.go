@@ -192,6 +192,8 @@ var removalTimeWordsV14 = map[string]bool{
 	"evening": true, "night": true, "weekend": true, "week": true, "weeks": true, "month": true, "months": true,
 	"year": true, "years": true, "day": true, "days": true, "hour": true, "hours": true, "minute": true,
 	"minutes": true, "moment": true, "time": true, "next": true, "later": true, "soon": true,
+	"spring": true, "summer": true, "autumn": true, "fall": true, "winter": true,
+	"season": true, "seasons": true,
 }
 
 // maxRemovalPlaceWordsV14 bounds the words after the preposition ("from the
