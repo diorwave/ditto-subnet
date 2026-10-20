@@ -2685,6 +2685,12 @@ def _length_content_guard(path: str, lines: list[str], roles: dict[str, int]) ->
     if receiver_match is None:
         return False
     receiver = receiver_match[1]
+    clear = lines[roles["served-output-cleared"] - 1]
+    output = re.match(r"\s*(\w+)\s*=", clear) or re.search(
+        r"mem::(?:take|replace)\(\s*&mut\s+(\w+)", clear
+    )
+    if output is None:
+        return False
     if path.endswith((".py", ".pyi")):
         try:
             tree = ast.parse("\n".join(lines))
@@ -2699,6 +2705,9 @@ def _length_content_guard(path: str, lines: list[str], roles: dict[str, int]) ->
                         continue
                     # The *entire* length branch is gated by this reply being
                     # empty. An inner guard on only continue does not qualify.
+                    following = (
+                        children[index + 1] if index + 1 < len(children) else None
+                    )
                     if (
                         isinstance(node.test, ast.BoolOp)
                         and isinstance(node.test.op, ast.And)
@@ -2707,6 +2716,13 @@ def _length_content_guard(path: str, lines: list[str], roles: dict[str, int]) ->
                             and isinstance(term.op, ast.Not)
                             and _reply_content(term.operand, receiver)
                             for term in node.test.values
+                        )
+                        and not node.orelse
+                        and isinstance(following, ast.Assign)
+                        and _reply_content(following.value, receiver)
+                        and any(
+                            isinstance(target, ast.Name) and target.id == output[1]
+                            for target in following.targets
                         )
                     ):
                         return True
@@ -2731,9 +2747,6 @@ def _length_content_guard(path: str, lines: list[str], roles: dict[str, int]) ->
                         continue
                     # It must preserve the served output, not merely log or
                     # assign an unrelated variable before breaking.
-                    output = re.match(
-                        r"\s*(\w+)\s*=", lines[roles["served-output-cleared"] - 1]
-                    )
                     if output and any(
                         isinstance(target, ast.Name) and target.id == output[1]
                         for target in keep.body[0].targets
@@ -2758,11 +2771,29 @@ def _length_content_guard(path: str, lines: list[str], roles: dict[str, int]) ->
         alias = re.fullmatch(rf"\s*let\s+(\w+)\s*=\s*{direct}\s*;\s*", prior)
         if alias:
             aliases.append(re.escape(alias[1]))
-    return any(
+    empty_guard = any(
         re.search(rf"&&\s*{alias}(?:\.trim\(\))?\.is_empty\(\)\s*\{{$", condition)
         is not None
         for alias in aliases
     )
+    if not empty_guard:
+        return False
+    depth = 0
+    for index in range(branch - 1, len(executable)):
+        depth += executable[index].count("{") - executable[index].count("}")
+        if depth == 0:
+            following_line = next(
+                (line.strip() for line in executable[index + 1 :] if line.strip()), ""
+            )
+            # The nonempty path must retain this reply immediately after the
+            # guarded branch. A following unconditional break is a discard.
+            return (
+                re.fullmatch(
+                    rf"{re.escape(output[1])}\s*=\s*{direct}\s*;", following_line
+                )
+                is not None
+            )
+    return False
 
 
 def _aggregate_fingerprint(

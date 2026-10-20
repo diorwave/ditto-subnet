@@ -1767,6 +1767,33 @@ def test_rust_inner_content_check_does_not_guard_unconditional_discard() -> None
     )
 
 
+@pytest.mark.parametrize(
+    "path,source,assignment",
+    [
+        (
+            "agent.py",
+            _PY_EMPTY_ONLY_DRAFT_FALLBACK,
+            "        output = deciding.content",
+        ),
+        (
+            "agent.rs",
+            _RUST_EMPTY_ONLY_DRAFT_FALLBACK,
+            "        output = choice.message.content",
+        ),
+    ],
+)
+def test_empty_branch_guard_does_not_hide_a_later_unconditional_break(
+    path: str, source: str, assignment: str
+) -> None:
+    broken = source.replace(
+        assignment,
+        "        break" + (";" if path.endswith("rs") else "") + "\n" + assignment,
+    )
+    assert "length-cut-draft-fallback" in _kinds(
+        find_benchmark_emulation_fingerprints([(path, broken)])
+    )
+
+
 def test_content_first_exit_must_preserve_the_served_output() -> None:
     source = _PY_CONTENT_FIRST_DRAFT_FALLBACK.replace(
         "output = content", "other = content"
