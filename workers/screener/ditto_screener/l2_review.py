@@ -754,6 +754,17 @@ def _contains_truncation(value: object) -> bool:
     if isinstance(value, dict):
         for key, item in value.items():
             if (
+                key in {"item_selection", "fingerprint_selection"}
+                and isinstance(item, dict)
+                and item.get("counts_after_per_rule_file_bounds") is True
+            ):
+                # Lead selection is an attention budget, not an incomplete
+                # analyzer read that retrying the same tool can repair. Keep
+                # every other nested error/scan-truncation marker authoritative.
+                item = {
+                    name: part for name, part in item.items() if name != "truncated"
+                }
+            if (
                 key in {"truncated", "analysis_failed"} or key.endswith("_truncated")
             ) and item is True:
                 return True
@@ -3190,16 +3201,22 @@ class TerraSolSourceReviewAgent:
             ):
                 self._store_cache(cache_key, result)
             if (
-                result.observation.error_code == "l2-only-clearance-unproven"
+                result.observation.error_code
+                in {"l2-only-clearance-unproven", "l3-adjudicator-incomplete"}
                 and result.dossier_incomplete_components
                 and result.observation.review_audit is None
             ):
                 # Fixed component labels identify which deterministic evidence
                 # was partial without signing source text or changing the hold.
+                l3_hold = result.observation.error_code == "l3-adjudicator-incomplete"
                 audit = ScreenReviewAudit(
                     stage="l2",
-                    reason_code="l2-only-clearance-unproven",
-                    prompt_revision=self._analyst_prompt_revision(policy_version),
+                    reason_code=result.observation.error_code,
+                    prompt_revision=(
+                        l2_safety_prompt_revision(policy_version)
+                        if l3_hold
+                        else self._analyst_prompt_revision(policy_version)
+                    ),
                     harness_revision=L2_HARNESS_REVISION,
                     max_steps=self._max_steps,
                     steps_used=min(len(result.response_models), self._max_steps),
@@ -3209,7 +3226,7 @@ class TerraSolSourceReviewAgent:
                     ),
                     model_steps_observed=len(result.response_models),
                     tool_calls_observed=len(result.tools),
-                    final_stage="analyst",
+                    final_stage="adjudicator" if l3_hold else "analyst",
                 )
                 result = replace(
                     result,
@@ -4291,8 +4308,13 @@ class TerraSolSourceReviewAgent:
                 critic_cache_hit=critic_cache_hit,
             )
         if claimed_safe and not adjudicator.dossier_complete:
+            # The dossier is built by fixed analyzers over the artifact bytes,
+            # so a truncated component (a vendored file over the read cap, an
+            # oversized opaque inventory) recurs on every retry. Like the
+            # L2-only hold, this is an inconclusive outcome, never an
+            # infrastructure retry, and it names the partial components.
             return L2RunResult(
-                observation=_failure("l3-adjudicator-incomplete", "retryable_infra"),
+                observation=_failure("l3-adjudicator-incomplete", "inconclusive"),
                 analyzed_files=adjudicated_analyzed,
                 causal_path=adjudicator.causal_path,
                 tools=(
@@ -4318,6 +4340,8 @@ class TerraSolSourceReviewAgent:
                 resolution_basis=adjudicator.resolution_basis,
                 clearance_path="l3_adjudicator_incomplete",
                 dossier_complete=False,
+                dossier_incomplete_components=dossier_incomplete_components,
+                failure_subcode="+".join(dossier_incomplete_components) or None,
                 analyst_cache_hit=analyst_cache_hit,
                 critic_cache_hit=critic_cache_hit,
             )

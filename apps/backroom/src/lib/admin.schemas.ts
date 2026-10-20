@@ -1188,6 +1188,28 @@ export const artifactReleaseRevisionSchema = z.object({
   created_at: z.string().nullable(),
 })
 
+// Shadow comparison of the reveal-anchored range planner. `missed` > 0 is a
+// correctness failure: that planner must not be promoted.
+export const revealPlanShadowSchema = z.object({
+  mode: z.string(),
+  ranges: z.number().int().nonnegative().default(0),
+  agreed: z.number().int().nonnegative().default(0),
+  missed: z.number().int().nonnegative().default(0),
+  fallback: z.number().int().nonnegative().default(0),
+  error: z.number().int().nonnegative().default(0),
+  blocks: z.number().int().nonnegative().default(0),
+  calls: z.number().int().nonnegative().default(0),
+  last_range: z.array(z.number().int()).nullish().default(null),
+  last_outcome: z.string().nullish().default(null),
+  last_error: z.string().nullish().default(null),
+  recent_misses: z.array(z.object({
+    first_block: z.number().int(),
+    last_block: z.number().int(),
+    blocks: z.array(z.number().int()).max(720).default([]),
+  })).max(5).default([]),
+  updated_at: z.string().nullish().default(null),
+})
+
 export const sourceReleaseGateSchema = z.object({
   version: z.string(),
   automatic_confirmation_enabled: z.boolean(),
@@ -1208,6 +1230,7 @@ export const sourceReleaseGateSchema = z.object({
   // for an older Platform that predates the field.
   collector_stall_threshold_seconds: z.number().optional(),
   collector_stalled: z.boolean().optional(),
+  reveal_plan_shadow: revealPlanShadowSchema.nullish(),
   last_payout_block: z.number().nullable().optional(),
   last_payout_blocked_reason: z.string().nullable().optional(),
   last_payout_attributed: z.boolean().optional(),
@@ -1619,12 +1642,36 @@ export const BURN_CONFIRMATION = 'APPLY BURN SETTINGS'
 export const MIN_BURN_SHARE = 0
 export const MAX_BURN_SHARE = 1
 
+// Protocol-31 operator payout curve: champion then the four tail slots,
+// positive and summing to one within the validator fold's 1e-12 tolerance,
+// and non-increasing on writes. Omitting it on a write keeps the current
+// curve; null clears it back to the frozen 65/14/10/7/4.
+export const RANK_SHARES_SLOTS = 5
+const rankSharesSchema = z
+  .array(z.number().positive())
+  .length(RANK_SHARES_SLOTS)
+  .refine(
+    (shares) => Math.abs(shares.reduce((total, share) => total + share, 0) - 1) <= 1e-12,
+    'rank_shares must sum to 1',
+  )
+
 const burnSettingsBaseSchema = z.object({
   burn_share: z.number().min(MIN_BURN_SHARE).max(MAX_BURN_SHARE),
+  rank_shares: rankSharesSchema.nullable().optional(),
 })
 
 export const burnSettingsSchema = burnSettingsBaseSchema
-export const burnSettingsWriteSchema = burnSettingsBaseSchema
+// Ordering is enforced on writes only, so a stored revision always reads.
+export const burnSettingsWriteSchema = burnSettingsBaseSchema.superRefine((settings, ctx) => {
+  const shares = settings.rank_shares
+  if (shares && shares.some((share, index) => index > 0 && share > shares[index - 1])) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['rank_shares'],
+      message: 'rank_shares must not increase from the champion down',
+    })
+  }
+})
 
 export const burnSettingsRevisionSchema = z.object({
   revision: z.number().int().nonnegative(),
@@ -1653,6 +1700,9 @@ export const effectiveBurnSettingsSchema = z.object({
   // Zero live validators means the dial is not attached to anything, which is
   // worth seeing before rather than after applying a burn.
   live_validator_count: z.number().int().nonnegative().nullable().default(null),
+  // Whether the configured curve is on the ledger now (every live weight
+  // setter reports protocol 31); null when readiness could not be read.
+  rank_shares_served: z.boolean().nullable().default(null),
 })
 
 export const burnSettingsControlSchema = z.object({
@@ -4513,6 +4563,16 @@ export const validatorFleetObservabilityMemberSchema = z
       })
       .nullish()
       .catch(null),
+    host_specs: z
+      .object({
+        cpu_count: z.number().int().positive(),
+        cpu_physical_cores: z.number().int().positive().nullish().default(null),
+        memory_total_mib: z.number().int().positive(),
+        disk_total_gib: z.number().int().positive(),
+        architecture: z.string(),
+      })
+      .nullish()
+      .catch(null),
     reported_at: z.string().nullish().catch(null),
     seen_at: z.string().nullish().catch(null),
     orphaned_slots: z.array(publicOrphanedSlotSchema).catch([]),
@@ -4584,6 +4644,7 @@ export const validatorFleetObservabilityMemberSchema = z
     disk_percent: member.system_metrics?.disk_percent ?? null,
     cpu_percent: member.system_metrics?.cpu_percent ?? null,
     memory_percent: member.system_metrics?.memory_percent ?? null,
+    host_specs: member.host_specs ?? null,
     reported_at: member.reported_at,
     seen_at: member.seen_at,
     stack: member.stack,
@@ -6068,7 +6129,10 @@ export const reinstatementRetryBudgetSchema = z.object({
   // the per-agent bound they count against. Reinstatement adds to neither; these
   // are recorded so that claim is checkable rather than merely asserted.
   agent_infra_retry_grants: z.number().int().nonnegative(),
-  max_agent_infra_retry_grants: z.number().int().positive(),
+  // Zero, not a bug: Platform's fail-once retry policy pins the per-agent
+  // infra-grant cap at 0 (ditto/db/queries/retry_budget.py), so every live
+  // reinstatement records 0 here.
+  max_agent_infra_retry_grants: z.number().int().nonnegative(),
   manual_retry_grants: z.number().int().nonnegative(),
   operator_recoveries: z.number().int().nonnegative(),
   // Nullable: operator-recovery bounding moved off a fixed per-agent count. The
@@ -7661,6 +7725,17 @@ export const copyReviewSimilaritySchema = z.object({
   decision_role: z.string(),
 })
 
+// Private per-artifact language mix of the fingerprinted members (#436):
+// counts keyed by a fixed language label, never a path or content. Null when
+// the row was fingerprinted before Platform recorded it. Provenance only.
+export const copyReviewLanguageInventorySchema = z.object({
+  version: z.string(),
+  files: z.record(z.string(), z.number().int().nonnegative()),
+  bytes: z.record(z.string(), z.number().int().nonnegative()),
+  excluded_files: z.number().int().nonnegative().nullish().default(null),
+  excluded_bytes: z.number().int().nonnegative().nullish().default(null),
+})
+
 export const availableCopyReviewComparisonSchema = z.object({
   availability: z.literal('available'),
   bulk_eligible: z.boolean(),
@@ -7685,6 +7760,8 @@ export const availableCopyReviewComparisonSchema = z.object({
   triggered: z.boolean(),
   triggered_signal: z.string().nullable(),
   current_decision: z.string(),
+  candidate_languages: copyReviewLanguageInventorySchema.nullish().default(null),
+  reference_languages: copyReviewLanguageInventorySchema.nullish().default(null),
 })
 
 export const unavailableCopyReviewComparisonSchema = z.object({
@@ -8008,6 +8085,10 @@ type GeneratedAthRulingsExecuteResponse =
 
 export const athRulingActionSchema = z.enum(['open', 'clear', 'reject'])
 
+// What execute performs for one ruling. `attest` is a clear on an unheld
+// scored or live agent: the terminal clear is recorded without holding the row.
+export const athRulingStepSchema = z.enum(['open', 'clear', 'attest', 'reject'])
+
 export const athRulingDispositionSchema = z.enum([
   'ready',
   'already_applied',
@@ -8103,7 +8184,7 @@ export const athRulingPreviewItemSchema = z.object({
   stale_guard: z.boolean(),
   would_change_crown: z.boolean(),
   conflict_reason: z.string().nullable().default(null),
-  steps: z.array(athRulingActionSchema).default([]),
+  steps: z.array(athRulingStepSchema).default([]),
   reason: z.string(),
   evidence_references: z.array(z.string()).default([]),
   message: z.string(),
@@ -8140,7 +8221,7 @@ export const athRulingExecuteItemSchema = z.object({
   status: z.enum(['applied', 'already_applied', 'failed']),
   agent_status: z.string().nullable().default(null),
   would_change_crown: z.boolean(),
-  steps_applied: z.array(athRulingActionSchema).default([]),
+  steps_applied: z.array(athRulingStepSchema).default([]),
   // False on an applied row: the ruling landed, only the audit annotation
   // failed. Never re-run it.
   annotated: z.boolean().default(false),
@@ -8454,6 +8535,7 @@ export type CopyReviewItem = z.infer<typeof copyReviewItemSchema>
 export type CopyReviewGeneration = z.infer<typeof copyReviewGenerationSchema>
 export type CopyReviewConsoleItem = z.infer<typeof copyReviewConsoleItemSchema>
 export type CopyReviewCurrentComparison = z.infer<typeof copyReviewCurrentComparisonSchema>
+export type CopyReviewLanguageInventory = z.infer<typeof copyReviewLanguageInventorySchema>
 export type CopyReviewResolution = z.infer<typeof copyReviewResolutionSchema>
 export type AthReviewAudit = z.infer<typeof athReviewAuditSchema>
 export type OpenAthReviewInput = z.infer<typeof openAthReviewInputSchema>
@@ -9714,6 +9796,8 @@ type GeneratedOutlierEscalationSources =
   PlatformComponents['schemas']['OutlierEscalationSettingSourcesView']
 type GeneratedOutlierEscalationEvidence =
   PlatformComponents['schemas']['OutlierEscalationEvidence']
+type GeneratedOutlierEscalationAxisEvidence =
+  PlatformComponents['schemas']['OutlierEscalationAxisEvidence']
 type GeneratedOutlierEscalationEntry =
   PlatformComponents['schemas']['OutlierEscalationEntryView']
 type GeneratedOutlierEscalationActivity =
@@ -9727,6 +9811,7 @@ const outlierSettingFieldSchema = z.enum([
   'min_cohort_size',
   'modified_z_threshold',
   'min_composite_floor',
+  'per_axis_enforce',
 ])
 const outlierSettingSourceSchema = z.enum(['env', 'default', 'default_invalid_env'])
 
@@ -9737,6 +9822,9 @@ const outlierEscalationSettingsSchema = z.object({
   // Null only for a non-finite env value (nan/inf) that scoring IS using.
   modified_z_threshold: z.number().nullable(),
   min_composite_floor: z.number().nullable(),
+  // Off by default: a single-axis outlier is evidence only. Defaulted so a
+  // Platform that predates the setting still parses.
+  per_axis_enforce: z.boolean().default(false),
 } satisfies PlatformResponseShape<GeneratedOutlierEscalationSettings>)
 
 const outlierEscalationSourcesSchema = z.object({
@@ -9745,7 +9833,22 @@ const outlierEscalationSourcesSchema = z.object({
   min_cohort_size: outlierSettingSourceSchema,
   modified_z_threshold: outlierSettingSourceSchema,
   min_composite_floor: outlierSettingSourceSchema,
+  per_axis_enforce: outlierSettingSourceSchema.default('default'),
 } satisfies PlatformResponseShape<GeneratedOutlierEscalationSources>)
+
+// Audit-chain entries are public, so they carry only axis + outlier; the
+// statistics are null there and present only in the dry-run replay.
+const outlierEscalationAxisEvidenceSchema = z.object({
+  axis: z.string(),
+  value: z.number().nullish(),
+  cohort_size: z.number().int().nullish(),
+  cohort_median: z.number().nullish(),
+  cohort_mad: z.number().nullish(),
+  modified_z: z.number().nullish(),
+  upward: z.boolean().nullish(),
+  outlier: z.boolean().nullish(),
+  anomaly_unavailable: z.string().nullish(),
+} satisfies PlatformResponseShape<GeneratedOutlierEscalationAxisEvidence>)
 
 const outlierEscalationEvidenceSchema = z.object({
   composite: z.number().nullish(),
@@ -9758,6 +9861,10 @@ const outlierEscalationEvidenceSchema = z.object({
   min_composite_floor: z.number().nullish(),
   upward: z.boolean().nullish(),
   above_floor: z.boolean().nullish(),
+  per_axis: z.array(outlierEscalationAxisEvidenceSchema).max(8).nullish(),
+  per_axis_outlier_axes: z.array(z.string()).max(8).nullish(),
+  per_axis_enforce: z.boolean().nullish(),
+  trigger: z.enum(['composite', 'per_axis']).nullish(),
 } satisfies PlatformResponseShape<GeneratedOutlierEscalationEvidence>)
 
 const outlierEscalationEntrySchema = z.object({
@@ -9777,10 +9884,14 @@ const outlierEscalationActivitySchema = z.object({
   enforced_total: z.number().int().nonnegative(),
   observed_in_window: z.number().int().nonnegative(),
   enforced_in_window: z.number().int().nonnegative(),
+  axis_evidence_total: z.number().int().nonnegative().default(0),
+  axis_evidence_in_window: z.number().int().nonnegative().default(0),
   latest_recorded_at: z.string().nullish(),
   recent_limit: z.number().int().positive(),
   recent: z.array(outlierEscalationEntrySchema).max(100),
   recent_truncated: z.boolean(),
+  recent_axis_evidence: z.array(outlierEscalationEntrySchema).max(100).default([]),
+  recent_axis_evidence_truncated: z.boolean().default(false),
 } satisfies PlatformResponseShape<GeneratedOutlierEscalationActivity>)
 
 export const outlierEscalationSchema = z.object({
@@ -9790,7 +9901,7 @@ export const outlierEscalationSchema = z.object({
   defaults: outlierEscalationSettingsSchema,
   sources: outlierEscalationSourcesSchema,
   env_vars: z.record(z.string(), z.string()),
-  invalid_env_fields: z.array(outlierSettingFieldSchema).max(5),
+  invalid_env_fields: z.array(outlierSettingFieldSchema).max(6),
   review_kind: z.string(),
   algorithm_version: z.string(),
   pending_review_count: z.number().int().nonnegative(),
@@ -9943,7 +10054,7 @@ export const outlierEscalationDryRunSchema = z.object({
   bench_version: z.number().int(),
   bench_version_in_scope: z.boolean(),
   settings: outlierEscalationSettingsSchema,
-  overridden_fields: z.array(outlierSettingFieldSchema).max(5),
+  overridden_fields: z.array(outlierSettingFieldSchema).max(6),
   ledger_size: z.number().int().nonnegative(),
   cohort_size: z.number().int().nonnegative(),
   cohort_too_small: z.boolean(),
@@ -9953,6 +10064,9 @@ export const outlierEscalationDryRunSchema = z.object({
   limit: z.number().int().positive(),
   would_trigger: z.array(outlierEscalationDryRunEntrySchema).max(100),
   truncated: z.boolean(),
+  axis_evidence_count: z.number().int().nonnegative().default(0),
+  axis_evidence: z.array(outlierEscalationDryRunEntrySchema).max(100).default([]),
+  axis_evidence_truncated: z.boolean().default(false),
 } satisfies PlatformResponseShape<GeneratedOutlierEscalationDryRunResponse>)
 
 export const outlierEscalationDryRunInputSchema = z.object({
@@ -9960,6 +10074,7 @@ export const outlierEscalationDryRunInputSchema = z.object({
   minCohortSize: z.number().int().min(1).max(1000).optional(),
   modifiedZThreshold: z.number().positive().max(1000).optional(),
   minCompositeFloor: z.number().min(0).max(1).optional(),
+  perAxisEnforce: z.boolean().optional(),
   limit: z.number().int().min(1).max(100).default(20),
 })
 

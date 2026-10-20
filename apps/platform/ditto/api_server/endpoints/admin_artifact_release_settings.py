@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +15,7 @@ from ditto.api_models.artifact_release_settings import (
     AdminArtifactReleaseSettingsRequest,
     AdminArtifactReleaseSettingsResponse,
     ReceiptDiagnosticRow,
+    RevealPlanShadowStatus,
     SourceArchiveProviderStatus,
     SourceReleaseEligibilityRow,
     SourceReleaseGateStatus,
@@ -71,6 +72,17 @@ def _default_revision() -> RevisionModel:
         actor="platform",
         created_at=None,
     )
+
+
+def _reveal_plan_shadow(cursor: Any) -> RevealPlanShadowStatus | None:
+    """The collector's shadow summary, or None before the first comparison."""
+    from ditto.api_server.source_emission_collector import _REVEAL_PLAN_MODE
+
+    summary = getattr(cursor, "reveal_plan_shadow", None) if cursor else None
+    if not summary:
+        # No comparison has run: zero counters would read as zero misses.
+        return None
+    return RevealPlanShadowStatus.model_validate({**summary, "mode": _REVEAL_PLAN_MODE})
 
 
 @router.get("", response_model=AdminArtifactReleaseSettingsResponse)
@@ -211,6 +223,7 @@ async def get_settings(
             ),
             collector_stall_threshold_seconds=staleness.threshold_seconds,
             collector_stalled=staleness.stalled,
+            reveal_plan_shadow=_reveal_plan_shadow(cursor),
             last_payout_block=last_payout.block if last_payout else None,
             last_payout_blocked_reason=last_payout.blocked_reason
             if last_payout

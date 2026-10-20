@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from pylon_client.artanis import AsyncPylonClient
 
     from ditto.api_models.treasury_ingress import TreasuryReceiptSelector
+    from ditto.chain.runtime_interface_report import RuntimeInterfaceReport
     from ditto.chain.treasury_receipts import TreasuryChainProof
 
 logger = logging.getLogger(__name__)
@@ -189,11 +190,19 @@ class ChainClient:
         self._recent_neurons_flights: dict[int, asyncio.Task[list[NeuronInfo]]] = {}
         self._clock = time.monotonic
 
-    def _new_treasury_substrate(self) -> Any:
+    def _new_treasury_substrate(self, *, archive: bool = False) -> Any:
         cache = getattr(self, "_treasury_runtime_cache", None)
         if cache is None:
             cache = self._treasury_runtime_cache = TreasuryRuntimeCache()
-        return _treasury_substrate(self._substrate_url(), runtime_cache=cache)
+        # Use the same configured/archive transport order as finalized receipt
+        # reads. The public live entrypoint can refuse websocket handshakes with
+        # HTTP 429 while these existing providers still serve current finalized
+        # identity and permission evidence. This selects transport only: each
+        # request retains its exact-hash reads, genesis/identity validation and
+        # existing eight-second windows; no observed authority is cached.
+        # General epoch scheduling shares this factory but keeps its live route.
+        url = self._historical_substrate_urls()[0] if archive else self._substrate_url()
+        return _treasury_substrate(url, runtime_cache=cache)
 
     async def __aenter__(self) -> ChainClient:
         """Open the underlying Pylon client connection."""
@@ -413,7 +422,7 @@ class ChainClient:
         try:
             async with (
                 asyncio.timeout(8),
-                self._new_treasury_substrate() as substrate,
+                self._new_treasury_substrate(archive=True) as substrate,
             ):
                 trace.client = substrate
                 yield trace
@@ -523,7 +532,7 @@ class ChainClient:
         try:
             async with (
                 asyncio.timeout(8) as deadline,
-                self._new_treasury_substrate() as substrate,
+                self._new_treasury_substrate(archive=True) as substrate,
             ):
                 trace.client = substrate
                 observed = await read_treasury_dispatch_observation(trace, policy)
@@ -625,6 +634,32 @@ class ChainClient:
                 continue
         raise ChainTreasuryReceiptUnavailable(
             progress.phase, attempts, timed_out=timed_out
+        )
+
+    async def get_runtime_interface_report(
+        self, block: int | None = None
+    ) -> RuntimeInterfaceReport:
+        """Compare one runtime's consumed interfaces with audits; reads only."""
+        from async_substrate_interface import AsyncSubstrateInterface
+
+        from ditto.chain.runtime_interface_report import (
+            read_runtime_interface_report,
+        )
+
+        failures: list[str] = []
+        for url in self._historical_substrate_urls():
+            try:
+                async with (
+                    asyncio.timeout(self._config.archive_rpc_timeout_seconds),
+                    AsyncSubstrateInterface(url=url) as substrate,
+                ):
+                    return await read_runtime_interface_report(substrate, block=block)
+            except ValueError:
+                raise
+            except Exception as error:
+                failures.append(self._safe_rpc_error(error)[:200])
+        raise ChainConnectionError(
+            "runtime interface report unavailable: " + "; ".join(failures)
         )
 
     async def get_finalized_block(self) -> BlockInfo:

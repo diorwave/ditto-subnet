@@ -2,6 +2,355 @@
 
 <!-- version list -->
 
+## v0.377.0 (2026-10-20)
+
+### Bug Fixes
+
+- **treasury**: Recover custody on audited Finney v481
+  ([#3020](https://github.com/ditto-assistant/ditto-subnet/pull/3020),
+  [`f09877f`](https://github.com/ditto-assistant/ditto-subnet/commit/f09877f83aaf29335f0dd3f7ffd847aa089f1573))
+
+### Features
+
+- **platform**: Configure github contributor oauth deployment
+  ([#3021](https://github.com/ditto-assistant/ditto-subnet/pull/3021),
+  [`3a5bdc9`](https://github.com/ditto-assistant/ditto-subnet/commit/3a5bdc9a322f9a59b0d694c57d7df4c286e84bfc))
+
+
+## v0.376.0 (2026-10-20)
+
+### Bug Fixes
+
+- **platform**: Deliver public dashboard data across slow reads
+  ([#2752](https://github.com/ditto-assistant/ditto-subnet/pull/2752),
+  [`06d0ffc`](https://github.com/ditto-assistant/ditto-subnet/commit/06d0ffcd2de38caf2f95b54cda192017dc1cf0cb))
+
+- **platform**: Keep a validator nonce until its signed request expires
+  ([#2925](https://github.com/ditto-assistant/ditto-subnet/pull/2925),
+  [`c8bb1d9`](https://github.com/ditto-assistant/ditto-subnet/commit/c8bb1d9ba37463a26a407ccee680679ce082b0c7))
+
+- **screener**: Detect sibling draft fallback and record dedupe
+  ([#3016](https://github.com/ditto-assistant/ditto-subnet/pull/3016),
+  [`049d8ac`](https://github.com/ditto-assistant/ditto-subnet/commit/049d8ac5ab7998ee15843d37292942a036e1039f))
+
+### Documentation
+
+- **skills**: File screener and Ditto core tickets on every board sweep
+  ([#3018](https://github.com/ditto-assistant/ditto-subnet/pull/3018),
+  [`a8a4ca1`](https://github.com/ditto-assistant/ditto-subnet/commit/a8a4ca1c80ccd2e9e08779eda201faf1050b731c))
+
+- **validator**: Stop recommending a shared W&B key
+  ([#2666](https://github.com/ditto-assistant/ditto-subnet/pull/2666),
+  [`cd83f34`](https://github.com/ditto-assistant/ditto-subnet/commit/cd83f340db481b939e4037ae17f00cfbb943f8ab))
+
+### Features
+
+- **platform**: Add contributor identity and build bounties
+  ([#2952](https://github.com/ditto-assistant/ditto-subnet/pull/2952),
+  [`b2d7cf9`](https://github.com/ditto-assistant/ditto-subnet/commit/b2d7cf9d102281dab240e9aee2e002092041f52d))
+
+- **platform**: Record artifact language inventory in fingerprint provenance
+  ([#2838](https://github.com/ditto-assistant/ditto-subnet/pull/2838),
+  [`d9e09a4`](https://github.com/ditto-assistant/ditto-subnet/commit/d9e09a4169212624b62ffbf1d9d0c17f4c8b7c75))
+
+- **protocol**: Add report-only private statistical analysis
+  ([#2202](https://github.com/ditto-assistant/ditto-subnet/pull/2202),
+  [`dbe1122`](https://github.com/ditto-assistant/ditto-subnet/commit/dbe1122b607a5ac3a560d51fefe817bc35bf2a5a))
+
+
+## v0.375.1 (2026-10-19)
+
+### Bug Fixes
+
+- **screener**: Prevent decoy padding from hiding review leads
+  ([#3017](https://github.com/ditto-assistant/ditto-subnet/pull/3017),
+  [`6f35997`](https://github.com/ditto-assistant/ditto-subnet/commit/6f35997ba61ec7eaefdd0527262264d592feb090))
+
+
+## v0.375.0 (2026-10-19)
+
+### Bug Fixes
+
+- **platform**: Carry the public crown incumbent through its owner family
+  ([#2849](https://github.com/ditto-assistant/ditto-subnet/pull/2849),
+  [`c99aa1d`](https://github.com/ditto-assistant/ditto-subnet/commit/c99aa1dfb3a544ef68e5292bbd130d1b00a72f09))
+
+### Chores
+
+- **infra**: Authorize Peyton cmux SSH key
+  ([#3013](https://github.com/ditto-assistant/ditto-subnet/pull/3013),
+  [`d1cad84`](https://github.com/ditto-assistant/ditto-subnet/commit/d1cad844bc64d86c08bb76713e5bf0ff68e59809))
+
+### Documentation
+
+- **starter-kit**: Explain v13 same-turn corrections and claim-span normalisation
+  ([#2836](https://github.com/ditto-assistant/ditto-subnet/pull/2836),
+  [`f69cee8`](https://github.com/ditto-assistant/ditto-subnet/commit/f69cee8628a8a3224243b248ccefd41d4185c104))
+
+### Features
+
+- **infra**: Provision read-only screener logs access
+  ([#3014](https://github.com/ditto-assistant/ditto-subnet/pull/3014),
+  [`9783371`](https://github.com/ditto-assistant/ditto-subnet/commit/97833716902ea19f933a71dc7ad6fdd2769401e5))
+
+- **platform**: Record per-axis outlier evidence for ATH escalation
+  ([#2835](https://github.com/ditto-assistant/ditto-subnet/pull/2835),
+  [`b3b9fcd`](https://github.com/ditto-assistant/ditto-subnet/commit/b3b9fcd4f07bd78345a39ad580d491ec3709db56))
+
+
+## v0.374.1 (2026-10-18)
+
+### Performance Improvements
+
+- **platform**: Bound payout resolution per catch-up sweep
+  ([#3012](https://github.com/ditto-assistant/ditto-subnet/pull/3012),
+  [`b198707`](https://github.com/ditto-assistant/ditto-subnet/commit/b198707de8c1f1a1153f26a043c23bcf0d5a95c9))
+
+
+## v0.374.0 (2026-10-18)
+
+### Features
+
+- **platform**: Plan catch-up by reveals and read planned blocks concurrently
+  ([#3011](https://github.com/ditto-assistant/ditto-subnet/pull/3011),
+  [`99c0d2e`](https://github.com/ditto-assistant/ditto-subnet/commit/99c0d2e62176ce045dc090865a891a85330d2d3b))
+
+
+## v0.373.1 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Read epoch consensus under the runtime that wrote the state
+  ([#3008](https://github.com/ditto-assistant/ditto-subnet/pull/3008),
+  [`430a634`](https://github.com/ditto-assistant/ditto-subnet/commit/430a634edca57b6a9c67a02b8465b7d697bd02e5))
+
+
+## v0.373.0 (2026-10-18)
+
+### Features
+
+- **screening**: Enforce per-file source limits with a vendored upstream allowlist
+  ([#3002](https://github.com/ditto-assistant/ditto-subnet/pull/3002),
+  [`b4d0cf7`](https://github.com/ditto-assistant/ditto-subnet/commit/b4d0cf76562df6c34dc9a7f219aeb5d3876cccce))
+
+
+## v0.372.3 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Keep sparse catch-up across a UID re-registration
+  ([#3006](https://github.com/ditto-assistant/ditto-subnet/pull/3006),
+  [`01caef4`](https://github.com/ditto-assistant/ditto-subnet/commit/01caef42f3456f1b19be8c173fbaff7198d822d2))
+
+
+## v0.372.2 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Stop payout resolution before the sweep budget expires
+  ([#3005](https://github.com/ditto-assistant/ditto-subnet/pull/3005),
+  [`1ea4d25`](https://github.com/ditto-assistant/ditto-subnet/commit/1ea4d258ce4c8694c28bdf6d989970f5d61745db))
+
+
+## v0.372.1 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Give the reveal-plan shadow its own window after each sweep
+  ([#3004](https://github.com/ditto-assistant/ditto-subnet/pull/3004),
+  [`73cc093`](https://github.com/ditto-assistant/ditto-subnet/commit/73cc0930c59e477b4ae9080298fe17f2ccdccb14))
+
+
+## v0.372.0 (2026-10-18)
+
+### Features
+
+- **platform**: Shadow a reveal-anchored range planner for source-emission catch-up
+  ([#3003](https://github.com/ditto-assistant/ditto-subnet/pull/3003),
+  [`af0c55d`](https://github.com/ditto-assistant/ditto-subnet/commit/af0c55d0e2f174aab3b61241e8c37529d6c4389b))
+
+
+## v0.371.2 (2026-10-18)
+
+### Bug Fixes
+
+- **screener**: Report an L3 safe claim on a truncated dossier as inconclusive
+  ([#2999](https://github.com/ditto-assistant/ditto-subnet/pull/2999),
+  [`29a8f4d`](https://github.com/ditto-assistant/ditto-subnet/commit/29a8f4d5d2f595a4f469b3c2557bb8db1e66de78))
+
+
+## v0.371.1 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Unstick source-emission decoding and fingerprint upgrade blocks on their own runtime
+  ([#3000](https://github.com/ditto-assistant/ditto-subnet/pull/3000),
+  [`abc2ab0`](https://github.com/ditto-assistant/ditto-subnet/commit/abc2ab06990d9b20e968e1a6ceaf3ef9758ebc19))
+
+
+## v0.371.0 (2026-10-18)
+
+### Bug Fixes
+
+- **platform**: Admit runtime upgrades by consumed interface, not WASM hash
+  ([#2993](https://github.com/ditto-assistant/ditto-subnet/pull/2993),
+  [`7a3c66f`](https://github.com/ditto-assistant/ditto-subnet/commit/7a3c66ffe82f3f684a5b6f3005aad2dbdb000763))
+
+### Features
+
+- **platform**: Read treasury receipts across runtime upgrades and report what moved
+  ([#2994](https://github.com/ditto-assistant/ditto-subnet/pull/2994),
+  [`c96c33e`](https://github.com/ditto-assistant/ditto-subnet/commit/c96c33e6b83f426fc167d0fd05a9d395ba1de246))
+
+
+## v0.370.0 (2026-10-17)
+
+### Features
+
+- **validator,platform**: Announce host specs in heartbeat protocol v32
+  ([#2996](https://github.com/ditto-assistant/ditto-subnet/pull/2996),
+  [`3f27995`](https://github.com/ditto-assistant/ditto-subnet/commit/3f279959080d40682a95e1b6faac12eaeac4780a))
+
+
+## v0.369.4 (2026-10-17)
+
+### Bug Fixes
+
+- **platform**: Rebind block-less v13 dataset pins at lease time
+  ([#2992](https://github.com/ditto-assistant/ditto-subnet/pull/2992),
+  [`adff43a`](https://github.com/ditto-assistant/ditto-subnet/commit/adff43a6c31ca13388ba93bd996531a03f407d46))
+
+
+## v0.369.3 (2026-10-15)
+
+### Bug Fixes
+
+- **validator**: Name a missed /seed deadline instead of an anonymous scoring_error
+  ([#2922](https://github.com/ditto-assistant/ditto-subnet/pull/2922),
+  [`b9f9805`](https://github.com/ditto-assistant/ditto-subnet/commit/b9f98052aae6aaf071907d21e0dc1bf15775a3c4))
+
+
+## v0.369.2 (2026-10-15)
+
+### Bug Fixes
+
+- **validator**: Cancel continual retests when their lease is revoked
+  ([#2905](https://github.com/ditto-assistant/ditto-subnet/pull/2905),
+  [`7c4fa4a`](https://github.com/ditto-assistant/ditto-subnet/commit/7c4fa4a5d41fe1a57335eea3926812d9c4e0ccec))
+
+### Chores
+
+- **skills**: Add rolling top-5 board sweep workflow
+  ([#2924](https://github.com/ditto-assistant/ditto-subnet/pull/2924),
+  [`37e6f78`](https://github.com/ditto-assistant/ditto-subnet/commit/37e6f780e2388bd993d1d1907eb9548e71764558))
+
+
+## v0.369.1 (2026-10-15)
+
+### Bug Fixes
+
+- **platform**: Admit audited Subtensor v475-v478 source receipts under Yuma
+  ([#2941](https://github.com/ditto-assistant/ditto-subnet/pull/2941),
+  [`85ac8fa`](https://github.com/ditto-assistant/ditto-subnet/commit/85ac8fac165191f089ec0ccaff0235adabe4d9fe))
+
+
+## v0.369.0 (2026-10-15)
+
+### Features
+
+- **platform**: Release banned kings' source under the same gate
+  ([#2938](https://github.com/ditto-assistant/ditto-subnet/pull/2938),
+  [`f2fb697`](https://github.com/ditto-assistant/ditto-subnet/commit/f2fb697eec716a29c0b74dc75306b3489fe16ccf))
+
+- **platform**: Replay the source-emission backlog sparsely
+  ([#2940](https://github.com/ditto-assistant/ditto-subnet/pull/2940),
+  [`9783aba`](https://github.com/ditto-assistant/ditto-subnet/commit/9783aba1a0b941a67a33a5f228198404aeb169ab))
+
+
+## v0.368.1 (2026-10-15)
+
+### Bug Fixes
+
+- **backroom**: Accept the fail-once zero infra-grant cap on reinstatements
+  ([#2937](https://github.com/ditto-assistant/ditto-subnet/pull/2937),
+  [`dbc7ad2`](https://github.com/ditto-assistant/ditto-subnet/commit/dbc7ad23729a637a6b12e681c49299e1bd41ec45))
+
+
+## v0.368.0 (2026-10-15)
+
+### Features
+
+- **platform,backroom**: Record a board-review clear without holding the agent
+  ([#2932](https://github.com/ditto-assistant/ditto-subnet/pull/2932),
+  [`2f8e476`](https://github.com/ditto-assistant/ditto-subnet/commit/2f8e4765c1107cd9eecd317baeac5e311999246f))
+
+
+## v0.367.0 (2026-10-15)
+
+### Features
+
+- **platform**: Widen the v13 scorer cohort to 3-16 validators and count only issuable validators
+  toward owner quorum ([#2908](https://github.com/ditto-assistant/ditto-subnet/pull/2908),
+  [`eb08e70`](https://github.com/ditto-assistant/ditto-subnet/commit/eb08e70e621b80ab25fa9b8e04f13631b1a7283d))
+
+
+## v0.366.1 (2026-10-15)
+
+### Bug Fixes
+
+- **platform**: Require payout ambiguity to reproduce and rescan discarded payouts
+  ([#2935](https://github.com/ditto-assistant/ditto-subnet/pull/2935),
+  [`d7bcc8e`](https://github.com/ditto-assistant/ditto-subnet/commit/d7bcc8e50963d44b965e9dc50f6247a27ae69200))
+
+
+## v0.366.0 (2026-10-14)
+
+### Bug Fixes
+
+- **platform**: Report live Gamma routing on the public treasury page
+  ([#2916](https://github.com/ditto-assistant/ditto-subnet/pull/2916),
+  [`79a5ccb`](https://github.com/ditto-assistant/ditto-subnet/commit/79a5ccb3d73bcf0062ed5afdbf77a7d04797aed6))
+
+### Features
+
+- **skills**: Add a miner-facing subnet-status skill
+  ([#2914](https://github.com/ditto-assistant/ditto-subnet/pull/2914),
+  [`ccc78d0`](https://github.com/ditto-assistant/ditto-subnet/commit/ccc78d0b16f415137ee3f756b628796f84ec61d0))
+
+
+## v0.365.0 (2026-10-14)
+
+### Features
+
+- **treasury**: Support cold-approved manual transfers up to 2500 alpha
+  ([#2923](https://github.com/ditto-assistant/ditto-subnet/pull/2923),
+  [`a408ab3`](https://github.com/ditto-assistant/ditto-subnet/commit/a408ab3acabe7f532b9bfe684567f6e04f8d35d4))
+
+
+## v0.364.0 (2026-10-14)
+
+### Features
+
+- **validator,platform**: Make the KOTH payout curve an operator setting
+  ([#2913](https://github.com/ditto-assistant/ditto-subnet/pull/2913),
+  [`6c2c0f7`](https://github.com/ditto-assistant/ditto-subnet/commit/6c2c0f7f2906558cc96ab797ec04884231509820))
+
+
+## v0.363.0 (2026-10-14)
+
+### Bug Fixes
+
+- **treasury**: Refresh manual readiness during receipt catch-up
+  ([#2920](https://github.com/ditto-assistant/ditto-subnet/pull/2920),
+  [`b989fea`](https://github.com/ditto-assistant/ditto-subnet/commit/b989fea368ec3ca8d7e97cabfce89c3e42cfa4af))
+
+### Features
+
+- **platform,backroom**: Record a per-epoch Gamma ledger from chain state
+  ([#2917](https://github.com/ditto-assistant/ditto-subnet/pull/2917),
+  [`cc184ec`](https://github.com/ditto-assistant/ditto-subnet/commit/cc184ec9fbd9e79ee72848f6e13081881a928eec))
+
+
 ## v0.362.2 (2026-10-14)
 
 ### Bug Fixes

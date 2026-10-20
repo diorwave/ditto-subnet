@@ -38,7 +38,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ditto.api_models import ConfirmationScoreRecord, LedgerEntry, LedgerResponse
-from ditto.api_models.burn_settings import BurnSettings
+from ditto.api_models.burn_settings import RANK_SHARES_PROTOCOL, BurnSettings
 from ditto.api_models.continual_retest_settings import (
     CROWN_INCUMBENT_PROTOCOL,
     PROVISIONAL_INCUMBENT_PROTOCOL,
@@ -114,6 +114,7 @@ from ditto.db.queries.scores import (
 from ditto.db.queries.validator_auth import (
     ValidatorRequestReplayError,
     consume_validator_nonce,
+    nonce_expires_at,
 )
 from ditto_screening_protocol.treasury_enforcement import (
     EnforcingTreasuryPin,
@@ -167,6 +168,10 @@ _CROWN_INCUMBENT_PROTOCOL = CROWN_INCUMBENT_PROTOCOL
 # or an older validator would crown and pay the held incumbent's runner-up.
 _PROVISIONAL_INCUMBENT_PROTOCOL = PROVISIONAL_INCUMBENT_PROTOCOL
 _STATISTICAL_BAND_CAP_PROTOCOL = 29
+# The first validator protocol whose fold reads the served ``rank_shares``
+# payout curve. Withheld until every recently-live weight setter reports it, or
+# a mixed fleet would fold two curves in one epoch.
+_RANK_SHARES_PROTOCOL = RANK_SHARES_PROTOCOL
 
 
 def _fleet_safe_efficiency_adjustments(
@@ -210,6 +215,9 @@ class _LedgerSnapshot:
     tie_weighting_mode: Literal["pool"] | None = None
     dethrone_band_mode: Literal["headroom_capped"] | None = None
     statistical_band_mode: Literal["capped"] | None = None
+    rank_shares: tuple[float, ...] | None = None
+    """The operator payout curve served to the fleet, or ``None`` for the frozen
+    curve. Replayed on the stale path like ``burn_share``."""
     continual_retest_cohort_size: int = 5
     requesting_validator_hotkey: str | None = None
     context: _LedgerContext | None = None
@@ -264,6 +272,7 @@ class _LedgerContext:
     statistical_band_cap_fleet_ready: bool = False
     crown_incumbent_fleet_ready: bool = False
     reward_eligibility_fleet_ready: bool = False
+    rank_shares_fleet_ready: bool = False
 
 
 def _composite_stderr(details: dict | None) -> float | None:
@@ -458,6 +467,9 @@ async def resolve_ledger_context(
     statistical_band_cap_fleet_ready = await live_weight_setter_fleet_supports_protocol(
         session, minimum_protocol=_STATISTICAL_BAND_CAP_PROTOCOL, now=now
     )
+    rank_shares_fleet_ready = await live_weight_setter_fleet_supports_protocol(
+        session, minimum_protocol=_RANK_SHARES_PROTOCOL, now=now
+    )
     crown_incumbent_fleet_ready = await live_validator_fleet_supports_protocol(
         session,
         minimum_protocol=_CROWN_INCUMBENT_PROTOCOL,
@@ -481,6 +493,7 @@ async def resolve_ledger_context(
         statistical_band_cap_fleet_ready=statistical_band_cap_fleet_ready,
         crown_incumbent_fleet_ready=crown_incumbent_fleet_ready,
         reward_eligibility_fleet_ready=reward_eligibility_fleet_ready,
+        rank_shares_fleet_ready=rank_shares_fleet_ready,
     )
 
 
@@ -560,6 +573,9 @@ def _fresh_response_from_snapshot(snapshot: _LedgerSnapshot) -> LedgerResponse:
         tie_weighting_mode=snapshot.tie_weighting_mode,
         dethrone_band_mode=snapshot.dethrone_band_mode,
         statistical_band_mode=snapshot.statistical_band_mode,
+        rank_shares=(
+            list(snapshot.rank_shares) if snapshot.rank_shares is not None else None
+        ),
         count=len(snapshot.entries),
         generated_at=snapshot.generated_at,
         stale=False,
@@ -1070,6 +1086,11 @@ async def materialize_ledger_snapshot(
             )
             else None
         ),
+        rank_shares=(
+            burn_settings.rank_shares
+            if ledger_context.rank_shares_fleet_ready
+            else None
+        ),
         continual_retest_cohort_size=continual_settings.retest_cohort_size,
         requesting_validator_hotkey=requesting_validator_hotkey,
         context=ledger_context,
@@ -1096,6 +1117,7 @@ async def materialize_ledger_snapshot(
             "statistical_band_cap": ledger_context.statistical_band_cap_fleet_ready,
             "crown_incumbent": ledger_context.crown_incumbent_fleet_ready,
             "reward_eligibility": ledger_context.reward_eligibility_fleet_ready,
+            "rank_shares": ledger_context.rank_shares_fleet_ready,
         },
     )
 
@@ -1226,21 +1248,32 @@ async def _require_statistical_cap_requester(
             raise HTTPException(
                 status_code=428, detail="treasury weight-setting fleet not ready"
             ) from error
-    if ledger.statistical_band_mode != "capped":
+    capped = ledger.statistical_band_mode == "capped"
+    # A pinned curve must only reach validators that fold it: a sub-31
+    # rejoiner would ignore the field and fold the frozen curve, and dropping
+    # the curve on replay would mix curves inside the v31 fleet mid-epoch.
+    curved = ledger.rank_shares is not None
+    if not capped and not curved:
         return ledger
     heartbeat = await session.get(ValidatorHeartbeat, validator_hotkey)
     seen_at = heartbeat.seen_at if heartbeat is not None else None
     if seen_at is not None and seen_at.tzinfo is None:
         seen_at = seen_at.replace(tzinfo=UTC)
-    if (
-        heartbeat is None
-        or seen_at is None
-        or seen_at < now - VALIDATOR_STALE_WINDOW
-        or heartbeat.protocol_version < _STATISTICAL_BAND_CAP_PROTOCOL
-    ):
+    live = (
+        heartbeat is not None
+        and seen_at is not None
+        and seen_at >= now - VALIDATOR_STALE_WINDOW
+    )
+    protocol = heartbeat.protocol_version if live and heartbeat is not None else -1
+    if capped and protocol < _STATISTICAL_BAND_CAP_PROTOCOL:
         raise HTTPException(
             status_code=428,
             detail="validator protocol 29 is required for the pinned statistical band",
+        )
+    if curved and protocol < _RANK_SHARES_PROTOCOL:
+        raise HTTPException(
+            status_code=428,
+            detail="validator protocol 31 is required for the pinned payout curve",
         )
     return ledger
 
@@ -1310,7 +1343,11 @@ async def scores(
                 nonce=x_validator_ledger_nonce,
                 validator_hotkey=x_validator_hotkey,
                 now=auth_now,
-                expires_at=auth_now + _LEDGER_REQUEST_MAX_AGE,
+                expires_at=nonce_expires_at(
+                    now=auth_now,
+                    requested_at=x_validator_ledger_requested_at,
+                    max_age=_LEDGER_REQUEST_MAX_AGE,
+                ),
             )
         except ValidatorRequestReplayError as exc:
             raise HTTPException(
@@ -1447,7 +1484,11 @@ async def _authorize_ledger_request(
                 nonce=x_validator_ledger_nonce,
                 validator_hotkey=x_validator_hotkey,
                 now=auth_now,
-                expires_at=auth_now + _LEDGER_REQUEST_MAX_AGE,
+                expires_at=nonce_expires_at(
+                    now=auth_now,
+                    requested_at=x_validator_ledger_requested_at,
+                    max_age=_LEDGER_REQUEST_MAX_AGE,
+                ),
             )
         except ValidatorRequestReplayError as exc:
             raise HTTPException(
@@ -1574,6 +1615,11 @@ def _serve_last_known(
             status_code=503,
             detail="scoring ledger unavailable; cannot verify protocol-29 requester",
         ) from error
+    if snapshot is not None and getattr(snapshot, "rank_shares", None) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="scoring ledger unavailable; cannot verify protocol-31 requester",
+        ) from error
     if snapshot is None:
         logger.warning(
             "validator=%s ledger read failed and no cached snapshot to serve: %s",
@@ -1641,6 +1687,9 @@ def _serve_last_known(
         tie_weighting_mode=snapshot.tie_weighting_mode,
         dethrone_band_mode=snapshot.dethrone_band_mode,
         statistical_band_mode=snapshot.statistical_band_mode,
+        rank_shares=(
+            list(snapshot.rank_shares) if snapshot.rank_shares is not None else None
+        ),
         count=len(entries),
         generated_at=snapshot.generated_at,
         stale=True,

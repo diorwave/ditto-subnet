@@ -1,3 +1,4 @@
+import { contributorFixture, claStatusFixture, claControlFixture, claShadowRevisionFixture, claVersionFixture } from './contributor.test-fixtures'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -406,6 +407,7 @@ describe('Backroom MCP tools', () => {
         'get_screener_replay_process_readiness',
         'register_screener_replay_process_key',
         'revoke_screener_replay_process_key',
+        'revoke_miner_github_link',
         'create_screener_bootstrap_grant',
         'get_screener_review_settings',
         'get_screener_fanout_shadow',
@@ -460,10 +462,36 @@ describe('Backroom MCP tools', () => {
         'get_v13_report_only_current_packet',
         'get_screening_submission',
         'get_source_release_policy',
+        'get_miner_github_link',
+        'get_github_contributor_status',
+        'get_github_link_revocation_preflight',
+        'get_miner_cla_status',
+        'get_cla_policy',
+        'set_cla_policy',
+        'publish_cla_version',
+        'get_bounty_board',
+        'get_bounty',
+        'get_bounty_claim',
+        'get_bounty_queue',
+        'get_bounty_payout_policy',
+        'preview_bounty_revision',
+        'publish_bounty_revision',
+        'set_bounty_claims_paused',
+        'review_bounty_submission',
+        'reassign_bounty_reviewer',
+        'control_bounty_slot',
+        'decide_bounty_appeal',
+        'award_bounty_claim',
+        'set_bounty_payout_policy',
+        'approve_bounty_obligation',
+        'dispatch_bounty_obligation',
+        'reconcile_bounty_transfer',
+        'record_bounty_fact',
         'get_owner_attestations',
         'get_submission_cooldown',
         'get_treasury_settings',
         'get_treasury_receipts',
+        'get_treasury_ledger',
         'get_treasury_receipt_preflight',
         'get_treasury_manual_transfers',
         'get_treasury_activation_preflight',
@@ -512,6 +540,7 @@ describe('Backroom MCP tools', () => {
         'record_treasury_settings',
         'record_treasury_runtime',
         'get_treasury_runtime',
+        'get_runtime_interface_report',
         'record_treasury_receipt',
         'record_v13_replay_private_group',
         'search_screening_source',
@@ -667,7 +696,14 @@ describe('Backroom MCP tools', () => {
     // Measure the serialized UTF-8 catalog, including guarded Gamma controls.
     // The quarantine batch execute now publishes its real decisions schema
     // instead of `{}` (about 1.5 KB), which takes the catalog past 180,000.
-    expect(Buffer.byteLength(JSON.stringify(response.tools), 'utf8')).toBeLessThanOrEqual(182_000)
+    // Eight contributor tools now include audited exact-link recovery. Keep
+    // UUID schemas compact and allow this addition; prose budgets stay fixed.
+    // The eighteen build-bounty operator tools (#2942) publish compact catalog
+    // schemas (ids as format uuid, terms as an object; services parse
+    // strictly) and one-line summaries with procedures in tool help: measured
+    // 197,867 bytes together. Main's runtime-interface report read (#2994)
+    // adds 659: measured 198,526 with both. Keep the same ~0.5 KB headroom.
+    expect(Buffer.byteLength(JSON.stringify(response.tools), 'utf8')).toBeLessThanOrEqual(199_000)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -1629,9 +1665,15 @@ describe('Backroom MCP tools', () => {
           properties: Record<string, unknown>
         }
         expect(schema.properties.hotkeys).toEqual({
-          type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 3,
+          type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 16,
         })
       }
+      const rotateSchema = tools.find((tool) => tool.name === 'rotate_v13_scorer_cohort')
+        ?.inputSchema as { properties: Record<string, unknown>; required?: Array<string> }
+      expect(rotateSchema.properties.expectedCurrentHotkeys).toEqual({
+        type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 16,
+      })
+      expect(rotateSchema.required).not.toContain('expectedCurrentHotkeys')
     } finally {
       await fresh.client.close()
       await fresh.server.close()
@@ -1640,7 +1682,7 @@ describe('Backroom MCP tools', () => {
     }
   })
 
-  it('keeps the V13 scorer cohort writers write-scoped and forwards exactly three hotkeys', async () => {
+  it('keeps the V13 scorer cohort writers write-scoped and forwards three to sixteen hotkeys', async () => {
     process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
     const packet = {
       source_revision: 'b'.repeat(40),
@@ -1684,14 +1726,29 @@ describe('Backroom MCP tools', () => {
 
     const writer = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
     try {
-      for (const count of [2, 4]) {
+      const seventeen = Array.from({ length: 17 }, (_, index) => `5Member${index}`)
+      for (const members of [hotkeys.slice(0, 2), seventeen]) {
         const response = await writer.client.callTool({
           name: 'rotate_v13_scorer_cohort',
-          arguments: { ...rotate, hotkeys: [...hotkeys, '5Delta'].slice(0, count) },
+          arguments: { ...rotate, hotkeys: members },
         })
         expect(response.isError).toBe(true)
       }
       expect(fetchMock).not.toHaveBeenCalled()
+
+      // Adding a fourth member binds the change to the current membership.
+      const widened = await writer.client.callTool({
+        name: 'rotate_v13_scorer_cohort',
+        arguments: {
+          ...rotate, hotkeys: [...hotkeys, '5Delta'], packet: rotate.expectedCurrentPacket,
+          expectedCurrentHotkeys: hotkeys,
+        },
+      })
+      expect(widened.isError).not.toBe(true)
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)))
+        .toMatchObject({ hotkeys: [...hotkeys, '5Delta'], expected_current_hotkeys: hotkeys })
+      fetchMock.mockClear()
 
       const response = await writer.client.callTool({ name: 'rotate_v13_scorer_cohort', arguments: rotate })
       expect(response.isError).not.toBe(true)
@@ -1700,7 +1757,8 @@ describe('Backroom MCP tools', () => {
       expect(url).toContain('/api/v1/admin/v13-scorer-cohort/rotate')
       expect(init.method).toBe('POST')
       expect(JSON.parse(String(init.body))).toMatchObject({
-        hotkeys, packet, expected_current_rotation_id: 3, actor: session.email,
+        hotkeys, packet, expected_current_rotation_id: 3, expected_current_hotkeys: null,
+        actor: session.email,
       })
       expect(readTextResult(response)).not.toContain('platform-admin-token')
     } finally {
@@ -4349,6 +4407,7 @@ describe('Backroom MCP tools', () => {
       min_cohort_size: 10,
       modified_z_threshold: 6.0,
       min_composite_floor: 0.9,
+      per_axis_enforce: false,
     },
     defaults: {
       mode: 'off',
@@ -4363,11 +4422,12 @@ describe('Backroom MCP tools', () => {
       min_cohort_size: 'env',
       modified_z_threshold: 'default',
       min_composite_floor: 'default',
+      per_axis_enforce: 'default_invalid_env',
     },
     env_vars: { mode: 'DITTO_OUTLIER_ESCALATION_MODE' },
-    invalid_env_fields: ['mode'],
+    invalid_env_fields: ['mode', 'per_axis_enforce'],
     review_kind: 'anomalous_score',
-    algorithm_version: 'outlier-escalation-v1',
+    algorithm_version: 'outlier-escalation-v2',
     pending_review_count: 1,
     activity: {
       window_hours: 168,
@@ -4403,6 +4463,29 @@ describe('Backroom MCP tools', () => {
         },
       ],
       recent_truncated: true,
+      axis_evidence_total: 3,
+      axis_evidence_in_window: 1,
+      recent_axis_evidence: [
+        {
+          seq: 913,
+          agent_id: '22222222-2222-4222-8222-222222222222',
+          recorded_at: '2026-09-25T11:30:00Z',
+          enforced: false,
+          bench_version: 12,
+          algorithm_version: 'outlier-escalation-v2',
+          evidence: {
+            composite: 0.62,
+            cohort_size: 12,
+            trigger: null,
+            per_axis_outlier_axes: ['memory_mean'],
+            per_axis: [
+              { axis: 'tool_mean', outlier: false, raw_axis_cohort: [0.5] },
+              { axis: 'memory_mean', outlier: true },
+            ],
+          },
+        },
+      ],
+      recent_axis_evidence_truncated: false,
     },
   })
 
@@ -4419,12 +4502,21 @@ describe('Backroom MCP tools', () => {
       expect(body).toMatchObject({
         settings: { mode: 'off', min_cohort_size: 10 },
         sources: { mode: 'default_invalid_env', min_cohort_size: 'env' },
-        invalid_env_fields: ['mode'],
         pending_review_count: 1,
         activity: { observed_total: 4, enforced_total: 1, recent_truncated: true },
       })
       expect(body.activity.recent[0]).toMatchObject({ enforced: true, bench_version: 12 })
       expect(body.activity.recent[0].evidence.modified_z).toBe(26.3)
+      expect(body.invalid_env_fields).toEqual(['mode', 'per_axis_enforce'])
+      expect(body.activity).toMatchObject({ axis_evidence_total: 3, axis_evidence_in_window: 1 })
+      expect(body.activity.recent_axis_evidence[0].evidence).toMatchObject({
+        per_axis_outlier_axes: ['memory_mean'],
+        per_axis: [
+          { axis: 'tool_mean', outlier: false },
+          { axis: 'memory_mean', outlier: true },
+        ],
+      })
+      expect(JSON.stringify(body)).not.toContain('raw_axis_cohort')
       // Unknown fields, nested ones included, are stripped by the schema.
       expect(JSON.stringify(body)).not.toContain('must-not-escape')
       expect(JSON.stringify(body)).not.toContain('raw_cohort')
@@ -4442,6 +4534,9 @@ describe('Backroom MCP tools', () => {
       const guidance = (readJsonResult(help) as { guidance: string }).guidance
       expect(guidance).toContain('default_invalid_env')
       expect(guidance).toContain('/admin/score-outliers')
+      expect(guidance).toContain('per_axis_enforce')
+      expect(guidance).toContain('axis_evidence_in_window')
+      expect(guidance).toContain('recent_axis_evidence')
       expect(fetchMock).toHaveBeenCalledTimes(1)
     } finally {
       await client.close()
@@ -4520,6 +4615,31 @@ describe('Backroom MCP tools', () => {
       },
     ],
     truncated: true,
+    axis_evidence_count: 1,
+    axis_evidence: [
+      {
+        agent_id: '22222222-2222-4222-8222-222222222222',
+        miner_hotkey: '5Axis',
+        evidence: {
+          composite: 0.62,
+          trigger: null,
+          per_axis: [
+            {
+              axis: 'memory_mean',
+              value: 0.95,
+              cohort_size: 39,
+              cohort_median: 0.5,
+              cohort_mad: 0.01,
+              modified_z: 30.4,
+              upward: true,
+              outlier: true,
+              anomaly_unavailable: null,
+            },
+          ],
+        },
+      },
+    ],
+    axis_evidence_truncated: false,
   })
 
   it('dry-runs the outlier escalation with overrides and bounded rows', async () => {
@@ -4528,12 +4648,13 @@ describe('Backroom MCP tools', () => {
       .fn()
       .mockResolvedValueOnce(Response.json(outlierDryRunPayload()))
       .mockResolvedValueOnce(Response.json(outlierDryRunPayload()))
+      .mockResolvedValueOnce(Response.json(outlierDryRunPayload()))
     vi.stubGlobal('fetch', fetchMock)
     const { client, server } = await connect([BACKROOM_READ_SCOPE])
     try {
       const response = await client.callTool({
         name: 'get_outlier_escalation_dry_run',
-        arguments: { benchVersion: 12, modifiedZThreshold: 4.5, limit: 2 },
+        arguments: { benchVersion: 12, modifiedZThreshold: 4.5, perAxisEnforce: true, limit: 2 },
       })
 
       expect(response.isError).not.toBe(true)
@@ -4545,18 +4666,40 @@ describe('Backroom MCP tools', () => {
         truncated: true,
       })
       expect(body.would_trigger[0].evidence.modified_z).toBe(12.8)
+      expect(body.axis_evidence_count).toBe(1)
+      expect(body.axis_evidence[0].evidence.per_axis?.[0]).toMatchObject({
+        axis: 'memory_mean',
+        modified_z: 30.4,
+        outlier: true,
+      })
       expect(JSON.stringify(body)).not.toContain('must-not-escape')
       expect(JSON.stringify(body)).not.toContain('raw_cohort')
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
       expect(String(url)).toBe(
-        'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=2&bench_version=12&modified_z_threshold=4.5',
+        'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=2&bench_version=12&modified_z_threshold=4.5&per_axis_enforce=true',
       )
       expect(init.method ?? 'GET').toBe('GET')
 
-      await client.callTool({ name: 'get_outlier_escalation_dry_run', arguments: {} })
+      // An explicit false is an override too: it previews composite-only holds
+      // even when the live setting enforces per axis.
+      await client.callTool({
+        name: 'get_outlier_escalation_dry_run',
+        arguments: { perAxisEnforce: false },
+      })
       expect(String(fetchMock.mock.calls[1][0])).toBe(
+        'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=20&per_axis_enforce=false',
+      )
+
+      await client.callTool({ name: 'get_outlier_escalation_dry_run', arguments: {} })
+      expect(String(fetchMock.mock.calls[2][0])).toBe(
         'https://platform-api.heyditto.ai/api/v1/admin/outlier-escalation/dry-run?limit=20',
       )
+
+      const invalidOverride = await client.callTool({
+        name: 'get_outlier_escalation_dry_run',
+        arguments: { perAxisEnforce: 'yes' },
+      })
+      expect(invalidOverride.isError).toBe(true)
 
       const invalid = await client.callTool({
         name: 'get_outlier_escalation_dry_run',
@@ -4571,7 +4714,8 @@ describe('Backroom MCP tools', () => {
       const guidance = (readJsonResult(help) as { guidance: string }).guidance
       expect(guidance).toContain('mode is reported but not applied')
       expect(guidance).toContain('writes nothing')
-      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(guidance).toContain('perAxisEnforce')
+      expect(fetchMock).toHaveBeenCalledTimes(3)
     } finally {
       await client.close()
       await server.close()
@@ -6568,10 +6712,10 @@ describe('Backroom MCP tools', () => {
           action: 'clear',
           agent_id: 'db9b919d-241b-4131-a2cc-f426b4356950',
           status: 'failed',
-          agent_status: 'scored',
+          agent_status: 'banned',
           would_change_crown: false,
           steps_applied: [],
-          message: 'agent is scored, not held',
+          message: 'agent is banned, not held',
         },
       ],
       applied_count: 1,
@@ -11391,4 +11535,101 @@ describe('Backroom MCP tools', () => {
     }
   })
 
+})
+
+
+describe('contributor identity and CLA MCP tools', () => {
+  it('exposes exact-link recovery preflight as read-only', async () => {
+    const { githubRevocationFixture } = await import('./contributor.test-fixtures')
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(githubRevocationFixture))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    const response = await client.callTool({ name: 'get_github_link_revocation_preflight', arguments: { linkId: contributorFixture.link.link_id } })
+    expect(readJsonResult(response)).toEqual(githubRevocationFixture)
+    const tools = await client.listTools()
+    expect(tools.tools.find((tool) => tool.name === 'get_github_link_revocation_preflight')?.annotations)
+      .toMatchObject({ readOnlyHint: true, destructiveHint: false })
+    await client.close(); await server.close()
+  })
+
+  it('refuses GitHub recovery without write scope', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    const response = await client.callTool({ name: 'revoke_miner_github_link', arguments: {
+      linkId: contributorFixture.link.link_id, reason: 'recover a verified hostile link',
+      confirmation: `REVOKE GITHUB LINK ${contributorFixture.link.link_id}`,
+    } })
+    expect(response.isError).toBe(true)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(TOOL_SCOPE_REQUIREMENTS.get('revoke_miner_github_link')).toBe(BACKROOM_WRITE_SCOPE)
+    await client.close(); await server.close()
+  })
+
+  it('attributes destructive recovery to the current operator', async () => {
+    const { revokedGithubFixture } = await import('./contributor.test-fixtures')
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ ...revokedGithubFixture,
+      operator_revocation: { ...revokedGithubFixture.operator_revocation, actor: session.email },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    const tools = await client.listTools()
+    expect(tools.tools.find((tool) => tool.name === 'revoke_miner_github_link')?.annotations)
+      .toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false })
+    const result = await client.callTool({ name: 'revoke_miner_github_link', arguments: {
+      linkId: contributorFixture.link.link_id, reason: 'recover a verified hostile link',
+      confirmation: `REVOKE GITHUB LINK ${contributorFixture.link.link_id}`,
+      actor: 'untrusted-input@invalid.example',
+    } })
+    expect(result.isError).not.toBe(true)
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty('actor')
+    expect(fetchMock.mock.calls[0][1].headers['X-Admin-Actor']).toBe(session.email)
+    await client.close(); await server.close()
+  })
+
+  it('returns numeric GitHub identity, exact consent status and rollout adoption with read scope', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json(contributorFixture))
+      .mockResolvedValueOnce(Response.json(claStatusFixture)).mockResolvedValueOnce(Response.json(claControlFixture))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    expect(readJsonResult(await client.callTool({ name: 'get_miner_github_link', arguments: { hotkey: 'fixture' } }))).toEqual(contributorFixture)
+    expect(readJsonResult(await client.callTool({ name: 'get_miner_cla_status', arguments: { hotkey: 'fixture' } }))).toEqual(claStatusFixture)
+    expect(readJsonResult(await client.callTool({ name: 'get_cla_policy', arguments: {} }))).toMatchObject({ current: { mode: 'off' }, unsigned_active_hotkeys: 1 })
+    await client.close(); await server.close()
+  })
+
+  it.each(['set_cla_policy', 'publish_cla_version'])('refuses %s without write scope', async (name) => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+    const args = name === 'set_cla_policy' ? { expectedRevision: 0, mode: 'shadow', reason: 'measure consent adoption', confirmation: 'SET CLA GATE SHADOW' } : { version: 1, sha256: 'ab'.repeat(32), text: 'TEST FIXTURE ONLY', effectiveAt: '2026-10-14T00:00:00Z', reason: 'test publication scope', confirmation: 'PUBLISH CLA 1 ' + 'ab'.repeat(32) }
+    const refused = await client.callTool({ name, arguments: args })
+    expect(refused.isError).toBe(true)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(TOOL_SCOPE_REQUIREMENTS.get(name)).toBe(BACKROOM_WRITE_SCOPE)
+    await client.close(); await server.close()
+  })
+
+  it.each(['set_cla_policy', 'publish_cla_version'])('marks %s as destructive and non-idempotent', async (name) => {
+    const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    const tools = await client.listTools()
+    expect(tools.tools.find((tool) => tool.name === name)?.annotations)
+      .toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false })
+    await client.close(); await server.close()
+  })
+
+  it('attributes writes to the current signed-in operator', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'secret'
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json(claShadowRevisionFixture)).mockResolvedValueOnce(Response.json(claControlFixture)).mockResolvedValueOnce(Response.json(claVersionFixture))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE, BACKROOM_WRITE_SCOPE])
+    await client.callTool({ name: 'set_cla_policy', arguments: { expectedRevision: 0, mode: 'shadow', reason: 'measure consent adoption', confirmation: 'SET CLA GATE SHADOW' } })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ mode: 'shadow' })
+    expect(fetchMock.mock.calls[0][1].headers['X-Admin-Actor']).toBe(session.email)
+    await client.callTool({ name: 'publish_cla_version', arguments: { version: 1, sha256: 'ab'.repeat(32), text: 'TEST FIXTURE ONLY', effectiveAt: '2026-10-14T00:00:00Z', reason: 'test publication attribution', confirmation: 'PUBLISH CLA 1 ' + 'ab'.repeat(32) } })
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toMatchObject({ version: 1 })
+    expect(fetchMock.mock.calls[2][1].headers['X-Admin-Actor']).toBe(session.email)
+    await client.close(); await server.close()
+  })
 })

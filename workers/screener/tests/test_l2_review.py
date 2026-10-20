@@ -4003,9 +4003,19 @@ async def test_partial_dossier_safe_consensus_cannot_clear(
 
     assert requests == 3
     assert not result.observation.ok
-    assert result.observation.failure_disposition == "retryable_infra"
+    # A truncated dossier recurs on every retry of the same bytes: it is an
+    # inconclusive hold naming the partial components, never an infra retry.
+    assert result.observation.failure_disposition == "inconclusive"
     assert result.observation.error_code == "l3-adjudicator-incomplete"
     assert not result.dossier_complete
+    assert result.dossier_incomplete_components
+    assert result.failure_subcode == "+".join(result.dossier_incomplete_components)
+    audit = ScreenReviewAudit.model_validate(result.observation.review_audit)
+    assert audit.reason_code == "l3-adjudicator-incomplete"
+    assert audit.final_stage == "adjudicator"
+    assert audit.dossier_incomplete_components == list(
+        result.dossier_incomplete_components
+    )
 
 
 @pytest.mark.parametrize("deep_nesting", [False, True])
@@ -4143,7 +4153,9 @@ async def test_l3_no_tool_failure_reports_bounded_subcode(
     if recovers:
         assert requests == 4
         assert result.observation.error_code == "l3-adjudicator-incomplete"
-        assert result.failure_subcode is None
+        # The recovered tool-contract slug does not leak; only the partial
+        # dossier components name the hold.
+        assert result.failure_subcode == "+".join(result.dossier_incomplete_components)
         return
     assert requests == 5
     assert result.observation.error_code == "l3-adjudicator-model-tool-contract"
@@ -5155,9 +5167,10 @@ async def test_incomplete_inventory_allows_violation_but_never_clear(
         deadline=None,
     )
     assert not safe_result.observation.ok
-    assert safe_result.observation.failure_disposition == "retryable_infra"
+    assert safe_result.observation.failure_disposition == "inconclusive"
     assert safe_result.observation.error_code == "l3-adjudicator-incomplete"
     assert safe_result.clearance_path == "l3_adjudicator_incomplete"
+    assert safe_result.failure_subcode == "workspace_index"
     assert safe_requests == 6
 
 
@@ -7748,6 +7761,58 @@ async def test_integrity_scan_keeps_nul_bearing_large_source_incomplete(
     assert result["nontext_count"] == 0
 
 
+@pytest.mark.parametrize("edited", [False, True])
+async def test_integrity_scan_accounts_allowlisted_vendored_file_by_digest(
+    tmp_path: Path, edited: bool
+) -> None:
+    upstream = b"int model_answer;\n" + b"x" * (2 * 1024 * 1024)
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "vendored-upstream-allowlist.json").write_text(
+        json.dumps({"files": [{"sha256": hashlib.sha256(upstream).hexdigest()}]})
+    )
+    workspace = tmp_path / "src"
+    vendored = workspace / "third_party" / "quickjs" / "quickjs.c"
+    vendored.parent.mkdir(parents=True)
+    vendored.write_bytes(upstream + (b"//\n" if edited else b""))
+    harness = InProcessAnalyzerHarness()
+    harness._manifests = manifests
+    result = json.loads(await harness.run(workspace, "integrity_surfaces", {}))
+    if edited:
+        # Any edit makes it first-party source the analyzer cannot read.
+        assert result["truncated"] is True
+        assert result["omitted"] == [
+            {"path": "third_party/quickjs/quickjs.c", "reason": "read_cap"}
+        ]
+        return
+    assert result["truncated"] is False
+    assert result["nontext"] == [
+        {
+            "path": "third_party/quickjs/quickjs.c",
+            "bytes": len(upstream),
+            "sha256": hashlib.sha256(upstream).hexdigest(),
+            "provenance": "vendored_upstream_digest",
+        }
+    ]
+
+
+def test_vendored_allowlist_matches_the_shared_protocol_copy() -> None:
+    import ditto_screening_protocol
+
+    shared = (
+        Path(ditto_screening_protocol.__file__).parent
+        / "data"
+        / "vendored_upstream_allowlist.json"
+    )
+    screener = (
+        Path(__file__).resolve().parents[1]
+        / "ditto_screener"
+        / "data"
+        / "vendored-upstream-allowlist.json"
+    )
+    assert screener.read_bytes() == shared.read_bytes()
+
+
 async def test_integrity_scan_keeps_large_text_incomplete(tmp_path: Path) -> None:
     (tmp_path / "agent.py").write_text("model_answer\n" + "x" * (2 * 1024 * 1024))
     result = json.loads(
@@ -7764,6 +7829,32 @@ async def test_stock_kit_dossier_analyzers_are_complete() -> None:
     for command in l2_review._DOSSIER_ANALYZERS:
         output = await harness.run(starter, command, {})
         assert not l2_review._contains_truncation(json.loads(output)), command
+
+
+@pytest.mark.parametrize(
+    ("report", "requires_correction"),
+    [
+        ({"truncated": True, "counts_after_per_rule_file_bounds": True}, False),
+        ({"truncated": True}, True),
+        (
+            {
+                "truncated": True,
+                "counts_after_per_rule_file_bounds": True,
+                "analysis_failed": True,
+            },
+            True,
+        ),
+    ],
+)
+def test_lead_selection_omissions_are_not_retryable_scan_gaps(
+    report: dict[str, object], requires_correction: bool
+) -> None:
+    inventory = {"review_leads": {"fingerprint_selection": report}}
+    assert l2_review._analysis_requires_correction(json.dumps(inventory)) is (
+        requires_correction
+    )
+    inventory["review_leads"]["scan_truncated"] = True
+    assert l2_review._analysis_requires_correction(json.dumps(inventory)) is True
 
 
 async def test_stock_kit_dossier_is_complete_in_every_section(tmp_path: Path) -> None:
