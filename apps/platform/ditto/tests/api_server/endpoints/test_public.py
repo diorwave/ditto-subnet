@@ -46,6 +46,7 @@ from ditto.api_models.public import (
     PublicSubmissionPipeline,
     PublicSystemMetrics,
     PublicV9BaseEvidence,
+    PublicValidatorScore,
     public_validation_failure_code,
 )
 from ditto.api_models.screener import (
@@ -53,6 +54,7 @@ from ditto.api_models.screener import (
     SourceReviewFinding,
 )
 from ditto.api_models.screener_review_settings import ScreenerReviewSettings
+from ditto.api_models.source_disclosure import SourceDisclosure
 from ditto.api_models.stack_health import (
     ComponentHealthState,
     ValidatorComponentHealth,
@@ -70,7 +72,10 @@ from ditto.api_server.dependencies import (
     get_storage_client,
 )
 from ditto.api_server.endpoints import public as public_endpoint
-from ditto.api_server.endpoints.public import _fleet_classification
+from ditto.api_server.endpoints.public import (
+    _fleet_classification,
+    _public_artifact_release,
+)
 from ditto.api_server.koth import TOP5_MAX_CONFIRMATION_SEEDS
 from ditto.api_server.storage import ObjectDownloadFailedError
 from ditto.api_server.validator_names import ValidatorNamesSnapshot
@@ -110,6 +115,7 @@ from ditto.db.models import (
     ValidatorSlotSettingsRevision,
     ValidatorTicket,
 )
+from ditto.db.queries.artifact_release_settings import ArtifactReleasePolicy
 from ditto.db.queries.audit import (
     EVENT_SCORE,
     GENESIS_HASH,
@@ -429,6 +435,115 @@ def test_composite_breakdown_exposes_public_safe_quality_factor_telemetry() -> N
     assert factors["transform_robustness"].audit_count == 12
     assert "other_quality_effects" not in factors
     assert "expected" not in breakdown.model_dump_json()
+
+
+def test_composite_breakdown_treats_memory_over_call_as_applied_factor() -> None:
+    # Issue #533: the scorer records memory_over_call as the exact multiplier
+    # it applied, so the breakdown can fold it rather than leaving it in the
+    # unexplained remainder.
+    breakdown = public_endpoint._composite_breakdown(
+        tool_mean=1.0,
+        memory_mean=1.0,
+        final_composite=0.875,
+        details={
+            "raw_composite": 0.875,
+            "tool_efficiency": 1.0,
+            "memory_over_call": 0.875,
+        },
+    )
+
+    assert breakdown is not None
+    factors = {factor.key: factor for factor in breakdown.quality_factors}
+    assert factors["memory_over_call"].metric == pytest.approx(0.875)
+    assert factors["memory_over_call"].multiplier == pytest.approx(0.875)
+    assert "other_quality_effects" not in factors
+
+
+def _gate_factor_score(details: dict) -> PublicValidatorScore:
+    return public_endpoint._public_validator_score(
+        SimpleNamespace(
+            validator_hotkey=_VALIDATOR_C,
+            composite=0.8,
+            tool_mean=0.9,
+            memory_mean=0.8,
+            median_ms=500,
+            n=120,
+            seed=42,
+            run_id="run-gate-factors",
+            signature="ab" * 64,
+            generated_at=datetime(2026, 10, 9, tzinfo=UTC),
+            details=details,
+        )
+    )
+
+
+def test_public_validator_score_publishes_every_stored_gate_factor() -> None:
+    score = _gate_factor_score(
+        {
+            "bench_version": 14,
+            "tool_efficiency": 0.995152,
+            "metamorphic_consistency": 0.961538,
+            "memory_over_call": 0.984615,
+            "conversational_sanity": 1,
+            "transform_robustness": 0.888889,
+            "audit_case_count": 9,
+            "audit_pairs": {
+                "both_correct": 7,
+                "base_only": 1,
+                "transform_only": 0,
+                "both_wrong": 1,
+            },
+            "audit_pairs_pooled": {
+                "both_correct": 20,
+                "base_only": 3,
+                "transform_only": 1,
+                "both_wrong": 2,
+            },
+        }
+    )
+
+    published = score.model_dump(mode="json")
+    assert published["tool_efficiency"] == pytest.approx(0.995152)
+    assert published["metamorphic_consistency"] == pytest.approx(0.961538)
+    assert published["memory_over_call"] == pytest.approx(0.984615)
+    assert published["conversational_sanity"] == 1.0
+    assert published["transform_robustness"] == pytest.approx(0.888889)
+    assert published["audit_case_count"] == 9
+    # Per-run counts, never the validator's cross-run pool.
+    assert published["audit_pairs"] == {
+        "both_correct": 7,
+        "base_only": 1,
+        "transform_only": 0,
+        "both_wrong": 1,
+    }
+
+
+def test_public_validator_score_gate_factors_are_optional_and_fail_closed() -> None:
+    legacy = _gate_factor_score({"bench_version": 8}).model_dump(mode="json")
+    for key in (
+        "audit_pairs",
+        "tool_efficiency",
+        "metamorphic_consistency",
+        "memory_over_call",
+        "conversational_sanity",
+    ):
+        assert legacy[key] is None
+
+    malformed = _gate_factor_score(
+        {
+            "tool_efficiency": True,
+            "metamorphic_consistency": 1.5,
+            "memory_over_call": "0.9",
+            "conversational_sanity": float("nan"),
+            "audit_pairs": {"both_correct": 3, "base_only": -1},
+        }
+    )
+    assert malformed.tool_efficiency is None
+    assert malformed.metamorphic_consistency is None
+    assert malformed.memory_over_call is None
+    assert malformed.conversational_sanity is None
+    assert malformed.audit_pairs is None
+    assert _gate_factor_score({"audit_pairs": {}}).audit_pairs is None
 
 
 def test_composite_breakdown_shows_no_token_penalty_when_within_budget() -> None:
@@ -2168,6 +2283,18 @@ class TestPublicValidationFailureCode:
         assert (
             public_validation_failure_code("inference_lane_saturated")
             == "inference_lane_saturated"
+        )
+
+    def test_seed_deadline_is_published_without_attribution(self) -> None:
+        assert (
+            public_validation_failure_code("seed_deadline_exceeded")
+            == "seed_deadline_exceeded"
+        )
+        assert (
+            public_validation_failure_code(
+                "model_relay_unavailable:seed_deadline_exceeded"
+            )
+            is None
         )
 
     def test_prefixed_admission_code(self) -> None:
@@ -12290,6 +12417,89 @@ class TestPublicArtifactRelease:
         king = await client.get(f"/api/v1/public/agent/{former_king_id}/artifact")
         assert king.status_code == 200
         storage.presigned_get_url.assert_awaited_once()
+
+    async def test_banned_king_source_is_released_but_never_a_rejected_one(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        now = datetime.now(UTC)
+        banned_king = await _seed_k3(
+            session_maker,
+            miner=_MINER_A,
+            composites=[0.7, 0.8, 0.9],
+            status=AgentStatus.BANNED,
+        )
+        rejected_king = await _seed_k3(
+            session_maker,
+            miner=_MINER_B,
+            composites=[0.7, 0.8, 0.9],
+            status=AgentStatus.REJECTED,
+        )
+        banned_commoner = await _seed_k3(
+            session_maker,
+            miner=_MINER_A,
+            composites=[0.4, 0.5, 0.6],
+            status=AgentStatus.BANNED,
+        )
+        for agent_id in (banned_king, rejected_king):
+            await _crown(
+                session_maker,
+                agent_id=agent_id,
+                first_crowned_at=now - timedelta(hours=49),
+            )
+        _install_db(app, session_maker)
+        storage = AsyncMock()
+        storage.presigned_get_url.return_value = "https://objects.example/source"
+
+        async def _storage():
+            return storage
+
+        app.dependency_overrides[get_storage_client] = _storage
+
+        # A ban does not withhold a king that earned verified winner emissions.
+        # A banned king that never reached a quorum is terminal, not "retry later".
+        unscored_banned_king = await _seed_k3(
+            session_maker,
+            miner=_MINER_B,
+            composites=[0.7],
+            status=AgentStatus.BANNED,
+        )
+        await _crown(
+            session_maker,
+            agent_id=unscored_banned_king,
+            first_crowned_at=now - timedelta(hours=49),
+        )
+        terminal = await client.get(
+            f"/api/v1/public/agent/{unscored_banned_king}/artifact"
+        )
+        assert terminal.status_code == 404
+        released = await client.get(f"/api/v1/public/agent/{banned_king}/artifact")
+        assert released.status_code == 200
+        for withheld in (rejected_king, banned_commoner):
+            response = await client.get(f"/api/v1/public/agent/{withheld}/artifact")
+            assert response.status_code == 404
+        storage.presigned_get_url.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (AgentStatus.BANNED, "unavailable"),
+            (AgentStatus.SCORED, "awaiting_quorum"),
+        ],
+    )
+    def test_banned_submission_without_quorum_is_not_awaiting_one(
+        self, status: AgentStatus, expected: str
+    ) -> None:
+        release = _public_artifact_release(
+            status=status,
+            score_quorum=None,
+            policy=ArtifactReleasePolicy(SourceDisclosure.PUBLIC, 48),
+            king_reveal=None,
+            now=datetime.now(UTC),
+        )
+        assert release.status == expected
 
     async def test_king_source_is_embargoed_until_the_window_elapses(
         self,
