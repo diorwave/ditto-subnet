@@ -8,18 +8,20 @@ import (
 )
 
 // TestV14PolicyOnlyAddsIssue2734Matchers pins the v14 floor: every v13 policy
-// field carries forward and the #2734 matcher fields are the only additions.
-// V13 stays a frozen scored contract.
+// field carries forward and the claim-value correction guard (#2769) and the
+// #2734 matcher fields are the only additions. V13 stays a frozen scored
+// contract.
 func TestV14PolicyOnlyAddsIssue2734Matchers(t *testing.T) {
 	v13 := gradingPolicyForVersion(protocol.BenchVersionV13)
 	v14 := gradingPolicyForVersion(protocol.BenchVersionV14)
-	if v13.foldTypographicHyphens || v13.hyphenJoinedValues || v13.setRemovalPlace || v13.progressiveActions {
-		t.Fatalf("a #2734 matcher reached v13: %+v", v13)
+	if v13.foldTypographicHyphens || v13.hyphenJoinedValues || v13.setRemovalPlace || v13.progressiveActions || v13.claimValuesAreNotCorrections {
+		t.Fatalf("a v14 matcher reached v13: %+v", v13)
 	}
-	if !v14.foldTypographicHyphens || !v14.hyphenJoinedValues || !v14.setRemovalPlace || !v14.progressiveActions {
-		t.Fatalf("v14 is missing a #2734 matcher: %+v", v14)
+	if !v14.foldTypographicHyphens || !v14.hyphenJoinedValues || !v14.setRemovalPlace || !v14.progressiveActions || !v14.claimValuesAreNotCorrections {
+		t.Fatalf("v14 is missing a matcher: %+v", v14)
 	}
 	v14.foldTypographicHyphens, v14.hyphenJoinedValues, v14.setRemovalPlace, v14.progressiveActions = false, false, false, false
+	v14.claimValuesAreNotCorrections = false
 	if v14 != v13 {
 		t.Fatalf("v14 changed a v13 policy field: v13=%+v v14=%+v", v13, v14)
 	}
@@ -336,5 +338,26 @@ func TestV14ClaimAlternativesCarryTheTypographicHyphenForm(t *testing.T) {
 	list := protocol.MemoryCase{BenchVersion: protocol.BenchVersionV14, AnswerKind: protocol.AnswerList, AnswerItems: []string{"GAVOTU-8841", "tea"}}
 	if got := ClaimAlternatives(list); len(got) != 2 || len(got[0]) != 2 || got[0][1] != "GAVOTU‐8841" || len(got[1]) != 1 {
 		t.Fatalf("v14 list claim vocabulary = %q", got)
+	}
+}
+
+// TestV14ClaimAlternativesCarryMixedHyphenForms: the fold credits a reply that
+// mixes ASCII and typographic hyphens, so the provenance vocabulary carries
+// every mixed spelling too, bounded at maxMixedHyphenForms hyphens.
+func TestV14ClaimAlternativesCarryMixedHyphenForms(t *testing.T) {
+	mc := protocol.MemoryCase{BenchVersion: protocol.BenchVersionV14, AnswerKind: protocol.AnswerValue, ExpectedAnswer: "AB-12-CD"}
+	got := ClaimAlternatives(mc)
+	want := []string{"AB-12-CD", "AB‐12-CD", "AB-12‐CD", "AB‐12‐CD"}
+	if len(got) != 1 || len(got[0]) != len(want) {
+		t.Fatalf("v14 mixed-hyphen vocabulary = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[0][i] != want[i] {
+			t.Fatalf("v14 mixed-hyphen vocabulary = %q, want %q", got, want)
+		}
+	}
+	long := protocol.MemoryCase{BenchVersion: protocol.BenchVersionV14, AnswerKind: protocol.AnswerValue, ExpectedAnswer: "a-b-c-d-e-f"}
+	if got := ClaimAlternatives(long); len(got) != 1 || len(got[0]) != 2 || got[0][1] != "a‐b‐c‐d‐e‐f" {
+		t.Fatalf("v14 long-form vocabulary must stay bounded: %q", got)
 	}
 }

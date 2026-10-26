@@ -385,13 +385,36 @@ def claim_groups(case: dict[str, Any]) -> list[list[str]]:
             alternates = _as_list(accept[index]) if index < len(accept) else []
             group(item, *alternates)
     if version >= 14:
-        # v14 (#2734): the U+2010 variant of every hyphenated form, in its own
+        # v14 (#2734): the U+2010 variants of every hyphenated form, in its own
         # unit, which is what NFKC makes of the model's U+2011 in a completion.
         groups = [
-            [*forms, *(form.replace("-", _HYPHEN_V14) for form in forms if "-" in form)]
+            [*forms, *(v for form in forms for v in typographic_hyphen_variants(form))]
             for forms in groups
         ]
     return groups
+
+
+_MAX_MIXED_HYPHEN_FORMS = 4
+"""``grade.maxMixedHyphenForms``."""
+
+
+def typographic_hyphen_variants(form: str) -> list[str]:
+    """Port of ``grade.typographicHyphenVariants``: ``form`` with one or more
+    ASCII hyphens written as U+2010, every combination up to four hyphens,
+    the all-U+2010 spelling only beyond that."""
+    parts = form.split("-")
+    hyphens = len(parts) - 1
+    if hyphens == 0:
+        return []
+    if hyphens > _MAX_MIXED_HYPHEN_FORMS:
+        return [form.replace("-", _HYPHEN_V14)]
+    variants = []
+    for mask in range(1, 1 << hyphens):
+        text = parts[0]
+        for j, part in enumerate(parts[1:]):
+            text += (_HYPHEN_V14 if mask & (1 << j) else "-") + part
+        variants.append(text)
+    return variants
 
 
 def claim_alternatives(case: dict[str, Any]) -> list[str]:

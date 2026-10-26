@@ -45,6 +45,7 @@ from ditto.tests.api_server.endpoints.test_admin_artifact_release_settings impor
     _install as admin_install,
 )
 from ditto.tests.api_server.endpoints.test_bounties import TERMS
+from ditto.tests.api_server.endpoints.test_bounties import preview as preview_bounty
 from ditto.tests.api_server.endpoints.test_bounties import publish as publish_bounty
 from ditto.tests.api_server.endpoints.test_contributor_cla import (
     publish as publish_cla,
@@ -415,6 +416,23 @@ async def test_the_stored_claim_reverifies_from_its_own_fields(world):
     assert claim.github_user_id == ALICE.user_id
 
 
+async def test_a_revision_cannot_make_a_live_claimant_the_reviewer(world):
+    # A claim is refused when its login is the reviewer's; a later revision
+    # must not make the holder of a live claim the reviewer either.
+    await world.start(ALICE, BOB)
+    assert (await world.hold(ALICE)).status_code == 200
+    renamed = {"reviewer_login": ALICE.login.upper()}
+    shown = await preview_bounty(world.client, issue=ISSUE, expected=1, terms=renamed)
+    assert any("holds a live claim" in refusal for refusal in shown["refusals"])
+    refused = await publish_bounty(world.client, issue=ISSUE, expected=1, terms=renamed)
+    assert refused.status_code == 409 and "holds a live claim" in refused.text
+    assert (await world.refresh())["summary"]["current_revision"] == 1
+    # Anyone without a live claim on the bounty may still be named.
+    other = {"reviewer_login": BOB.login}
+    named = await publish_bounty(world.client, issue=ISSUE, expected=1, terms=other)
+    assert named.status_code == 200, named.text
+
+
 @pytest.mark.parametrize(
     "case,status,message",
     [
@@ -425,6 +443,7 @@ async def test_the_stored_claim_reverifies_from_its_own_fields(world):
         ("revision", 409, "terms changed"),
         ("digest", 409, "terms changed"),
         ("unknown", 404, "bounty not found"),
+        ("reviewer", 403, "reviewer cannot claim"),
         ("payee", 403, "Owner(hotkey)"),
         ("unlinked", 403, "active verified link"),
         ("login", 403, "active verified link"),
@@ -434,7 +453,9 @@ async def test_the_stored_claim_reverifies_from_its_own_fields(world):
     ],
 )
 async def test_refused_claims_write_nothing(world, case, status, message):
-    await world.start(ALICE)
+    # GitHub logins are case-insensitive: any spelling of hers is the reviewer.
+    reviewer = {"reviewer_login": ALICE.login.upper()} if case == "reviewer" else {}
+    await world.start(ALICE, **reviewer)
     await world.link(BOB, sign_cla=False)
     who, over, body = ALICE, {}, None
     if case == "netuid":
