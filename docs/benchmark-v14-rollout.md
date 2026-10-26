@@ -29,10 +29,13 @@ that value is also a correction cue. "better safe than sorry" is published as
 `sorry`. V14 credits both. A sentence that carries anything beyond the value
 ("Sorry, I mean safe.") is still a correction, and v13 grading is unchanged.
 The v14 full/public vector at seed 123456789 is
-`8a08dfe713fd6df2d67ece92148118a3fbd64b5d0f6a90f78dccb9853e329d50`,
-with epoch `2027-06-01T00:00:00Z`. The surface, grader (apart from the claim-set
-correction above), v13 gate postures,
-LongMem instrument and public harness wire (9) carry forward. There is no private
+`cb5962df023627c294be1de814ae22b65a3c58f6eb9a2bc9601bee8439f10432`,
+with epoch `2027-06-01T00:00:00Z`. The grader (apart from the claim-set
+correction above), v13 gate postures, LongMem
+instrument and public harness wire (9) carry forward. The surface carries
+forward apart from case-file records, which v14 files in story order instead of
+shuffled-presentation order (#3088); that moves the v14 vector and leaves every
+v13 seed untouched. There is no private
 surface expansion or screening policy v14 activation in this change.
 
 ## Record the release packet before enabling any v14 work
