@@ -7,15 +7,20 @@ import (
 )
 
 // TestV14PolicyOnlyAddsTheHyphenFold pins the v14 floor: every v13 policy
-// field carries forward and the typographic hyphen fold is the one addition.
-// V13 stays a frozen scored contract.
+// field carries forward and the v14 additions are the claim-value correction
+// guard (#2769) and the typographic hyphen fold (#2734). V13 stays a frozen
+// scored contract.
 func TestV14PolicyOnlyAddsTheHyphenFold(t *testing.T) {
 	v13 := gradingPolicyForVersion(protocol.BenchVersionV13)
 	v14 := gradingPolicyForVersion(protocol.BenchVersionV14)
 	if v13.foldTypographicHyphens || !v14.foldTypographicHyphens {
 		t.Fatalf("foldTypographicHyphens must be v14-only: v13=%+v v14=%+v", v13, v14)
 	}
+	if v13.claimValuesAreNotCorrections || !v14.claimValuesAreNotCorrections {
+		t.Fatalf("claimValuesAreNotCorrections must be v14-only: v13=%+v v14=%+v", v13, v14)
+	}
 	v14.foldTypographicHyphens = false
+	v14.claimValuesAreNotCorrections = false
 	if v14 != v13 {
 		t.Fatalf("v14 changed a v13 policy field: v13=%+v v14=%+v", v13, v14)
 	}

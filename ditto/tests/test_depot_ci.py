@@ -42,14 +42,35 @@ def test_depot_keeps_the_current_executable_jobs(name: str) -> None:
     assert depot_jobs == github_jobs
 
 
-@pytest.mark.parametrize("name", ENTRYPOINTS + UTILITY_WORKFLOWS)
-def test_github_owns_pr_validation_and_depot_is_manual_only(name: str) -> None:
+@pytest.mark.parametrize("name", ENTRYPOINTS)
+def test_github_runs_standalone_checks_on_prs_and_depot_stays_manual(
+    name: str,
+) -> None:
+    # The GitHub entrypoints run on pull requests again (they catch what the
+    # release gates would otherwise find only after merge). The Depot mirror is
+    # the manual fallback, so it never doubles automatic PR spend (SN-120).
     github = load(".github", name)
     depot = load(".depot", name)
-    assert "pull_request" in github["on"]
+    assert set(github["on"]) == {"workflow_dispatch", "pull_request"}
     assert set(depot["on"]) == {"workflow_dispatch"}
     for job in github["jobs"].values():
         assert "head.repo.full_name != github.repository" not in job.get("if", "")
+
+
+def test_previews_stay_operator_dispatched_on_both_providers() -> None:
+    github = load(".github", "preview.yml")
+    depot = load(".depot", "preview.yml")
+    assert set(github["on"]) == {"workflow_dispatch"}
+    assert set(depot["on"]) == {"workflow_dispatch"}
+    for job in github["jobs"].values():
+        assert "head.repo.full_name != github.repository" not in job.get("if", "")
+
+
+def test_migration_order_still_guards_every_pull_request() -> None:
+    github = load(".github", "platform-migration-order.yml")
+    depot = load(".depot", "platform-migration-order.yml")
+    assert "pull_request" in github["on"]
+    assert set(depot["on"]) == {"workflow_dispatch"}
 
 
 @pytest.mark.parametrize("name", REUSABLES)

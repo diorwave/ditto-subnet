@@ -1090,10 +1090,12 @@ async def test_a_payout_row_cut_short_by_the_deadline_stays_pending(
     )
     async with session_maker() as session:
         row = await session.get(SourceEmissionPayout, (a["netuid"], _hash(201)))
-        # At most a transient retry note: never terminal, never confirmed.
+        # At most a transient retry note: never terminal, never confirmed. A
+        # loaded event loop can pass the deadline before the row is reached,
+        # which leaves the reopened verdict untouched.
         assert row.terminal is False
-        assert row.blocked_reason is None or row.blocked_reason.startswith(
-            "receipt_retry"
+        assert row.blocked_reason in (None, f"unverifiable_payout: {_OWNERSHIP}") or (
+            row.blocked_reason.startswith("receipt_retry")
         )
 
 
@@ -1228,7 +1230,7 @@ def _event_planner_mode(monkeypatch):
     monkeypatch.setattr(module, "_REVEAL_PLAN_MODE", "shadow")
 
 
-def _sparse_plan(current, end, interesting, *, full_scan=False):
+def _sparse_plan(current, end, interesting, *, full_scan=False, reason=None):
     from ditto.chain.source_emission_verifier import SourceEmissionRangePlan
 
     return SourceEmissionRangePlan(
@@ -1238,6 +1240,7 @@ def _sparse_plan(current, end, interesting, *, full_scan=False):
         tuple(interesting),
         full_scan,
         "runtime",
+        reason,
     )
 
 
@@ -1301,6 +1304,17 @@ async def test_sparse_catchup_reads_only_planned_blocks_and_skips_the_rest(
         assert cursor.runtime_code_hash == "runtime"
         payout = await session.get(SourceEmissionPayout, (a["netuid"], _hash(151)))
         assert payout is not None and payout.proof["receipt"]["block"] == 151
+        # Backroom's catch-up summary counts the range and what it read.
+        summary = cursor.catch_up
+    assert {k: summary[k] for k in summary if k != "updated_at"} == {
+        "planner": "event",
+        "ranges": 1,
+        "sparse": 1,
+        "blocks_read": 2,
+        "blocks_skipped": end - 100 - 2,
+        "last_range": [101, end],
+        "last_outcome": "sparse",
+    }
 
 
 async def _shadowed_sweep(app, session_maker, monkeypatch, reveal_plan):
@@ -1527,12 +1541,17 @@ async def test_sparse_catchup_falls_back_to_the_per_block_scan(
     app, session_maker, monkeypatch, plan_outcome
 ):
     from ditto.api_server import source_emission_collector as module
+    from ditto.db.models import SourceEmissionCollectorCursor
 
     a, substrate = await _deep_backlog(app, session_maker, 100)
     plan = (
         AsyncMock(
             return_value=_sparse_plan(
-                100, 100 + module._SWEEP_SPARSE_BATCH_BLOCKS, (), full_scan=True
+                100,
+                100 + module._SWEEP_SPARSE_BATCH_BLOCKS,
+                (),
+                full_scan=True,
+                reason="uid_mapping",
             )
         )
         if plan_outcome == "full_scan"
@@ -1553,6 +1572,90 @@ async def test_sparse_catchup_falls_back_to_the_per_block_scan(
     await collector._sweep_provider(substrate)
 
     assert scanned == list(range(101, 101 + module._SWEEP_CATCHUP_BATCH_BLOCKS))
+    # The fallback is visible in Backroom, with the planner's reason.
+    async with session_maker() as session:
+        cursor = await session.get(SourceEmissionCollectorCursor, a["netuid"])
+        summary = cursor.catch_up
+    assert summary["ranges"] == 1
+    if plan_outcome == "full_scan":
+        assert summary["full_scan"] == 1
+        assert summary["full_scan_reasons"] == {"uid_mapping": 1}
+    else:
+        assert summary["error"] == 1 and summary["last_error"]
+    assert summary["last_outcome"] == (
+        "full_scan" if plan_outcome == "full_scan" else "error"
+    )
+
+
+async def test_a_planner_change_starts_a_new_catch_up_summary(app, session_maker):
+    from ditto.db.models import SourceEmissionCollectorCursor
+    from ditto.db.queries.source_emission_collector import record_catch_up_range
+
+    a, _substrate = await _deep_backlog(app, session_maker, 100)
+    now = datetime(2026, 10, 20, tzinfo=UTC)
+    for planner, outcome in (
+        ("event", "sparse"),
+        ("event", "full_scan"),
+        ("reveal", "sparse"),
+    ):
+        async with session_maker() as session, session.begin():
+            await record_catch_up_range(
+                session,
+                netuid=a["netuid"],
+                first_block=101,
+                last_block=820,
+                outcome=outcome,
+                planner=planner,
+                read=2,
+                skipped=718,
+                detail="uid_mapping" if outcome == "full_scan" else None,
+                now=now,
+            )
+    async with session_maker() as session:
+        cursor = await session.get(SourceEmissionCollectorCursor, a["netuid"])
+        summary = cursor.catch_up
+    # The event planner's ranges are not reported as the reveal planner's.
+    assert {k: summary[k] for k in summary if k != "updated_at"} == {
+        "planner": "reveal",
+        "ranges": 1,
+        "sparse": 1,
+        "blocks_read": 2,
+        "blocks_skipped": 718,
+        "last_range": [101, 820],
+        "last_outcome": "sparse",
+    }
+
+
+async def test_a_failed_catch_up_summary_write_never_blocks_the_sweep(
+    app, session_maker, monkeypatch
+):
+    from ditto.api_server import source_emission_collector as module
+    from ditto.db.models import SourceEmissionCollectorCursor
+
+    a, substrate = await _deep_backlog(app, session_maker, 100)
+    end = 100 + module._SWEEP_SPARSE_BATCH_BLOCKS
+    monkeypatch.setattr(
+        module,
+        "plan_source_emission_range",
+        AsyncMock(return_value=_sparse_plan(100, end, ())),
+    )
+
+    async def read(_substrate, *, netuid, block, **_kwargs):
+        del netuid
+        return _observed(a, block)
+
+    monkeypatch.setattr(module, "read_source_emission_block", read)
+    monkeypatch.setattr(
+        module, "record_catch_up_range", AsyncMock(side_effect=RuntimeError("db"))
+    )
+    collector = _collector(app, session_maker)
+    monkeypatch.setattr(collector, "resolve_pending_payouts", AsyncMock(return_value=0))
+
+    await collector._sweep_provider(substrate)
+
+    async with session_maker() as session:
+        cursor = await session.get(SourceEmissionCollectorCursor, a["netuid"])
+        assert cursor.block == end and cursor.catch_up is None
 
 
 async def test_sparse_plan_must_start_at_the_durable_cursor(

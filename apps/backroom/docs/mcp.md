@@ -1,5 +1,26 @@
 # SN118 Backroom MCP
 
+`get_agent_source_release_evidence` reads exact-artifact publication evidence
+without downloading source. With `candidateAgentId`, its reference time is
+that submission's upload, and its policy revision is the one effective then.
+The result distinguishes conservative eligibility/publication timing from
+actual exact-SHA anonymous public handoffs, which remain evidence after a
+longer embargo or status change. Missing fetch rows do not prove that source
+was private: the audit is fail-open and an earlier shorter release window may
+be omitted. Private operator/validator reads never count. Only `backroom:read`
+is needed; no URL, IP, requester identity or source bytes are returned.
+
+`get_screening_verification_readiness` also reports the existing source-review
+job for that exact agent and attempt, when present. It checks the current
+artifact binding, completion state, canonical finding digest, policy suffix and
+assessment schema before returning a retained finding. `not_recorded` means
+the row has no observation; `finding_not_recorded` means a valid stored
+observation has no finding; `invalid` means its finding or bindings did not
+validate. These states do not establish misconduct or prove a review never ran.
+The stored `clearance_certified` flag remains a reviewer assertion;
+`source_admission_accepted` stays false. This read does not verify health,
+authorize CLEAR or make private challenges universal admission requirements.
+
 `get_validator_weight_diagnostics` reads revealed weights, last Yuma vTrust,
 consensus, epoch counters, and pending timelock rounds at one chain block/hash.
 It requires `backroom:read`, accepts an optional `validatorUid`, and never submits
@@ -113,6 +134,81 @@ unknown upstream fields are stripped. The raw and folded seed IDs it returns
 are already-scored confirmation seeds, as exact decimal strings. The snapshot
 grants no work and changes nothing.
 
+The shadow DittoBench generator competition has its own operator surface.
+Miners submit CPU-only Go generator source. The scorer qualifies each upload:
+it builds the source, checks that every pack on fresh secret seeds is valid,
+re-runs to check determinism, and runs the probe copy check. Qualified
+generators then compete in rounds keyed on the chain epoch counter
+(`round = SubnetEpochIndex // epochs_per_round`).
+
+Each round runs these steps:
+
+1. Platform commits the round's secret one round ahead, on Platform and
+   on-chain.
+2. When the round opens, Platform derives the seed from that secret and the
+   block the round opened at.
+3. Platform freezes the round's generator columns and agent panel.
+4. The scorer generates the round dataset.
+5. Validators run every panel agent on the dataset.
+6. The scorer scores the matrix: generators get column scores, agents get
+   pairwise-neutral standings.
+
+Each round's secret is revealed after `privacy_window_rounds`.
+
+- **Reads (`backroom:read`):**
+  - `get_generator_competition_settings` returns the policy, including the
+    round knobs (`epochs_per_round`, columns, reference agents, privacy
+    window, on-chain commitment and `validator_rounds_enabled`).
+  - `list_generator_submissions` and `get_generator_submission` return
+    identity, status, qualification and latest round score, never source.
+  - `get_generator_run` returns a qualification run's evaluation. Seeds appear
+    only after the run finished, so an operator can regenerate its packs.
+  - `get_generator_probe` returns probe epochs. The probe seed is never served.
+  - `list_generator_rounds`, `get_generator_round`, `preview_generator_round`
+    and `get_generator_round_loop` expose the following:
+    - the schedule;
+    - each round's commitment and its publication;
+    - columns, panel and per-column generation;
+    - every validator lease and result;
+    - pending agents;
+    - the scored matrix;
+    - what a round opened now would freeze, and every blocker;
+    - the round driver's last tick.
+  - `get_generator_round_dataset` (`backroom:artifact:read`) downloads a
+    closed round's exact dataset to reproduce it.
+  - `list_generator_promotion_candidates` returns discriminating round cases.
+  - `get_generator_board` returns the ledger validators fold.
+- **Writes (`backroom:write`, actor recorded):**
+  - `set_generator_competition_settings` stores a whole-object revision with
+    `expectedRevision` and the confirmation `APPLY GENERATOR COMPETITION {MODE}`.
+  - `register_default_generator` (`REGISTER DEFAULT GENERATOR`) registers the
+    public generator that fills empty counted columns.
+  - `tick_generator_rounds` runs one idempotent round-driver tick now.
+  - `void_generator_round` (`VOID GENERATOR ROUND {n}`) voids a round.
+    `close_generator_round` (`CLOSE GENERATOR ROUND {n}`) scores a running
+    round with the results it already has.
+  - `republish_generator_round_commitment`
+    (`REPUBLISH GENERATOR ROUND COMMITMENT`) retries a failed on-chain
+    commitment for a round that has not opened.
+  - `release_generator_round_lease` (`RELEASE GENERATOR ROUND LEASE`) frees a
+    quiet validator's round lease.
+  - `rotate_generator_probe_seed` needs the confirmation
+    `ROTATE GENERATOR PROBE SEED`. Every active generator re-qualifies.
+  - `rescore_generator_submission` re-qualifies an active generator now.
+  - `reject_generator_submission` needs the confirmation
+    `REJECT GENERATOR SUBMISSION` and `expectedStatus`. It abandons an
+    in-flight qualification run and drops the generator from the ledger at
+    once.
+
+Activating the lane in shadow takes four steps:
+
+1. Set `mode=shadow`.
+2. Register the default generator, and wait for it to qualify.
+3. Check `preview_generator_round`.
+4. Set `validator_rounds_enabled=true`.
+
+There is no enforcing mode: ledger entries stay `weight_eligible=false`.
+
 `https://backroom.dittobench.ai/mcp` is an OAuth-protected Streamable HTTP MCP
 server exposing the same operations as the console: screening quarantines and
 disputes, validator queue/slot/inference policy, the scoring lease TTL,
@@ -151,62 +247,6 @@ request ID, elapsed time, fixed stage, step and category after a later success.
 Provider messages and URLs are omitted. These observations grant no weight or
 spending authority and do not replace fresh chain permission checks.
 
-`get_coding_private_v2_releases` reads native private-v2 registration digests and
-quarantine/retirement audit state through Platform's existing admin endpoint.
-It is distinct from the older `get_coding_catalog_releases` surface. A result
-from one cannot establish the state of the other. Its bounded `limit` defaults
-to 50 (maximum 100); `total` remains the full registry count, so an omitted row
-outside the returned window is not evidence of absence.
-
-The read tool strips unknown response fields, including nested ones, and exposes
-no full publication receipts, private source, storage coordinates, wrapped keys
-or credentials. The registered publication/probe/key digests are historical
-commitments, not fresh connectivity or custody checks. Registration remains
-non-selectable and weight-ineligible; it does not approve native execution, a
-canary or a rollout.
-
-`get_coding_control_plane` reads the contract-v1 catalog, native private-v2
-registry, safe feature-gate posture, and redacted native assignment progress
-together while preserving them as separate nested authorities. It is a bounded
-convenience read, not a new source of truth, process-liveness proof, or
-activation check.
-
-`get_coding_control_plane` reads that registry together with the distinct
-contract-v1 catalog in one bounded response. It keeps the two collections
-separate and does not infer provider, host, canary or rollout readiness from a
-stored registration.
-
-Write-scoped operators can use three exact private-v2 lifecycle tools:
-
-- `register_coding_private_v2_release` forwards a complete publication receipt,
-  registration authority, curator public key and confirmation to Platform for
-  full digest and Ed25519 verification. It never accepts a private key or
-  provider credential.
-- `quarantine_coding_private_v2_release` appends a quarantine event bound to the
-  exact registration digest.
-- `retire_coding_private_v2_release` appends the terminal retirement event while
-  preserving the registration and publication audit.
-
-The same control surface exposes the already implemented contract-v1 shadow
-launch boundary without pretending it activates private v2:
-
-- `reconcile_coding_shadow_artifact` prepares one exact qualified artifact and
-  future-height run. It does not issue tickets or execute work.
-- `issue_coding_shadow_ticket_set` issues one sorted, unique, fixed k=3 validator
-  set for an already-issued run. Validators still claim and execute their own
-  tickets.
-
-Both launch tools retain Platform's default-off feature gates, exact confirmation
-phrases, idempotent database authority and permanent `weight_eligible=false`.
-The MCP calls carry the signed-in operator email in `X-Admin-Actor`; no shared
-operator identity is used.
-
-Shadow admission score floors remain the existing append-only
-`get_core_qualification_policy` / `set_core_qualification_policy` controls.
-They determine qualification only; they never rewrite validator scores. Coding
-also reuses the existing screener-review, inference-admission, validator-slot and
-benchmark-rollout authorities instead of creating divergent copies.
-
 The MCP endpoint is a full OAuth 2.1 resource. `@cloudflare/workers-oauth-provider`
 owns `/authorize`, `/token`, and `/register`; discovery lives at
 `/.well-known/oauth-authorization-server/mcp` and `/.well-known/mcp/server.json`.
@@ -219,7 +259,7 @@ Three scopes, in ascending sensitivity:
 |---|---|
 | `backroom:read` | Every read. Required for any connection. |
 | `backroom:artifact:read` | Miner-submitted source and sensitive diagnostics: tarball URLs, file listings, source search, copy/lineage/baseline diffs, and sanitized private screening failure details. |
-| `backroom:write` | Mutations, including `set_burn_settings`, which moves TAO. |
+| `backroom:write` | Mutations, including `set_burn_settings`, which moves TAO, and `queue_treasury_manual_transfer`, which moves SN118 alpha. |
 
 Two independent gates apply to every privileged call. The grant must carry the
 scope, **and** the operator's account must still resolve to `write` through
@@ -294,6 +334,29 @@ local allowlist alone is not credential custody protection. An operator must
 separately approve and obtain the dedicated grant through ordinary browser
 consent. No desktop credential copying, mint/refresh helper, secret provisioning
 or observer activation is included.
+
+### Manual Gamma collector transfers
+
+`preview_treasury_manual_transfer` and `queue_treasury_manual_transfer` are the
+MCP form of the **Transfer once** panel under Emissions & treasury and call the
+same Platform routes with the signed-in operator as the audit actor. Both need
+`backroom:write`, because the panel's server functions need a write-level
+session.
+
+Preview takes `bucket_id`, exactly one of integer `amount_rao` or decimal
+`amount_alpha`, `retained_alpha_rao`, an 8-240 character `reason` and an
+optional `request_id` (generated when omitted). It returns Platform's envelope,
+`confirmation_digest`, `spending_authority: "not_queued"` and `confirmation`,
+the exact `TRANSFER <amount> ALPHA TO <BUCKET> <destination>` phrase the panel
+asks the operator to type. Nothing is queued, signed or moved.
+
+Queue is destructive: it queues a real on-chain transfer of SN118 alpha from the
+Gamma collector to that bucket's holding coldkey. Pass the preview's envelope
+and digest unchanged with that exact `confirmation`; any other text is refused
+before Platform is called, and Backroom supplies Platform's own wire
+confirmation. Custody re-verifies balances, reserve, destination and the
+previous claim before signing. One unresolved claim blocks another, and an
+unresolved request is never resent automatically.
 
 ## Bindings
 
@@ -428,11 +491,23 @@ once took eight 200-row pages and about 1.4 MB of JSON.
 
 ## The review queue
 
-`get_screening_review_queue` is the operator queue: unresolved `ath_reviews`
-rows, oldest hold first. It is **not** `list_screening_quarantines` — active
-quarantines are auto-resolved by the platform within milliseconds and that list
-is effectively always empty, which is what made the queue look empty when this
-tool pointed at it.
+`get_screening_review_queue` is the ATH operator queue: unresolved
+`ath_reviews` rows, oldest hold first. It is **not**
+`list_screening_quarantines`, which is the separate pre-score hold queue.
+Pointing this tool at the quarantine list made the ATH queue look empty.
+
+`list_screening_quarantines status=active` lists real operator holds:
+anti-cheat `quarantine` outcomes, the platform's `repeatedly-inconclusive`
+park, and reviewer-inconclusive screenings held for operator review (public
+reason "Screening was inconclusive; held for operator review"). Nothing
+resolves them automatically; settle each with `resolve_screening_quarantine`
+or `preview_screening_quarantine_batch` and
+`execute_screening_quarantine_batch` (`release`, `rescreen`, or `reject`).
+The evidence-only rows Platform writes next to an outcome that did not hold
+are recorded already resolved by `platform:deferred-source-review` and never
+appear as active. An inconclusive outcome whose reason code names a provider
+or transport fault is not held; it parks in `screening_failed` for
+`retry_failed_screening_now` (see `apps/platform/docs/screener-protocol.md`).
 
 Two platform parameters are deliberately not exposed. `status`, because a queue
 is unresolved work by definition. `generation`, because it filters on whether
@@ -463,7 +538,11 @@ Nothing releases automatically.
 
 ## Hotkey-level upload bans
 
-An ATH rejection bans one agent UUID. The separate `banned_hotkeys` gate is a
+An ATH rejection bans one agent UUID. A withdrawn rejection is reversed
+through the rulings court, not here: a `clear` ruling on that banned agent
+previews `["open","clear"]`, reopening the rejected review and restoring its
+pre-reject status with the reject kept in the history
+(`apps/platform/docs/ath-review-queue.md`). The separate `banned_hotkeys` gate is a
 rare miner-wide control that refuses every future upload from one hotkey. Use
 `list_hotkey_bans` to enumerate the active rows and retain the exact `hotkey`,
 stored `reason`, and `banned_at` timestamp.
@@ -518,6 +597,26 @@ artifact-fetch audit row per agent read (`admin.get_lineage_source_diff` or
 `admin.get_lineage_source_diff_file`, each tagged candidate or reference), so
 "who read this source" answers for the ancestor too.
 
+## Lineage-scoped review packets
+
+A same-hotkey resubmission (same agent name, a higher version) is screened
+against its prior version. At claim Platform names that prior version as the
+attempt's lineage parent; the worker then fetches one bound packet carrying the
+parent and earlier versions, every operator ruling on them, the parent's
+automated findings, and the bounded source diff from the parent. The model
+review always runs: `scope: diff` focuses it on the changed files and the open
+leads in the history, and `scope: full` names why the prior review could not
+carry (`build-surface-changed`, `diff-too-large`, `too-many-files-changed`,
+`opaque-file-changed`, `source-not-compared`, `parent-policy-differs`,
+`no-review-history`). History is context, never a verdict.
+
+`get_screening_submission` attempts carry `lineage_parent_agent_id`,
+`lineage_scope` and `lineage_packet_sha256`. A parent with a null scope means
+the worker never fetched the packet and reviewed in full.
+`get_screening_review_lineage(attemptId)` rebuilds the exact packet (artifact
+scope, audited as `admin.get_screening_review_lineage` for both agents) and
+answers 409 when the history has moved since the packet was bound.
+
 The source readers publish their agent ids as plain `format: uuid` rather than
 zod's long uuid regex, also for the byte budget. Each service function still
 parses its input with the strict uuid schema before calling Platform.
@@ -534,17 +633,21 @@ rehearsal funding only: fees and transfers are simulated, and no funds move.
 - `get_bounty_board`: each bounty's current terms, effective slot counts, claims
   pause, overdue reviews and recorded awards. Filter by `repo` and `issue`.
 - `get_bounty`: one bounty with everything public views hide: the reviewer in
-  force, each revision's operator and reason, every claim, appeal statements, and
-  a chronological `audit` of every operator record with its actor and reason.
-  Its `report` is a source-safe account of fees, awards, transfers, reviews and
-  appeals, with settlement checks that should all pass; the
+  force, each revision's operator and reason, every claim, appeal statements,
+  every `evaluation` record with its operator, and a chronological `audit` of
+  every operator record with its actor and reason. Its `report` is a
+  source-safe account of the bounty's fees, awards, transfers, reviews,
+  appeals, each accepted claim's delivery, integration and receipts, and the
+  current evaluation, with settlement checks that should all pass; the
   [operator runbook](../../../docs/bounty-operations.md#read-the-report)
   explains each field. Read it before a write and to verify one after.
 - `get_bounty_claim`: one claim's hold, receipts, submissions and decisions,
   appeals, obligations (with derived settlement state and transfers) and facts.
 - `get_bounty_queue`: `queue=reviews` lists submissions awaiting a decision,
   most overdue first; `queue=settlement` lists obligations still needing an
-  operator, with who approved the current round.
+  operator, with who approved the current round; `queue=appeals` lists
+  undecided appeals, the longest waiting first, each with its bounty, claim,
+  the event it appeals and the appellant's private statement.
 - `get_bounty_payout_policy`: the approval thresholds in force, or `null`. Pass
   `revision` to read that exact revision; a write's read-back uses it to find
   its own revision however many followed it.
@@ -559,7 +662,7 @@ rehearsal funding only: fees and transfers are simulated, and no funds move.
 | `set_bounty_claims_paused` | pause or resume new holds; paid holds still complete |
 | `review_bounty_submission` | the reviewer in force decides one exact submission |
 | `reassign_bounty_reviewer` | a new reviewer; overdue reviews get one more window |
-| `control_bounty_slot` | cancel (refunds a paid fee) or reopen (retains a final one) |
+| `control_bounty_slot` | cancel (refunds a paid fee) or reopen (retains a final one; a rejected or expired slot after its 3-day appeal window) |
 | `decide_bounty_appeal` | uphold (fresh delivery window) or deny; never by its reviewer |
 | `award_bounty_claim` | an award on accepted work, within the pool its claim signed |
 | `set_bounty_payout_policy` | a new revision of the approval thresholds |
@@ -567,11 +670,14 @@ rehearsal funding only: fees and transfers are simulated, and no funds move.
 | `dispatch_bounty_obligation` | one dispatch of an approved round |
 | `reconcile_bounty_transfer` | the settled outcome of a dispatched or uncertain transfer |
 | `record_bounty_fact` | a public merge, deployment or adoption fact |
+| `record_bounty_evaluation` | an estimate or actual of one evaluation metric, superseding the entry `expectedEntryId` names |
+| `decide_bounty_evaluation` | expand, revise or stop the pilot, with integration status and reasons, superseding `expectedDecisionId` |
 
 Every write follows the outcome rule below (`src/server/platform-write.ts`).
 Each read-back recognises the exact record its write creates (your revision,
-review, award, approval, transfer round, fact, or your audit entry), so an
-unknown outcome is safe to retry with the same input. Never resend a dispatch
+review, award, approval, transfer round, fact, the evaluation record after the
+one you named, or your audit entry), so an unknown outcome is safe to retry
+with the same input. Never resend a dispatch
 whose transfer is recorded: reconcile it. Money moves only through approved,
 dispatched transfers; awards, refunds and facts record facts and move nothing.
 An award's approval and dispatch are refused with `payout held` while the claim
@@ -647,3 +753,19 @@ original proof, current blocker, confirmation and any operator recovery audit.
 history, preserves the miner's original signature, and frees the account for a
 fresh OAuth-verified link. Stale targets cannot revoke a replacement link.
 Revocation does not change payments or previously accepted submissions.
+
+Manual source approval of a parked `screening_failed` submission uses the existing
+`preview_screening_quarantine_batch` / `execute_screening_quarantine_batch` flow:
+select its latest resolved `rescreen` quarantine, `resolution: release`, and supply
+`expectedAttemptId` and `expectedScoreCount` from its current quarantine context
+(`agent.score_count`). Agent UUID and artifact SHA guards remain mandatory. Preview
+and the locked write share the same checks: the quarantine belongs to the latest
+failed/expired attempt for the artifact, its start time is unambiguous, counts
+match, and no pending retry grant, screening, source
+review or image/runtime build is active. The actor-bound preview signs both new
+guards. Approval appends a manual release ruling and preserves failed attempts,
+prior resolutions, scores and dataset pins. It enters ordinary build, health and
+validation gates without rerunning deep source review or granting a paid retry.
+The review console exposes this release action on the resolved quarantine when its
+submission is still `screening_failed`; older Platform contexts without score
+counts fail closed. Inconclusive reviews alone do not establish a policy violation.

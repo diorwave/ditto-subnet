@@ -771,6 +771,12 @@
               "shadow"
             ],
             "type": "string"
+          },
+          "sandbox_memory_limit_mib": {
+            "default": 6144,
+            "maximum": 32768,
+            "minimum": 512,
+            "type": "integer"
           }
         },
         "type": "object"
@@ -7853,6 +7859,10 @@
             "default": false,
             "type": "boolean"
           },
+          "generator_rounds": {
+            "default": false,
+            "type": "boolean"
+          },
           "observed_at": {
             "anyOf": [
               {
@@ -8172,6 +8182,10 @@
             "type": "boolean"
           },
           "sandbox_egress_restricted": {
+            "type": "boolean"
+          },
+          "sandbox_memory_limit": {
+            "default": false,
             "type": "boolean"
           },
           "scorer_benchmarks": {

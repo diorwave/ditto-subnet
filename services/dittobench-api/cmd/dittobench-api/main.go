@@ -176,9 +176,14 @@ type server struct {
 	sandbox sandbox.Sandbox
 	// allowPrivate relaxes caller-supplied URL checks for local development.
 	// Validator-owned loopback sandboxes use a separate trusted client.
-	allowPrivate           bool
-	allowScreenedImages    bool
-	allowPrivateDatasets   bool
+	allowPrivate         bool
+	allowScreenedImages  bool
+	allowPrivateDatasets bool
+	// allowGeneratorRounds admits generator-round-v1 runs. It follows the
+	// trusted screened-image mode every validator stack sets, not the
+	// private V13 transport: a round run is a screened-image run whose
+	// tickets only Platform issues, and only while validator rounds are on.
+	allowGeneratorRounds   bool
 	requireTicketInference bool
 	softwareVersion        string
 	sourceRevision         string
@@ -286,6 +291,7 @@ func main() {
 		allowPrivate:           allowPrivate,
 		allowScreenedImages:    allowScreenedImages,
 		allowPrivateDatasets:   envBool("DITTOBENCH_ALLOW_PRIVATE_DATASETS"),
+		allowGeneratorRounds:   allowScreenedImages,
 		requireTicketInference: requireTicketInference,
 		softwareVersion:        identity.SoftwareVersion,
 		sourceRevision:         identity.SourceRevision,
@@ -773,6 +779,23 @@ type benchmarkRuntimeSettings struct {
 	RelayDelayFingerprintMode  delayFingerprintMode `json:"relay_delay_fingerprint_mode"`
 	RelayDelayFingerprintMinMS int                  `json:"relay_delay_fingerprint_min_ms"`
 	RelayDelayFingerprintMaxMS int                  `json:"relay_delay_fingerprint_max_ms"`
+	// SandboxMemoryLimitMiB is the Platform-issued harness memory cap. Zero
+	// means an older Platform issued none and the host default applies.
+	SandboxMemoryLimitMiB int `json:"sandbox_memory_limit_mib,omitempty"`
+}
+
+const (
+	minSandboxMemoryLimitMiB = 512
+	maxSandboxMemoryLimitMiB = 32768
+)
+
+// sandboxContext applies the ticket's memory cap to the harness started with
+// the returned context.
+func (r *benchmarkRuntimeSettings) sandboxContext(ctx context.Context) context.Context {
+	if r == nil {
+		return ctx
+	}
+	return sandbox.WithMemoryLimitMiB(ctx, r.SandboxMemoryLimitMiB)
 }
 
 func (r *benchmarkRuntimeSettings) validate(benchVersion int) error {
@@ -793,6 +816,14 @@ func (r *benchmarkRuntimeSettings) validate(benchVersion int) error {
 		r.RelayDelayFingerprintMinMS > r.RelayDelayFingerprintMaxMS ||
 		r.RelayDelayFingerprintMaxMS > 5000 {
 		return fmt.Errorf("benchmark_runtime relay delay range must satisfy 0 <= min <= max <= 5000")
+	}
+	if r.SandboxMemoryLimitMiB != 0 &&
+		(r.SandboxMemoryLimitMiB < minSandboxMemoryLimitMiB ||
+			r.SandboxMemoryLimitMiB > maxSandboxMemoryLimitMiB) {
+		return fmt.Errorf(
+			"benchmark_runtime.sandbox_memory_limit_mib must be between %d and %d",
+			minSandboxMemoryLimitMiB, maxSandboxMemoryLimitMiB,
+		)
 	}
 	return nil
 }
@@ -921,10 +952,18 @@ func sandboxStartInfraFailure(err error) *store.Failure {
 		(strings.Contains(msg, "unable to find image") ||
 			strings.Contains(msg, "no such image") ||
 			strings.Contains(msg, "pull access denied for dittobench-sub")) {
+		// The request-scoped tag is the screened image as this host holds it,
+		// so report the fleet-recognized screened_image_unavailable code and
+		// keep the precise cause in diagnostics. Validators that predate a
+		// dedicated code reject it as unknown and charge the miner for a tag
+		// this host lost (ditto-subnet#2959).
 		return &store.Failure{
 			Kind:      "validator_infrastructure",
-			Code:      "sandbox_image_unavailable",
+			Code:      "screened_image_unavailable",
 			Retryable: true,
+			Diagnostics: map[string]any{
+				"sandbox_cause": "request_image_tag_missing",
+			},
 		}
 	}
 	if !strings.Contains(msg, "network") || !strings.Contains(msg, "not found") {
@@ -1128,8 +1167,8 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	var req submitRequest
 	bodyLimit := int64(maxSubmitBody)
-	if s.allowPrivateDatasets {
-		bodyLimit += (gen.MaxPrivateArtifactBytes + 2) / 3 * 4
+	if extra := s.privateBodyBytes(); extra > 0 {
+		bodyLimit += int64((extra + 2) / 3 * 4)
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1142,7 +1181,7 @@ func (s *server) handleScoreRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.BenchVersion = version
-	if err := validatePrivateDatasetRequest(req, s.allowPrivateDatasets); err != nil {
+	if err := validatePrivateDatasetRequest(req, s.allowPrivateDatasets, s.allowGeneratorRounds); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1340,7 +1379,12 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 		writeError(w, http.StatusConflict, "ticket inference runtime policy is unavailable")
 		return
 	}
-	s.store.Create(runID, "run_size", store.StatusQueued, seed, prof.Tools+prof.Mem)
+	cases := prof.Tools + prof.Mem
+	if req.PrivateDatasetMode == generatorRoundMode {
+		// A round run's size is its dataset's, set once the job decodes it.
+		cases = 0
+	}
+	s.store.Create(runID, "run_size", store.StatusQueued, seed, cases)
 	s.store.SetRunSize(runID, req.RunSize)
 	s.store.SetBenchVersion(runID, req.BenchVersion)
 	log.Printf("run %s: run_size=%s bench_version=%d seed=%d tools=%d mem=%d",
@@ -1348,7 +1392,11 @@ func (s *server) submitRunSize(w http.ResponseWriter, r *http.Request, req submi
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.registerRunCancel(runID, cancel)
-	go s.runSizeJob(runCtx, runID, req, prof, seed)
+	if req.PrivateDatasetMode == generatorRoundMode {
+		go s.runGeneratorRoundJob(runCtx, runID, req, seed)
+	} else {
+		go s.runSizeJob(runCtx, runID, req, prof, seed)
+	}
 
 	writeJSON(w, http.StatusAccepted, acceptedResponse{
 		RunID:        runID,
@@ -1672,7 +1720,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 			s.broker.setHarnessBase(inferenceSessionID, env["DITTOBENCH_INFERENCE_BASE_URL"])
 		}
 		harnessInferenceGateway = env["DITTOBENCH_INFERENCE_BASE_URL"]
-		handle, runErr = s.sandbox.Run(ctx, image, env)
+		handle, runErr = s.sandbox.Run(req.BenchmarkRuntime.sandboxContext(ctx), image, env)
 		if runErr != nil {
 			if sourceCapability != "" {
 				_ = s.broker.revokeSourceCapability(inferenceSessionID, runID, sourceCapability)
@@ -1815,7 +1863,7 @@ func (s *server) runSizeJob(ctx context.Context, runID string, req submitRequest
 				s.store.Fail(runID, "compatibility inference capability is unavailable")
 				return
 			}
-			replacement, err := s.sandbox.Run(ctx, image, compatEnv)
+			replacement, err := s.sandbox.Run(req.BenchmarkRuntime.sandboxContext(ctx), image, compatEnv)
 			if err != nil {
 				_ = s.broker.revokeSourceCapability(inferenceSessionID, runID, sourceCapability)
 				sourceCapability = ""
@@ -2653,6 +2701,20 @@ func (s *server) finishSandboxRun(runID string, handle *sandbox.Handle) {
 			log.Printf(
 				"run %s validator infrastructure failure code=%s oom=%t exit=%d",
 				runID, code, diagnostics.OOMKilled, diagnostics.ExitCode,
+			)
+		} else if sigill, evidence := sandbox.StartupIllegalInstruction(diagnostics.ExitCode, logTail); job.Failure == nil &&
+			strings.Contains(job.Error, "harness never became healthy") && sigill {
+			// The harness died on an instruction this host's CPU lacks before it
+			// ever served. The same screened image starts on other validators, so
+			// this is the host's envelope, not the agent's attempt.
+			failure.Kind = "validator_infrastructure"
+			failure.Code = "sandbox_cpu_unsupported"
+			failure.Retryable = true
+			failure.Diagnostics["illegal_instruction_evidence"] = evidence
+			message = "validator host CPU cannot execute the screened harness"
+			log.Printf(
+				"run %s validator infrastructure failure code=%s evidence=%s exit=%d",
+				runID, failure.Code, evidence, diagnostics.ExitCode,
 			)
 		} else if prior := job.Failure; prior != nil && prior.Kind != "" {
 			// The scored path already reached a verdict. Keep it, and keep the

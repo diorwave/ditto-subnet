@@ -131,6 +131,10 @@ type gradingPolicy struct {
 	// v13 claim-span provenance gate can check it. It changes no score: v13
 	// grades byte-identically to v12 and only reports which span won.
 	claimProvenance bool
+	// claimValuesAreNotCorrections (v14) keeps a sentence that is exactly a
+	// reviewed claim value ("Safe. Sorry.") from reading as a correction cue
+	// that retracts the sentence before it (#2769).
+	claimValuesAreNotCorrections bool
 	// foldTypographicHyphens (v14) folds U+2010 HYPHEN and U+2011 NON-BREAKING
 	// HYPHEN in the reply text to the ASCII hyphen before grading (#2734). The
 	// pinned model writes U+2011 inside most identifiers and compounds it
@@ -143,14 +147,15 @@ func gradingPolicyForVersion(benchVersion int) gradingPolicy {
 	switch {
 	case benchVersion >= protocol.BenchVersionV14:
 		return gradingPolicy{
-			strictGenericKinds:      true,
-			authoritativeAnswerSlot: true,
-			rejectQuestionEcho:      true,
-			chitchatCredit:          0.5,
-			distractorScanSlotOnly:  true,
-			typedClaims:             true,
-			claimProvenance:         true,
-			foldTypographicHyphens:  true,
+			strictGenericKinds:           true,
+			authoritativeAnswerSlot:      true,
+			rejectQuestionEcho:           true,
+			chitchatCredit:               0.5,
+			distractorScanSlotOnly:       true,
+			typedClaims:                  true,
+			claimProvenance:              true,
+			claimValuesAreNotCorrections: true,
+			foldTypographicHyphens:       true,
 		}
 	case benchVersion >= protocol.BenchVersionV13:
 		return gradingPolicy{

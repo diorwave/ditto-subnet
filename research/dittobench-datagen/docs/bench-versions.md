@@ -1104,15 +1104,20 @@ V14 counts those cases in the memory over-call denominator and exempts only
 reads and no-call baselines remain unpenalized. Unrelated and mixed actions
 count once per case. Legacy lifecycle-write cases stay excluded at all versions.
 
+V14 also owns grading policy floor 14 with one claim-set correction. A sentence
+that is wholly one of the case's own claim values no longer retracts the
+sentence before it when that value is also a correction cue: the published
+`world-story-lesson-claims` answer `safe; sorry` scores 0.5 at v13 and 1 at v14.
+A cue sentence carrying anything beyond the value is still a correction.
+
 V14 also folds the typographic hyphens U+2010 and U+2011 in the reply text
 (answer slot and `final_text`) to the ASCII hyphen before grading, on the
 memory axis and on the text-graded tool cases (restraint, effect reads)
 (#2734). The pinned model writes U+2011 inside most identifiers and compounds
 it copies from an ASCII record, so V13 misses `VK‑48HJXP6A63` for
-`VK-48HJXP6A63`. The fold is a new grading-policy floor with its own audit
-bank (`v14-1`: the v13-1 bank plus hyphen positives and negatives); it also
-catches a forbidden or distractor value written with those hyphens. V13 keeps
-the unfolded match.
+`VK-48HJXP6A63`. The fold also catches a forbidden or distractor value
+written with those hyphens. V13 keeps the unfolded match. The v14 audit bank
+(`v14-1`) extends `v13-1` with positives and negatives for both changes.
 
 The rest of the v14 scorer reads the reply the same way. The claim-span
 provenance gate keeps the published `NormalizeSpan` unchanged; that normaliser
