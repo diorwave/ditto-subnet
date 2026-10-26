@@ -226,6 +226,10 @@ type ChainConfig struct {
 	DevAllowUnpermittedValidator bool
 }
 
+// NetuidInt32 is NETUID as a Postgres int4. Load rejects any value outside
+// [0, 2147483647], so the conversion never truncates.
+func (c ChainConfig) NetuidInt32() int32 { return int32(c.Netuid) }
+
 // InferenceProxyConfig mirrors the Python InferenceProxyConfig (section 10 of
 // the DB contract / section 9 of the API contract). All limits validated with
 // the same bounds; non-numeric numerics fail boot.
@@ -251,14 +255,26 @@ type InferenceProxyConfig struct {
 	TicketConcurrency    int // DB-policy fallback default 16
 	ValidatorConcurrency int // DB-policy fallback default 48
 	GlobalConcurrency    int // DB-policy fallback default 96, cap 128
-	TicketRPM            int // DITTO_INFERENCE_TICKET_RPM, default 240
-	ValidatorRPM         int // DITTO_INFERENCE_VALIDATOR_RPM, default 960
-	GlobalRPM            int // DITTO_INFERENCE_GLOBAL_RPM, default 2880, cap 100000
+	TicketRPM            int // DITTO_INFERENCE_TICKET_RPM, default 1920
+	ValidatorRPM         int // DITTO_INFERENCE_VALIDATOR_RPM, default 7680
+	GlobalRPM            int // DITTO_INFERENCE_GLOBAL_RPM, default 23040, cap 100000
 
 	RequestBodyBytes  int64 // DITTO_INFERENCE_REQUEST_BODY_BYTES, default 4 MiB, max 8 MiB
 	ResponseBodyBytes int64 // DITTO_INFERENCE_RESPONSE_BODY_BYTES, default 2 MiB, max 8 MiB
 	TimeoutSeconds    int   // DITTO_INFERENCE_TIMEOUT_SECONDS, default 90, range [1,120]
 	MaxOutputTokens   int   // DITTO_INFERENCE_MAX_OUTPUT_TOKENS, default 32768, max 65536
+
+	// ConfirmationBackpressureRetry lets a confirmation lane re-dispatch a
+	// provably receipt-free provider rejection once, instead of parking the
+	// whole bundle for an operator retry.
+	//
+	// It is default-off and deliberately a gate rather than a fix: the
+	// confirmation lane is single-shot by design, because re-dispatching a
+	// frozen scored request changes what the shadow evidence attests. The
+	// retry cannot duplicate provider work or billing -- that is enforced by
+	// the receipt-free proof -- but whether a scored run may silently absorb a
+	// provider 429 at all is an owner decision, not a relay default.
+	ConfirmationBackpressureRetry bool
 
 	// Coding inference is a separate, shadow-only capability. It never
 	// inherits ordinary aggregate routing merely because the normal proxy is
@@ -437,6 +453,9 @@ func Load(lookup Lookup) (*Config, error) {
 		IdentityToken:                r.str("PYLON_IDENTITY_TOKEN", ""),
 		DevAllowUnpermittedValidator: r.boolval("DITTO_DEV_ALLOW_UNPERMITTED_VALIDATOR", false),
 	}
+	if cfg.Chain.Netuid < 0 || cfg.Chain.Netuid > 2147483647 {
+		r.fail("NETUID must be between 0 and 2147483647, got %d", cfg.Chain.Netuid)
+	}
 	if (cfg.Chain.IdentityName == "") != (cfg.Chain.IdentityToken == "") {
 		r.fail("PYLON_IDENTITY_NAME and PYLON_IDENTITY_TOKEN must be provided together")
 	}
@@ -545,14 +564,16 @@ func loadInferenceProxy(r *envReader) InferenceProxyConfig {
 		TicketConcurrency:    16,
 		ValidatorConcurrency: 48,
 		GlobalConcurrency:    96,
-		TicketRPM:            r.intval("DITTO_INFERENCE_TICKET_RPM", 240),
-		ValidatorRPM:         r.intval("DITTO_INFERENCE_VALIDATOR_RPM", 960),
-		GlobalRPM:            r.intval("DITTO_INFERENCE_GLOBAL_RPM", 2880),
+		TicketRPM:            r.intval("DITTO_INFERENCE_TICKET_RPM", 1920),
+		ValidatorRPM:         r.intval("DITTO_INFERENCE_VALIDATOR_RPM", 7680),
+		GlobalRPM:            r.intval("DITTO_INFERENCE_GLOBAL_RPM", 23040),
 
 		RequestBodyBytes:  r.int64val("DITTO_INFERENCE_REQUEST_BODY_BYTES", 4*1024*1024),
 		ResponseBodyBytes: r.int64val("DITTO_INFERENCE_RESPONSE_BODY_BYTES", 2*1024*1024),
 		TimeoutSeconds:    r.intval("DITTO_INFERENCE_TIMEOUT_SECONDS", 90),
 		MaxOutputTokens:   r.intval("DITTO_INFERENCE_MAX_OUTPUT_TOKENS", 32768),
+
+		ConfirmationBackpressureRetry: r.boolval("DITTO_CONFIRMATION_BACKPRESSURE_RETRY", false),
 
 		CodingEnabled: r.boolval("DITTO_CODING_INFERENCE_ENABLED", false),
 		CodingAccountGuardrail: r.str(

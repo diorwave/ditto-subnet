@@ -51,7 +51,7 @@ def test_sandbox_image_pins_compatible_rootful_dind_and_installs_guard_tools() -
 
     assert dockerfile.startswith(
         "FROM docker.io/library/docker:29-dind@"
-        "sha256:66d292e5c26bd33a6f6f61cacb880de2186339a524ecba1ce098dbbaceed6515"
+        "sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977"
     )
     assert "RUN apk add --no-cache curl socat" in dockerfile
 
@@ -182,6 +182,27 @@ def test_inference_control_plane_shares_one_self_supplied_token() -> None:
     assert scorer.startswith("${DITTOBENCH_BROKER_CONTROL_TOKEN:-")
     assert scorer.endswith("}")
     assert len(scorer.removeprefix("${DITTOBENCH_BROKER_CONTROL_TOKEN:-")[:-1]) >= 16
+
+
+def test_scorer_control_auth_mode_is_operator_settable_and_defaults_to_shadow() -> None:
+    """Operators must be able to turn on control-plane enforcement from .env.
+
+    dittobench-api reads ``DITTOBENCH_CONTROL_AUTH_MODE``; without a Compose
+    passthrough an ``.env`` value never reaches the container, so ``enforce``
+    was unreachable on a stock stack. The shipped default stays ``shadow``:
+    flipping it is a separate rollout decision, and enforce treats the
+    published default token as unset.
+    """
+    compose = yaml.safe_load(COMPOSE_PATH.read_text())
+    scorer = compose["services"]["dittobench-api"]["environment"]
+    validator = compose["services"]["ditto-subnet"]["environment"]
+    mode = scorer["DITTOBENCH_CONTROL_AUTH_MODE"]
+
+    assert mode.startswith("${DITTOBENCH_CONTROL_AUTH_MODE:-")
+    assert _compose_default(mode) == "shadow"
+    # The posture is a scorer knob; the validator only presents the token.
+    assert "DITTOBENCH_CONTROL_AUTH_MODE" not in validator
+    assert "# DITTOBENCH_CONTROL_AUTH_MODE=shadow\n" in ENV_EXAMPLE_PATH.read_text()
 
 
 def test_scorer_allows_only_verified_screened_image_downloads() -> None:

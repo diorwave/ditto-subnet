@@ -102,7 +102,9 @@ from ditto.api_models.stack_health import (
     validator_stack_health_signing_token,
 )
 from ditto.api_models.system_health import (
+    HostSpecs,
     SystemMetrics,
+    host_specs_signing_token,
     system_metrics_signing_token,
 )
 from ditto.api_models.ticket_status import TicketPurpose, TicketStatus
@@ -157,7 +159,7 @@ from ditto.api_server.crn import (
     bounded_continual_seed_set,
     fold_seed_bound,
 )
-from ditto.api_server.datapipeline import DatasetGenerator
+from ditto.api_server.datapipeline import DataPipelineError, DatasetGenerator
 from ditto.api_server.deferred_source_review import (
     DEFERRED_MECHANICAL_REASON,
     DEFERRED_REVIEW_KIND,
@@ -185,6 +187,10 @@ from ditto.api_server.efficiency import (
 from ditto.api_server.endpoints.retrieval import AgentNotFoundError
 from ditto.api_server.fingerprint import reference_corpus_provenance
 from ditto.api_server.gate_evidence import build_gate_evidence, persisted_case_dump
+from ditto.api_server.generator_round_reservation import (
+    round_reservation_active,
+    validator_advertises_rounds,
+)
 from ditto.api_server.inference_concurrency_settings import resolved_proxy_config
 from ditto.api_server.inference_routing import record_ticket_route_quality
 from ditto.api_server.koth import (
@@ -198,14 +204,17 @@ from ditto.api_server.koth import (
     top5_round_is_due,
 )
 from ditto.api_server.model_use import evaluate_model_use, model_use_policy
-from ditto.api_server.onchain_seed import derive_validator_seed
+from ditto.api_server.onchain_seed import derive_seed, derive_validator_seed
 from ditto.api_server.outlier_escalation import (
     OUTLIER_ALGORITHM_VERSION,
+    OUTLIER_AXIS_EVIDENCE_KIND,
     OUTLIER_REVIEW_KIND,
+    AxisObservation,
     OutlierEscalationSettings,
     OutlierEscalationSettingsLoad,
     evaluate_score_outlier,
     load_outlier_escalation_settings,
+    public_audit_evidence,
 )
 from ditto.api_server.private_benchmark_preparation import lease_dataset_sha
 from ditto.api_server.queue_policy_settings import (
@@ -231,6 +240,7 @@ from ditto.api_server.validator_slot_settings import (
 from ditto.api_server.validator_slot_settings import (
     HostResourceSample,
     allowed_slot_count,
+    reserved_round_slots,
     resolve_slot_settings,
     validator_issuance_paused,
 )
@@ -295,7 +305,6 @@ from ditto.db.queries.confirmation_scores import (
     confirmation_composites_by_seed,
     fold_eligible_seeds_by_agent,
 )
-from ditto.db.queries.core_qualification import observe_core_qualification
 from ditto.db.queries.desired_era_backlog import desired_era_work_outstanding
 from ditto.db.queries.heartbeats import (
     HeartbeatProgressRegressionError,
@@ -367,6 +376,7 @@ from ditto.db.queries.transcript_mirror_settings import transcript_mirror_enable
 from ditto.db.queries.validator_auth import (
     ValidatorRequestReplayError,
     consume_validator_nonce,
+    nonce_expires_at,
 )
 from ditto.db.queries.weight_receipts import (
     WeightReceiptConflict,
@@ -1127,6 +1137,7 @@ async def _evaluate_and_record_outlier_escalation(
     cohort: Sequence[float],
     settings: OutlierEscalationSettings,
     now: datetime,
+    axes: Mapping[str, AxisObservation] | None = None,
 ) -> None:
     """Escalate an out-of-band composite to ATH review (issue #476).
 
@@ -1144,6 +1155,22 @@ async def _evaluate_and_record_outlier_escalation(
     opens the hold. Bench-version scoped so v8-v11 are untouched, and gated on
     ``SCORED`` so a copy / transform-audit hold that already fired this
     transition wins outright (this path never re-holds an already-held agent).
+
+    ``axes`` adds per-axis robust-z evidence to every recorded entry. A
+    per-axis outlier that does not hold under the policy (per-axis
+    enforcement off, or the composite below the floor) is appended as
+    ``OUTLIER_AXIS_EVIDENCE_KIND`` evidence only -- never a hold, never a
+    would-be hold -- in both ``observe`` and ``enforce`` mode.
+
+    The audit chain is public, so its entries carry only the neutral per-axis
+    projection (:func:`public_audit_evidence`: axis name + outlier flag). The
+    full per-axis statistics (value, cohort median/MAD, modified z) are kept
+    only on the private ``ath_reviews`` snapshot, which exists only when an
+    ``enforce`` hold opens. An ``observe`` would-be hold and every
+    ``OUTLIER_AXIS_EVIDENCE_KIND`` entry persist ``{axis, outlier}`` and
+    nothing more, so observe mode records which axes were out of band, not
+    their per-axis z distribution. To see the statistics before enforcing,
+    replay the ledger with the dry-run endpoint (``per_axis_enforce=true``).
     """
     if settings.mode == "off":
         return
@@ -1155,9 +1182,32 @@ async def _evaluate_and_record_outlier_escalation(
         return
 
     decision = evaluate_score_outlier(
-        composite=composite, cohort=cohort, settings=settings
+        composite=composite, cohort=cohort, settings=settings, axes=axes
     )
     if not decision.held:
+        if decision.axis_outliers:
+            # A single axis far out of band while the policy holds nothing:
+            # observe-only evidence on its own audit kind, so the would-be-hold
+            # and hold counts stay exactly the composite policy's.
+            await append_audit_entry(
+                session,
+                agent_id=agent.agent_id,
+                validator_hotkey=None,
+                event=EVENT_AUDIT,
+                payload={
+                    "audit_kind": OUTLIER_AXIS_EVIDENCE_KIND,
+                    "enforced": False,
+                    "qualified": False,
+                    "bench_version": bench_version,
+                    "evidence": public_audit_evidence(decision.evidence),
+                },
+                recorded_at=now,
+            )
+            logger.info(
+                "agent %s: per-axis out-of-band score recorded as evidence: %s",
+                agent.agent_id,
+                ",".join(decision.axis_outliers),
+            )
         # In-band, below the floor, or an insufficient cohort. Rank normally and
         # leave no hold; the "why not" lives in the decision evidence, which is
         # only persisted when a would-be hold fires (below), matching the other
@@ -1179,7 +1229,7 @@ async def _evaluate_and_record_outlier_escalation(
                 "enforced": False,
                 "qualified": True,
                 "bench_version": bench_version,
-                "evidence": decision.evidence,
+                "evidence": public_audit_evidence(decision.evidence),
             },
             recorded_at=now,
         )
@@ -1230,7 +1280,7 @@ async def _evaluate_and_record_outlier_escalation(
             "enforced": True,
             "qualified": True,
             "bench_version": bench_version,
-            "evidence": decision.evidence,
+            "evidence": public_audit_evidence(decision.evidence),
         },
         recorded_at=now,
     )
@@ -1348,6 +1398,64 @@ async def _held_lease_slots(
     )
 
 
+@dataclass(frozen=True)
+class _LiveSlotLeases:
+    """One validator's live leases, split by whether they are round work."""
+
+    slots: frozenset[str]
+    """Every slot holding a live lease, whatever its purpose."""
+
+    non_round_slots: frozenset[str]
+    """Slots holding a live lease that is not generator-round work: what the
+    round reservation charges against ``allowed - reserved``."""
+
+
+async def _live_slot_leases(
+    session: AsyncSession, *, validator_hotkey: str, now: datetime
+) -> _LiveSlotLeases:
+    """Live leases by slot and purpose, read like :func:`_held_lease_slots`."""
+    rows = (
+        await session.execute(
+            select(ValidatorTicket.slot_id, ValidatorTicket.purpose).where(
+                ValidatorTicket.validator_hotkey == validator_hotkey,
+                ValidatorTicket.status == TicketStatus.ISSUED,
+                ValidatorTicket.deadline > now,
+            )
+        )
+    ).all()
+    return _LiveSlotLeases(
+        slots=frozenset(slot for slot, _ in rows),
+        non_round_slots=frozenset(
+            slot for slot, purpose in rows if purpose != TicketPurpose.GENERATOR_ROUND
+        ),
+    )
+
+
+def _round_reservation_declines(
+    *,
+    slot_id: str,
+    slot_running_benchmark: bool,
+    allowed_slots: int,
+    reserved_slots: int,
+    non_round_slots: Collection[str],
+) -> bool:
+    """Whether a NEW non-round lease on ``slot_id`` would eat a round slot.
+
+    Non-round work (canonical, continual retest, canary) may hold at most
+    ``allowed - reserved`` leases at once; the remaining ``reserved`` slots are
+    kept for generator-round panel runs so continual retests and the canonical
+    queue can never starve a round. ``slot_id`` is excluded from the count and a
+    slot already running a benchmark is exempt, for the same resume reasons as
+    :func:`_slot_cap_declines`.
+    """
+    if slot_running_benchmark or reserved_slots <= 0:
+        return False
+    return (
+        len({held for held in non_round_slots if held != slot_id})
+        >= allowed_slots - reserved_slots
+    )
+
+
 def _inference_stage_slot_cap(config: InferenceProxyConfig) -> int:
     """Maximum concurrent post-v7 leases one validator may seed safely.
 
@@ -1445,6 +1553,7 @@ def _slot_cap_decline_reason(
     advertised_slots: int,
     sample: HostResourceSample | None = None,
     disk_percent: int | None = None,
+    validator_hotkey: str | None = None,
 ) -> DispatchDeclineReason:
     """Name the lever behind a :func:`_slot_cap_declines` refusal.
 
@@ -1472,12 +1581,14 @@ def _slot_cap_decline_reason(
         settings,
         advertised_slots=advertised_slots,
         sample=HostResourceSample(),
+        validator_hotkey=validator_hotkey,
     )
     if (
         allowed_slot_count(
             settings,
             advertised_slots=advertised_slots,
             sample=observed,
+            validator_hotkey=validator_hotkey,
         )
         < unrestricted
     ):
@@ -1515,6 +1626,8 @@ async def _idle_retest_slot(
     slot_settings: ValidatorSlotSettings,
     validator_hotkey: str,
     now: datetime,
+    lane: Literal["round", "non_round"],
+    round_reservation_active: bool,
     requested_slot_id: str | None = None,
 ) -> str | None:
     """Pick a slot a continual retest may occupy, or None when there is none.
@@ -1545,21 +1658,46 @@ async def _idle_retest_slot(
     Returns the lowest free healthy slot for determinism -- the caller's
     fairness ordering is over cohort members, not slots, so there is nothing to
     gain by spreading and a stable choice is easier to reason about.
+
+    ``lane`` decides how the generator-round reservation applies. A
+    ``non_round`` lease (continual retest, confirmation) is refused once this
+    validator's live non-round leases reach ``allowed - reserved``; a ``round``
+    lease may take any free slot below ``allowed``, the reserved ones included.
+    ``round_reservation_active`` is the competition gate: with rounds disabled
+    nothing is reserved. A paused validator receives no new lease on either
+    lane; callers resume an existing lease without coming through here.
     """
     if heartbeat is None:
+        return None
+    if validator_issuance_paused(slot_settings, validator_hotkey=validator_hotkey):
         return None
     try:
         capacity = BenchmarkCapacity.model_validate(heartbeat.benchmark_capacity)
     except ValidationError:
         capacity = None
-    held = await _held_lease_slots(session, validator_hotkey=validator_hotkey, now=now)
+    leases = await _live_slot_leases(
+        session, validator_hotkey=validator_hotkey, now=now
+    )
+    held = leases.slots
     allowed = allowed_slot_count(
         slot_settings,
         advertised_slots=(capacity.configured_slots if capacity is not None else 1),
         sample=_heartbeat_resource_sample(heartbeat),
+        validator_hotkey=validator_hotkey,
     )
     if len(held) >= allowed:
         return None
+    if lane == "non_round":
+        reserved = reserved_round_slots(
+            slot_settings,
+            validator_hotkey=validator_hotkey,
+            allowed_slots=allowed,
+            rounds_active=(
+                round_reservation_active and validator_advertises_rounds(heartbeat)
+            ),
+        )
+        if len(leases.non_round_slots) >= allowed - reserved:
+            return None
     offered = capacity.free_healthy_slots if capacity is not None else ("slot-0",)
     free = [slot for slot in offered if slot not in held]
     if not free:
@@ -1682,6 +1820,9 @@ async def _issue_source_backfill_ticket(
     # Defaults to the conservative policy so an omitted cap narrows the
     # backfill budget rather than widening it.
     slot_settings: ValidatorSlotSettings = SLOT_SETTINGS_DEFAULT,
+    # Whether each validator's generator-round slots are held back now. Those
+    # slots never take canonical work, so they are not desired-era capacity.
+    round_reservation_active: bool = False,
     carryover_settings: PrevGenCarryoverSettings = PREV_GEN_CARRYOVER_DEFAULTS,
     owner_concurrent_submission_limit: int = OWNER_CONCURRENT_SUBMISSION_LIMIT_DEFAULT,
     similarity_policy: SimilarityBudgetPolicy | None = None,
@@ -1846,14 +1987,23 @@ async def _issue_source_backfill_ticket(
             # can be raised without a release; counting that headroom here would
             # widen the source-backfill budget to capacity that never receives a
             # ticket, and drown the desired version this reservation protects.
-            slot_count = (
+            candidate_allowed = (
                 allowed_slot_count(
                     slot_settings,
                     advertised_slots=len(capacity.healthy_slots),
                     sample=_heartbeat_resource_sample(candidate),
+                    validator_hotkey=candidate.validator_hotkey,
                 )
                 if capacity.admission == "accepting"
                 else 0
+            )
+            slot_count = candidate_allowed - reserved_round_slots(
+                slot_settings,
+                validator_hotkey=candidate.validator_hotkey,
+                allowed_slots=candidate_allowed,
+                rounds_active=(
+                    round_reservation_active and validator_advertises_rounds(candidate)
+                ),
             )
         else:
             slot_count = 1
@@ -2002,9 +2152,9 @@ _ARTIFACT_URL_TTL = timedelta(minutes=5)
 # rationale in ``ditto.api_models.scoring_lease_settings``) governs until an
 # operator writes one and on any failure to read it.
 
-# Signed job claims outside this window are stale. A consumed nonce remains in
-# the database for the same window, making replay rejection consistent across
-# every API replica without introducing another secret.
+# Signed job claims outside this window are stale. A consumed nonce is kept
+# until that window closes, including when the stamp is in the future, so a
+# replica cannot forget the nonce while the signature is still acceptable.
 _JOB_REQUEST_MAX_AGE = timedelta(minutes=2)
 # A leased seed of ``None`` is meaningful (a legacy bundle lease), so "this
 # validator holds no lease" needs a sentinel distinct from it.
@@ -2023,7 +2173,9 @@ _qualification_refresh_due = 0.0
 # Reject captured heartbeats outside a short clock-skew/retry window. Workers
 # report every two minutes, so five minutes tolerates normal transient outages.
 _HEARTBEAT_MAX_SKEW_SECONDS = 300
-_HEARTBEAT_MAX_BYTES = 16 * 1024
+HEARTBEAT_MAX_BYTES = 16 * 1024
+RECEIPT_DIAGNOSTICS_MAX_BYTES = 8192
+WEIGHT_RECEIPT_MAX_BYTES = 3 * 1024 * 1024
 
 
 # Object-store key the upload pipeline writes the tarball under.
@@ -2483,10 +2635,13 @@ def _heartbeat_signing_message(
     confirmation_progress: list[ConfirmationProgress] | None = None,
     updater_status: ValidatorUpdaterStatus | None = None,
     weights_fold: WeightsFold | None = None,
+    host_specs: HostSpecs | None = None,
 ) -> bytes:
     """Canonical heartbeat payload, mirrored by ``ditto-subnet``."""
     if weights_fold is not None and protocol_version < 27:
         raise ValueError("weights fold requires heartbeat protocol v27")
+    if host_specs is not None and protocol_version < 32:
+        raise ValueError("host specs require heartbeat protocol v32")
     if stack_health is not None and protocol_version < 9:
         raise ValueError("per-component stack health requires heartbeat protocol v9")
     if benchmark_capacity is not None and protocol_version < 10:
@@ -2510,6 +2665,24 @@ def _heartbeat_signing_message(
             active = str(active_agent_id) if active_agent_id is not None else ""
             # Mirrors the validator: the fold report changes the signed bytes
             # only when present, so a fold-less v27 heartbeat stays on v23.
+            # v32 hardware announcement. Like the fold, it changes the signed
+            # bytes only when present, so a probe failure stays on v23/v27.
+            if host_specs is not None:
+                return (
+                    "ditto-validator-heartbeat:v32:"
+                    f"{validator_hotkey}:{software_version}:{protocol_version}:"
+                    f"{code_digest}:{state}:{active}:"
+                    f"{system_metrics_signing_token(system_metrics)}:"
+                    f"{benchmark_progress_signing_token(benchmark_progress)}:"
+                    f"{validator_identity_signing_token(capabilities, stack)}:"
+                    f"{validator_stack_health_signing_token(stack_health)}:"
+                    f"{benchmark_capacity_signing_token(benchmark_capacity)}:"
+                    f"{confirmation_progress_signing_token(confirmation_progress)}:"
+                    f"{validator_updater_status_signing_token(updater_status)}:"
+                    f"{weights_fold_signing_token(weights_fold)}:"
+                    f"{host_specs_signing_token(host_specs)}:"
+                    f"{timestamp}"
+                ).encode()
             if weights_fold is not None:
                 return (
                     "ditto-validator-heartbeat:v27:"
@@ -2994,7 +3167,7 @@ async def submit_receipt_diagnostics(
     session: SessionDep,
 ) -> dict[str, bool]:
     """Store latest signed observation; never consumed by emission verification."""
-    if len(await request.body()) > 8192:
+    if len(await request.body()) > RECEIPT_DIAGNOSTICS_MAX_BYTES:
         raise HTTPException(status_code=413, detail="diagnostic payload too large")
     report = request_body.report
     now = datetime.now(UTC)
@@ -3047,7 +3220,7 @@ async def submit_weight_receipt(
     session: SessionDep,
 ) -> SubmitWeightReceiptResponse:
     """Durably acknowledge a signed commit claim without granting source release."""
-    if len(await request.body()) > 3 * 1024 * 1024:
+    if len(await request.body()) > WEIGHT_RECEIPT_MAX_BYTES:
         raise HTTPException(status_code=413, detail="weight receipt payload too large")
     receipt = request_body.receipt
     if receipt.validator_hotkey != validator_hotkey:
@@ -3108,8 +3281,8 @@ async def heartbeat(
     except ValueError as error:
         raise HTTPException(status_code=400, detail="invalid Content-Length") from error
     if (
-        claimed_bytes > _HEARTBEAT_MAX_BYTES
-        or len(await request.body()) > _HEARTBEAT_MAX_BYTES
+        claimed_bytes > HEARTBEAT_MAX_BYTES
+        or len(await request.body()) > HEARTBEAT_MAX_BYTES
     ):
         raise HTTPException(status_code=413, detail="heartbeat payload too large")
     if request_body.validator_hotkey != validator_hotkey:
@@ -3198,6 +3371,7 @@ async def heartbeat(
         confirmation_progress=request_body.confirmation_progress,
         updater_status=request_body.updater_status,
         weights_fold=request_body.weights_fold,
+        host_specs=request_body.host_specs,
     )
     if not _verify_signature(validator_hotkey, payload, request_body.signature):
         raise ValidatorAuthError("heartbeat signature verification failed")
@@ -3288,6 +3462,11 @@ async def heartbeat(
                 if request_body.weights_fold is not None
                 else None
             ),
+            host_specs=(
+                request_body.host_specs.model_dump(mode="json")
+                if request_body.host_specs is not None
+                else None
+            ),
             benchmark_capacity=(
                 work.benchmark_capacity.model_dump(mode="json")
                 if work.benchmark_capacity is not None
@@ -3325,6 +3504,65 @@ async def heartbeat(
     if seen_at.tzinfo is None:
         seen_at = seen_at.replace(tzinfo=UTC)
     return ValidatorHeartbeatResponse(accepted=accepted, seen_at=seen_at, leases=leases)
+
+
+async def _bind_unverified_v13_dataset(
+    session: AsyncSession,
+    *,
+    chain: ChainClient,
+    request: Request,
+    generator: DatasetGenerator,
+    agent: Agent,
+    dataset: BenchmarkDataset,
+) -> bool:
+    """Re-pin a block-less V13 dataset to the latest chain block.
+
+    Only a pin no lease has ever derived a seed from is rebound, so no issued
+    or scored ticket can disagree with the new one. The agent's compatibility
+    columns follow when they mirror the same block-less pin. Returns ``False``
+    (leaving the pin untouched) when the chain or generator is unavailable.
+    """
+    leased = await session.scalar(
+        select(ValidatorTicket.agent_id)
+        .where(
+            ValidatorTicket.agent_id == agent.agent_id,
+            ValidatorTicket.bench_version == dataset.bench_version,
+            ValidatorTicket.seed.is_not(None),
+        )
+        .limit(1)
+    )
+    if leased is not None:
+        return False
+    try:
+        block = await chain.get_latest_block()
+        seed = derive_seed(block.hash, agent.agent_id)
+        sha256 = await lease_dataset_sha(
+            request, generator, seed=seed, bench_version=dataset.bench_version
+        )
+    except (ChainError, DataPipelineError) as error:
+        logger.warning(
+            "V%d dataset for agent %s is not chain-bound and could not be rebound: %s",
+            dataset.bench_version,
+            agent.agent_id,
+            error,
+        )
+        return False
+    if agent.dataset_seed == dataset.seed and agent.dataset_seed_block_hash is None:
+        agent.dataset_seed = seed
+        agent.dataset_sha256 = sha256
+        agent.dataset_seed_block = block.number
+        agent.dataset_seed_block_hash = block.hash
+    logger.info(
+        "rebound block-less V%d dataset for agent %s to block %d",
+        dataset.bench_version,
+        agent.agent_id,
+        block.number,
+    )
+    dataset.seed = seed
+    dataset.sha256 = sha256
+    dataset.seed_block = block.number
+    dataset.seed_block_hash = block.hash
+    return True
 
 
 @router.post(
@@ -3450,7 +3688,11 @@ async def request_job(
                 nonce=payload.nonce,
                 validator_hotkey=payload.validator_hotkey,
                 now=now,
-                expires_at=now + _JOB_REQUEST_MAX_AGE,
+                expires_at=nonce_expires_at(
+                    now=now,
+                    requested_at=requested_at,
+                    max_age=_JOB_REQUEST_MAX_AGE,
+                ),
             )
         except ValidatorRequestReplayError as exc:
             raise HTTPException(
@@ -3500,6 +3742,12 @@ async def request_job(
                 heartbeat is None
                 or heartbeat.protocol_version < (11 if target_version >= 7 else 10)
                 or not heartbeat_capabilities.ticket_inference
+                # v13+ scores must come from the Platform-issued sandbox memory
+                # cap, not each host's own default.
+                or (
+                    target_version >= 13
+                    and not heartbeat_capabilities.sandbox_memory_limit
+                )
                 or (
                     target_version == 7
                     and (
@@ -3525,6 +3773,9 @@ async def request_job(
             and heartbeat_supports_version(heartbeat, now=now, version=target_version)
         )
         slot_id = payload.slot_id or "slot-0"
+        # Cached for a short TTL on the resolver's own session; one indexed
+        # read on this session only in an app built without lifespan.
+        rounds_reserved_now = await round_reservation_active(request.app.state, session)
         issuance_paused = validator_issuance_paused(
             slot_settings, validator_hotkey=payload.validator_hotkey
         )
@@ -3598,16 +3849,18 @@ async def request_job(
                 slot_settings,
                 advertised_slots=capacity.configured_slots,
                 sample=resource_sample,
+                validator_hotkey=payload.validator_hotkey,
+            )
+            live_leases = await _live_slot_leases(
+                session,
+                validator_hotkey=payload.validator_hotkey,
+                now=now,
             )
             if _slot_cap_declines(
                 slot_id=slot_id,
                 slot_running_benchmark=slot_running_benchmark,
                 allowed_slots=allowed_slots,
-                held_slots=await _held_lease_slots(
-                    session,
-                    validator_hotkey=payload.validator_hotkey,
-                    now=now,
-                ),
+                held_slots=live_leases.slots,
             ):
                 # Same disk sample the decision used, so the label can never
                 # describe a different heartbeat than the refusal did.
@@ -3617,7 +3870,33 @@ async def request_job(
                         settings=slot_settings,
                         advertised_slots=capacity.configured_slots,
                         sample=resource_sample,
+                        validator_hotkey=payload.validator_hotkey,
                     ),
+                    validator_hotkey=payload.validator_hotkey,
+                    slot_id=slot_id,
+                )
+                return Response(status_code=204)
+            # Generator-round reservation: hold ``reserved`` of this
+            # validator's allowed slots for round panel runs, so canonical work
+            # and continual retests can never starve a round. Every lane below
+            # issues non-round work, so the gate sits here, once, ahead of all
+            # of them. Nothing is reserved while rounds are disabled.
+            if _round_reservation_declines(
+                slot_id=slot_id,
+                slot_running_benchmark=slot_running_benchmark,
+                allowed_slots=allowed_slots,
+                reserved_slots=reserved_round_slots(
+                    slot_settings,
+                    validator_hotkey=payload.validator_hotkey,
+                    allowed_slots=allowed_slots,
+                    rounds_active=(
+                        rounds_reserved_now and validator_advertises_rounds(heartbeat)
+                    ),
+                ),
+                non_round_slots=live_leases.non_round_slots,
+            ):
+                _record_dispatch_decline(
+                    "round_reservation",
                     validator_hotkey=payload.validator_hotkey,
                     slot_id=slot_id,
                 )
@@ -3940,6 +4219,7 @@ async def request_job(
                     slot_id=slot_id,
                     efficiency_config=efficiency_config,
                     slot_settings=slot_settings,
+                    round_reservation_active=rounds_reserved_now,
                     resume_only=True,
                     similarity_policy=policy_from_settings(
                         queue_policy.similarity_budget
@@ -4061,6 +4341,7 @@ async def request_job(
                     slot_id=slot_id,
                     efficiency_config=efficiency_config,
                     slot_settings=slot_settings,
+                    round_reservation_active=rounds_reserved_now,
                     carryover_settings=queue_policy.prev_gen_carryover,
                     owner_concurrent_submission_limit=(
                         queue_policy.owner_concurrent_submission_limit
@@ -4104,6 +4385,28 @@ async def request_job(
                 if dataset is not None
                 else agent.dataset_seed_block_hash
             )
+            if (
+                ticket.bench_version >= 13
+                and ticket.seed is None
+                and seed_block_hash is None
+                and dataset is not None
+                and generator.run_size is not None
+            ):
+                # A chain blip at screening pins a local CSPRNG seed with no
+                # block. V13 cannot lease that pin, and as the queue head it
+                # 503s (rolling back) every poll on the fleet. Bind it to a
+                # block read now, which is still causally after the commit.
+                bound = await _bind_unverified_v13_dataset(
+                    session,
+                    chain=chain,
+                    request=request,
+                    generator=generator,
+                    agent=agent,
+                    dataset=dataset,
+                )
+                if bound:
+                    seed_block = dataset.seed_block
+                    seed_block_hash = dataset.seed_block_hash
             # Give each of the three quorum validators an independent dataset.
             # The post-commit block hash keeps the seed unpredictable; binding
             # the validator hotkey makes it distinct and publicly reproducible.
@@ -5342,7 +5645,11 @@ async def request_top5_confirmation_job(
                 nonce=payload.nonce,
                 validator_hotkey=payload.validator_hotkey,
                 now=now,
-                expires_at=now + _JOB_REQUEST_MAX_AGE,
+                expires_at=nonce_expires_at(
+                    now=now,
+                    requested_at=payload.requested_at,
+                    max_age=_JOB_REQUEST_MAX_AGE,
+                ),
             )
         except ValidatorRequestReplayError as exc:
             raise HTTPException(
@@ -5481,6 +5788,14 @@ async def request_top5_confirmation_job(
                     detail=(
                         f"fresh benchmark v{canonical_version} inference capability "
                         "is required"
+                    ),
+                )
+            if canonical_version >= 13 and not capabilities.sandbox_memory_limit:
+                raise HTTPException(
+                    status_code=428,
+                    detail=(
+                        f"benchmark v{canonical_version} requires the Platform-issued "
+                        "sandbox memory cap; update ditto-subnet"
                     ),
                 )
         (
@@ -5847,6 +6162,10 @@ async def request_top5_confirmation_job(
                 slot_settings=slot_settings,
                 validator_hotkey=payload.validator_hotkey,
                 now=now,
+                lane="non_round",
+                round_reservation_active=await round_reservation_active(
+                    request.app.state, session
+                ),
                 requested_slot_id=payload.slot_id,
             )
         )
@@ -6237,7 +6556,11 @@ async def fail_job(
                 nonce=payload.nonce,
                 validator_hotkey=payload.validator_hotkey,
                 now=now,
-                expires_at=now + _JOB_REQUEST_MAX_AGE,
+                expires_at=nonce_expires_at(
+                    now=now,
+                    requested_at=requested_at,
+                    max_age=_JOB_REQUEST_MAX_AGE,
+                ),
             )
         except ValidatorRequestReplayError as exc:
             raise HTTPException(
@@ -6568,7 +6891,11 @@ async def agent_artifact(
                 nonce=x_validator_artifact_nonce,
                 validator_hotkey=x_validator_hotkey,
                 now=now,
-                expires_at=now + _JOB_REQUEST_MAX_AGE,
+                expires_at=nonce_expires_at(
+                    now=now,
+                    requested_at=x_validator_artifact_requested_at,
+                    max_age=_JOB_REQUEST_MAX_AGE,
+                ),
             )
         except ValidatorRequestReplayError as exc:
             raise HTTPException(
@@ -7505,6 +7832,8 @@ async def submit_score(
                 # it on. The cohort is the eligible ledger read above, which is
                 # one row per owner and excludes this still-evaluating
                 # candidate, held agents, and banned agents.
+                # Per-axis evidence: each axis is the median of this agent's
+                # quorum on that axis, against the same eligible ledger's axis.
                 await _evaluate_and_record_outlier_escalation(
                     session,
                     agent=agent,
@@ -7513,6 +7842,18 @@ async def submit_score(
                     cohort=[row.composite for row in eligible],
                     settings=OUTLIER_ESCALATION_SETTINGS,
                     now=audit_now,
+                    axes={
+                        "tool_mean": AxisObservation(
+                            value=statistics.median(s.tool_mean for s in agent_scores),
+                            cohort=[row.tool_mean for row in eligible],
+                        ),
+                        "memory_mean": AxisObservation(
+                            value=statistics.median(
+                                s.memory_mean for s in agent_scores
+                            ),
+                            cohort=[row.memory_mean for row in eligible],
+                        ),
+                    },
                 )
                 deferred_settings = queue_policy.deferred_source_review
                 await _evaluate_and_record_deferred_review(
@@ -7670,24 +8011,6 @@ async def submit_score(
         # normal issuance lock, and admin queue actions activate it directly, so
         # removing this eager handoff delays nothing and leaves one lock owner.
         result_status = agent.status
-
-    # Shadow core qualification is deliberately post-commit and fail-open.
-    # The ordinary score and consumed ticket above remain canonical even if the
-    # policy is absent, the observer schema is mid-rollout, or the diagnostic
-    # write fails. This ledger is not read by admission, rank, or weights.
-    try:
-        async with session.begin():
-            await observe_core_qualification(
-                session,
-                agent_id=agent_id,
-                bench_version=report_version,
-                now=audit_now,
-            )
-    except Exception:
-        logger.exception(
-            "shadow core qualification observation failed for agent %s",
-            agent_id,
-        )
 
     # LongMem's expensive dimensions live on a separate bounded ledger. Once the
     # canonical score transaction commits, persist its physical lower-median
@@ -7943,7 +8266,7 @@ async def _mirror_quorum_transcripts(
                 continue
             if not await storage.object_exists(key=key):
                 continue
-            body = await storage.get_object(key=key, max_bytes=_TRANSCRIPT_MAX_BYTES)
+            body = await storage.get_object(key=key, max_bytes=TRANSCRIPT_MAX_BYTES)
             await storage.put_object(
                 key=key,
                 body=body,
@@ -8016,7 +8339,7 @@ _TRANSCRIPT_KEY_TEMPLATE = "transcripts/{sha256}.json"
 
 # A transcript carries every graded final_text for a full run; cap well above
 # any legitimate size while bounding a hostile body.
-_TRANSCRIPT_MAX_BYTES = 32 << 20
+TRANSCRIPT_MAX_BYTES = 32 << 20
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
@@ -8065,7 +8388,7 @@ async def submit_transcript(
     """
     response.headers["Cache-Control"] = "no-store"
     body = await request.body()
-    if len(body) > _TRANSCRIPT_MAX_BYTES:
+    if len(body) > TRANSCRIPT_MAX_BYTES:
         raise HTTPException(status_code=413, detail="transcript exceeds size cap")
     if not body:
         raise HTTPException(status_code=400, detail="empty transcript body")

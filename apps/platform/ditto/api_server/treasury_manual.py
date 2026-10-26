@@ -2,23 +2,43 @@
 
 import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from sqlalchemy import JSON, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ditto.api_models.treasury_ingress import TreasuryReceiptSelector
+from ditto.api_models.treasury_ingress import (
+    TreasuryReceiptSelector,
+    TreasurySourceClaim,
+)
 from ditto.api_server.treasury_ingress import ingest_receipt
+from ditto.api_server.treasury_manual_movement import verified_movement_payload
 from ditto.api_server.treasury_runtime import lock_runtime, treasury_runtime
 from ditto.db.models import TreasuryManualBridgeState as BridgeState
 from ditto.db.models import TreasuryManualTransfer as Transfer
 from ditto_screening_protocol.treasury_manual import (
+    ManualBatchEnvelope,
+    ManualBatchRequest,
     ManualEnvelope,
     ManualReadiness,
     ManualReport,
     ManualRequest,
+    parse_manual_envelope,
 )
 
-ACTIVE = ("queued", "dispatched", "pending", "audit_pending")
+# Requests whose custody delivery is still unresolved. audit_pending already
+# carries a finalized custody report; its delivery is resolved only once the
+# wallet movement is independently verified (see delivery_verified).
+UNSETTLED = ("queued", "dispatched", "pending")
+OBSERVATION_BLOCKERS = {
+    "runtime_changed": (
+        "Finney runtime changed; custody audit and offline approval required"
+    ),
+    "policy_runtime_unreviewed": (
+        "Custody policy requires a renewed offline runtime approval"
+    ),
+    "observation_unavailable": "Custody cannot verify its current observation",
+}
 
 
 def readiness_is_fresh(observed_at):
@@ -29,6 +49,38 @@ def readiness_is_fresh(observed_at):
 
 async def lock_manual(session):
     await session.execute(text("SELECT pg_advisory_xact_lock(118,2749)"))
+
+
+def delivery_verified(row) -> bool:
+    """True only for an exact, independently decoded finalized wallet movement.
+
+    Source attribution may remain incomplete forever (absent immutable epoch
+    snapshots are never reconstructed). That is a publication gap, not delivery
+    ambiguity: the movement proof binds this request's finalized coordinates,
+    destination and amount, and custody's own journal fences source reuse.
+    """
+    if row.status != "audit_pending" or row.receipt is None:
+        return False
+    try:
+        movement = verified_movement_payload(row.receipt)
+        envelope = parse_manual_envelope(row.envelope)
+        report = ManualReport.model_validate(row.report)
+    except ValueError:
+        return False
+    settlement = report.settlement
+    return (
+        report.status == "finalized"
+        and settlement is not None
+        and row.digest == envelope.digest == report.request_digest
+        and report.request_id == envelope.request.request_id == row.request_id
+        and movement.extrinsic_hash == settlement.extrinsic_hash
+        and movement.block_hash == settlement.block_hash
+        and movement.block == settlement.block
+        and movement.extrinsic_index == settlement.extrinsic_index
+        and movement.public_recipient == envelope.destination
+        and movement.deposit_amount_atomic == str(envelope.request.amount_rao)
+        and movement.bucket_id == envelope.request.bucket_id
+    )
 
 
 def transfer_result(row):
@@ -59,6 +111,14 @@ async def state(session, config, *, enabled):
         if bridge:
             report = ManualReport.model_validate(bridge.report)
             if (
+                report.status == "blocked"
+                and report.blocker
+                and readiness_is_fresh(report.observed_at)
+                and report.collector_policy_digest
+                == runtime.treasury_approved_collector_policy_digest
+            ):
+                blocked = OBSERVATION_BLOCKERS[report.blocker.code]
+            if (
                 report.readiness
                 and readiness_is_fresh(report.observed_at)
                 and report.collector_policy_digest
@@ -69,10 +129,18 @@ async def state(session, config, *, enabled):
                 blocked = None
     if enabled and not runtime.treasury_weight_enforcement:
         blocked = "Gamma is paused"
+    audited = list(
+        await session.scalars(
+            select(Transfer).where(Transfer.status == "audit_pending")
+        )
+    )
+    delivered = [r for r in audited if delivery_verified(r)]
+    if enabled and len(delivered) != len(audited):
+        blocked = "A previous transfer or its public receipt is still pending"
     if enabled and await session.scalar(
         select(Transfer.request_id)
         .where(
-            Transfer.status.in_(ACTIVE)
+            Transfer.status.in_(UNSETTLED)
             | (
                 (
                     (Transfer.status == "failed")
@@ -87,14 +155,20 @@ async def state(session, config, *, enabled):
         .limit(1)
     ):
         blocked = "A previous transfer or its public receipt is still pending"
-    if readiness and await session.scalar(
-        select(Transfer.request_id)
-        .where(
-            Transfer.status == "published",
-            Transfer.envelope["request"]["after_operation"].as_integer()
-            >= readiness.after_operation,
+    if readiness and (
+        await session.scalar(
+            select(Transfer.request_id)
+            .where(
+                Transfer.status == "published",
+                Transfer.envelope["request"]["after_operation"].as_integer()
+                >= readiness.after_operation,
+            )
+            .limit(1)
         )
-        .limit(1)
+        or any(
+            r.envelope["request"]["after_operation"] >= readiness.after_operation
+            for r in delivered
+        )
     ):
         blocked = "Waiting for custody to observe the completed claim"
     if readiness and not readiness.bounded_claim_available:
@@ -111,6 +185,12 @@ async def state(session, config, *, enabled):
     }
 
 
+def _fundable(bucket: dict) -> bool:
+    # A ranged bucket may receive emission whenever its signed ceiling is
+    # positive, even if today's in-range Gamma % (or its default) is zero.
+    return bucket.get("max_allocation_bps", bucket["allocation_bps"]) > 0
+
+
 async def validate_envelope(session, config, envelope, *, enabled):
     view = await state(session, config, enabled=enabled)
     if view["blocked_reason"]:
@@ -120,14 +200,14 @@ async def validate_envelope(session, config, envelope, *, enabled):
     destinations = view["destinations"]
     if envelope.collector_policy_digest != readiness.policy or not any(
         b["bucket_id"] == req.bucket_id
-        and b["allocation_bps"] > 0
+        and _fundable(b)
         and b["holding_coldkey"] == envelope.destination
         for b in destinations
     ):
         raise ValueError("Destination differs from the approved signed policy")
     if (
         req.after_operation != readiness.after_operation
-        or req.amount_rao > readiness.max_distribution_rao
+        or req.amount_rao > effective_manual_limit(readiness, envelope)
         or req.amount_rao + req.retained_alpha_rao > readiness.available_alpha_rao
         or not readiness.finalized_block
         < req.expires_block
@@ -136,17 +216,40 @@ async def validate_envelope(session, config, envelope, *, enabled):
         raise ValueError(
             "Amount, retained reserve or custody revision changed; preview again"
         )
-    if not any(
-        s.source_block == req.source_block
-        and any(
-            p.bucket_id == req.bucket_id
-            and p.holding_coldkey == envelope.destination
-            and p.alpha_rao >= req.amount_rao
-            for p in s.remaining
-        )
-        for s in readiness.sources
-    ):
-        raise ValueError("Amount exceeds a mature source's remaining entitlement")
+    claims = (
+        req.sources
+        if isinstance(envelope, ManualBatchEnvelope)
+        else [SimpleNamespace(source_block=req.source_block, amount_rao=req.amount_rao)]
+    )
+    for claim in claims:
+        if not any(
+            s.source_block == claim.source_block
+            and any(
+                p.bucket_id == req.bucket_id
+                and p.holding_coldkey == envelope.destination
+                and p.alpha_rao >= claim.amount_rao
+                for p in s.remaining
+            )
+            for s in readiness.sources
+        ):
+            raise ValueError("Amount exceeds mature remaining source entitlement")
+
+
+def effective_manual_limit(readiness, envelope=None):
+    approval = readiness.manual_approval
+    if approval is not None:
+        # Custody's observation cannot forge cold approval. The live runtime's
+        # collector identity is checked when accepting the report below.
+        approval.verify(readiness.policy, approval.policy.collector_coldkey)
+        if envelope is not None and (
+            not isinstance(envelope, ManualBatchEnvelope)
+            or envelope.manual_approval != approval
+        ):
+            raise ValueError("Manual approval changed; preview again")
+        return approval.policy.max_amount_rao
+    if isinstance(envelope, ManualBatchEnvelope):
+        raise ValueError("Aggregate manual authority is not deployed")
+    return readiness.max_distribution_rao
 
 
 async def preview(session, config, payload, *, enabled):
@@ -157,32 +260,56 @@ async def preview(session, config, payload, *, enabled):
     approved = {
         (b["bucket_id"], b["holding_coldkey"])
         for b in view["destinations"]
-        if b["allocation_bps"] > 0
+        if _fundable(b)
     }
     matches = [
-        (s.source_block, p.holding_coldkey)
+        (s.source_block, p.holding_coldkey, p.alpha_rao)
         for s in readiness.sources
         for p in s.remaining
         if p.bucket_id == payload.bucket_id
-        and p.alpha_rao >= payload.amount_rao
         and (p.bucket_id, p.holding_coldkey) in approved
     ]
-    if not matches:
-        raise ValueError("No mature approved source can fund this amount")
-    envelope = ManualEnvelope(
-        collector_policy_digest=readiness.policy,
-        destination=matches[0][1],
-        request=ManualRequest(
-            request_id=payload.request_id,
-            after_operation=readiness.after_operation,
-            source_block=matches[0][0],
-            bucket_id=payload.bucket_id,
-            amount_rao=payload.amount_rao,
-            retained_alpha_rao=payload.retained_alpha_rao,
-            expires_block=readiness.finalized_block + 600,
-            reason=payload.reason.strip(),
-        ),
-    )
+    base = {
+        "request_id": payload.request_id,
+        "after_operation": readiness.after_operation,
+        "bucket_id": payload.bucket_id,
+        "amount_rao": payload.amount_rao,
+        "retained_alpha_rao": payload.retained_alpha_rao,
+        "expires_block": readiness.finalized_block + 600,
+        "reason": payload.reason.strip(),
+    }
+    if readiness.manual_approval:
+        if payload.amount_rao > effective_manual_limit(readiness):
+            raise ValueError("Amount exceeds cold-approved manual ceiling")
+        claims, left = [], payload.amount_rao
+        for block, _destination, amount in sorted(matches):
+            take = min(left, amount)
+            if take:
+                claims.append({"source_block": block, "amount_rao": take})
+                left -= take
+            if not left:
+                break
+        if left or not claims:
+            raise ValueError("Verified mature earnings cannot fund this amount yet")
+        envelope = ManualBatchEnvelope(
+            collector_policy_digest=readiness.policy,
+            destination=matches[0][1],
+            manual_approval=readiness.manual_approval,
+            request=ManualBatchRequest(
+                **base,
+                source_block=claims[0]["source_block"],
+                sources=claims,
+            ),
+        )
+    else:
+        matches = [m for m in matches if m[2] >= payload.amount_rao]
+        if not matches:
+            raise ValueError("No mature approved source can fund this amount")
+        envelope = ManualEnvelope(
+            collector_policy_digest=readiness.policy,
+            destination=matches[0][1],
+            request=ManualRequest(**base, source_block=matches[0][0]),
+        )
     await validate_envelope(session, config, envelope, enabled=enabled)
     return {
         "envelope": envelope.model_dump(),
@@ -229,17 +356,27 @@ async def accept_report(session, config, body):
     await lock_runtime(session)
     runtime = await treasury_runtime(session, config)
     await lock_manual(session)
-    if report.status == "readiness":
+    if report.status in {"readiness", "blocked"}:
         if (
             report.collector_policy_digest
             != runtime.treasury_approved_collector_policy_digest
         ):
             raise InvalidManualReport("Custody readiness policy differs")
-        if (
+        if report.status == "readiness" and (
             not report.readiness
             or report.readiness.policy != report.collector_policy_digest
         ):
             raise InvalidManualReport("Custody readiness pin differs")
+        if report.readiness and report.readiness.manual_approval:
+            if runtime.treasury_shadow_policy is None:
+                raise InvalidManualReport("Approved collector identity absent")
+            try:
+                report.readiness.manual_approval.verify(
+                    report.collector_policy_digest,
+                    runtime.treasury_shadow_policy.collector_coldkey,
+                )
+            except ValueError as error:
+                raise InvalidManualReport("Manual range lacks cold approval") from error
         if not readiness_is_fresh(report.observed_at):
             return
         current = await session.get(BridgeState, 1)
@@ -283,11 +420,24 @@ async def accept_report(session, config, body):
 
 
 async def publish_audit(session: AsyncSession, chain, row):
-    envelope = ManualEnvelope.model_validate(row.envelope)
+    envelope = parse_manual_envelope(row.envelope)
     report = ManualReport.model_validate(row.report)
     if report.status != "finalized" or report.settlement is None:
         raise ValueError("Finalized report required for independent audit")
     req, proof = envelope.request, report.settlement
+    source_claims = []
+    if isinstance(envelope, ManualBatchEnvelope):
+        epochs = {s.source_block: s.epoch_index for s in proof.source_epochs}
+        if (
+            len(epochs) != len(proof.source_epochs)
+            or set(epochs) != {s.source_block for s in req.sources}
+            or epochs[req.source_block] != proof.epoch_index
+        ):
+            raise ValueError("Finalized aggregate source epochs differ from request")
+        source_claims = [
+            TreasurySourceClaim(**s.model_dump(), epoch_index=epochs[s.source_block])
+            for s in req.sources
+        ]
     result = await ingest_receipt(
         session,
         chain,
@@ -295,6 +445,7 @@ async def publish_audit(session: AsyncSession, chain, row):
             stage="service_distribution",
             bucket_id=req.bucket_id,
             source_block=req.source_block,
+            source_claims=source_claims,
             amount_atomic=req.amount_rao,
             reason=req.reason,
             **proof.model_dump(),

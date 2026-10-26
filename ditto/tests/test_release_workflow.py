@@ -33,6 +33,10 @@ RELEASE_OWNED_COMPONENT_WORKFLOWS = (
     "starter-kit-ci.yml",
 )
 
+MANUAL_ONLY_COMPONENT_WORKFLOWS = frozenset(
+    {"coding-datagen-ci.yml", "coding-starter-kit-ci.yml", "datagen-ci.yml"}
+)
+
 
 def _step(steps: list[dict], name: str) -> dict:
     return next(step for step in steps if step.get("name") == name)
@@ -48,21 +52,17 @@ def test_release_is_the_single_post_merge_component_orchestrator() -> None:
             (WORKFLOW_DIR / workflow_name).read_text(), Loader=yaml.BaseLoader
         )
         triggers = workflow["on"]
-        assert "pull_request" in triggers, workflow_name
+        # Coding-competition and research CI stay operator-dispatched
+        # (SN-120); the other component checks run on their PRs again.
+        manual_only = workflow_name in MANUAL_ONLY_COMPONENT_WORKFLOWS
+        assert ("pull_request" in triggers) is not manual_only, workflow_name
         assert "workflow_dispatch" in triggers, workflow_name
         assert "push" not in triggers, workflow_name
 
 
 def test_coding_starter_ci_tracks_the_public_contract_and_builds_the_image() -> None:
     workflow = yaml.load(CODING_STARTER_CI_PATH.read_text(), Loader=yaml.BaseLoader)
-    paths = workflow["on"]["pull_request"]["paths"]
-    assert "miners/dittobench-coding-starter-kit/**" in paths
-    assert "miners/dittobench-unified-starter-kit/**" in paths
-    assert "miners/dittobench-starter-kit/**" in paths
-    assert "research/dittobench-coding-datagen/**" in paths
-    assert "services/dittobench-api/internal/codingcontract/**" in paths
-    assert "services/dittobench-api/internal/codingrelay/**" in paths
-    assert "scripts/test-coding-starter-practice-e2e.sh" in paths
+    assert set(workflow["on"]) == {"workflow_dispatch"}
     verify = workflow["jobs"]["verify"]
     gate = _step(verify["steps"], "Verify format, lint, and tests")
     assert "cargo fmt --check" in gate["run"]

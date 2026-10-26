@@ -60,40 +60,15 @@ def test_backend_workflow_runs_on_screener_verdict_producer_changes() -> None:
     } <= backend_paths
 
 
-def test_backend_workflow_owns_every_platform_coding_contract_vector() -> None:
-    backend_paths = set(_triggers(_load(BACKEND_WORKFLOW))["pull_request"]["paths"])
-    assert {
-        "packages/dittobench-coding-contract/testdata/coding_contract_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_artifact_capability_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_catalog_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_selection_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_certification_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_authoring_freeze_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_grading_lease_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_shadow_result_submission_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_inference_policy_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_inference_policy_locked_v1.json",
-        "packages/dittobench-coding-contract/testdata/coding_attempt_supervisor_v1.json",
-    } <= backend_paths
-    assert (
-        "packages/dittobench-coding-contract/testdata/coding_inference_miner_v1.json"
-        not in backend_paths
-    )
-    assert (
-        "packages/dittobench-coding-contract/testdata/coding_execution_plan_v1.json"
-        in backend_paths
-    )
-    assert (
-        "packages/dittobench-coding-contract/generate_execution_delivery_vectors.py"
-        in backend_paths
-    )
-    assert {
-        "ditto/api_models/coding_harness.py",
-        "ditto/api_models/coding_claims.py",
-        "ditto/api_models/coding_certification_leases.py",
-        "ditto/api_models/coding_inference.py",
-        "ditto/api_models/coding_inference_grants.py",
-    } <= backend_paths
+def test_backend_workflow_does_not_trigger_on_coding_competition_contracts() -> None:
+    # Coding-competition CI stays operator-dispatched (SN-120): contract
+    # vectors and coding wire models no longer pull Platform CI onto a PR.
+    backend_paths = _triggers(_load(BACKEND_WORKFLOW))["pull_request"]["paths"]
+    assert not [
+        path
+        for path in backend_paths
+        if "dittobench-coding-contract" in path or "api_models/coding_" in path
+    ]
 
 
 def test_path_gated_callers_select_the_shared_exact_source_gates() -> None:
@@ -165,7 +140,7 @@ def test_shared_verification_shards_the_complete_suite_without_deselection() -> 
             f"--ignore={endpoint_root}test_admin_validator_slot_settings.py "
             f"--ignore={endpoint_root}test_admin_confirmation_bundles.py "
             "--ignore=ditto/tests/api_server/endpoints/test_gate_notes.py",
-            False,
+            True,
         ),
         "api-server": (
             "ditto/tests/api_server --ignore=ditto/tests/api_server/endpoints",
@@ -174,7 +149,9 @@ def test_shared_verification_shards_the_complete_suite_without_deselection() -> 
         "data-contract-integration": ("--ignore=ditto/tests/api_server", True),
     }
     pytest_step = _step(test_job, "pytest")
-    assert pytest_step["run"] == "uv run pytest ${{ matrix.pytest_args }}"
+    assert pytest_step["run"] == (
+        "uv run --group browser pytest ${{ matrix.pytest_args }}"
+    )
     assert pytest_step["env"]["DITTO_REQUIRE_POSTGRES"] == "1"
     assert pytest_step["env"]["DITTO_REQUIRE_OBJECT_STORAGE"] == "1"
     assert _step(test_job, "Start MinIO")["if"] == "matrix.object_storage"
@@ -190,12 +167,6 @@ def test_shared_verification_keeps_static_database_and_security_gates() -> None:
     assert _step(static, "ruff format check")["run"] == "uv run ruff format --check ."
     assert _step(static, "ruff check")["run"] == "uv run ruff check ."
     assert _step(static, "mypy")["run"] == "uv run mypy ditto/"
-    execution_generator = _step(
-        static, "Coding execution delivery vectors match their generator"
-    )["run"]
-    assert "ruff format --check" in execution_generator
-    assert "ruff check" in execution_generator
-    assert "generate_execution_delivery_vectors.py --check" in execution_generator
     assert jobs["security"]["if"] == "inputs.security"
     assert _step(jobs["security"], "Scan reachable Git history for secrets")
     assert test_job["services"]["postgres"]["image"] == "postgres:16-alpine"

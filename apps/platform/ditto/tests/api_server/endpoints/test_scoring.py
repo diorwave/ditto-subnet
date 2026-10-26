@@ -33,6 +33,7 @@ from ditto.api_models.continual_retest_settings import ContinualRetestSettings
 from ditto.api_models.validator import LedgerResponse
 from ditto.api_server.dependencies import get_chain_client, get_session
 from ditto.api_server.middleware.error_envelope import ERROR_CODE_VALIDATOR_AUTH
+from ditto.api_server.validator_nonce_janitor import ValidatorNonceJanitor
 from ditto.chain.errors import ChainConnectionError
 from ditto.chain.models import EpochSchedule, NeuronInfo
 from ditto.db.models import (
@@ -48,6 +49,7 @@ from ditto.db.queries.confirmation_scores import (
 )
 from ditto.db.queries.score_ranking import EfficiencyFactorRequesterNotReady
 from ditto.db.queries.scores import upsert_score
+from ditto.db.queries.validator_auth import VALIDATOR_NONCE_EXPIRY_MARGIN
 
 _KEYPAIR = bittensor.Keypair.create_from_uri("//Alice")
 _BOB = bittensor.Keypair.create_from_uri("//Bob")
@@ -1060,6 +1062,49 @@ class TestScoringLedger:
         replay = await client.get("/api/v1/scoring/scores", headers=headers)
         assert first.status_code == 200
         assert replay.status_code == 409
+
+    async def test_future_dated_ledger_nonce_survives_the_janitor(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A stamp at the future edge stays acceptable until requested_at +
+        # MAX_AGE. Sweep just after a wrongly anchored expiry (receipt +
+        # MAX_AGE + margin). That deletes a nonce stored from ``now`` and
+        # leaves one stored from ``requested_at``. The replay is still inside
+        # the signature window, so only the surviving row answers 409.
+        receipt = datetime(2026, 10, 16, 12, tzinfo=UTC)
+        clock = {"now": receipt}
+
+        class _Clock(datetime):
+            @classmethod
+            def now(cls, _tz: object = None) -> _Clock:
+                return cls.fromtimestamp(clock["now"].timestamp(), UTC)
+
+        monkeypatch.setattr(scoring_mod, "datetime", _Clock)
+        _install_db(app, session_maker)
+        _install_chain(app)
+        requested_at = receipt + scoring_mod._LEDGER_REQUEST_MAX_AGE
+        headers = _ledger_headers(requested_at=requested_at)
+
+        first = await client.get("/api/v1/scoring/scores", headers=headers)
+        assert first.status_code == 200, first.text
+
+        clock["now"] = (
+            receipt
+            + scoring_mod._LEDGER_REQUEST_MAX_AGE
+            + VALIDATOR_NONCE_EXPIRY_MARGIN
+            + timedelta(seconds=1)
+        )
+        deleted = await ValidatorNonceJanitor(session_maker=session_maker).sweep(
+            now=clock["now"]
+        )
+        assert deleted == 0
+        replay = await client.get("/api/v1/scoring/scores", headers=headers)
+        assert replay.status_code == 409
+        assert "already been used" in replay.json()["message"]
 
     # The offset, not the timestamp. Parametrize arguments are evaluated once
     # at collection time, so a literal `datetime.now(UTC) + timedelta(minutes=3)`
@@ -2150,3 +2195,122 @@ class TestLedgerConfirmationSeedAnchors:
         resp = await client.get("/api/v1/scoring/scores", headers=_ledger_headers())
         assert resp.status_code == 200, resp.text
         assert resp.json()["confirmation_seed_anchors"] == []
+
+
+class TestLedgerRankShares:
+    """The operator payout curve rides the ledger only to a protocol-31 fleet."""
+
+    async def test_curve_is_withheld_until_every_weight_setter_reports_v31(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from ditto.db.models import BurnSettingsRevision
+
+        await _seed_scored(session_maker, miner=_MINER, composite=0.9)
+        now = datetime.now(UTC)
+        async with session_maker() as session, session.begin():
+            session.add(
+                ValidatorHeartbeat(
+                    validator_hotkey=_VALIDATOR_HOTKEY,
+                    software_version="0.55.0",
+                    protocol_version=30,
+                    code_digest="ab" * 32,
+                    state="idle",
+                    reported_at=now,
+                    seen_at=now,
+                    signature="cd" * 64,
+                    capabilities=_scorer_capabilities(now, versions=[_BENCH_VERSION]),
+                )
+            )
+        _install_db(app, session_maker)
+        _install_chain(app)
+        app.state.session_maker = session_maker
+        app.state.burn_settings.invalidate()
+
+        default = await client.get("/api/v1/scoring/scores", headers=_ledger_headers())
+        assert default.status_code == 200
+        assert default.json().get("rank_shares") is None
+
+        async with session_maker() as session, session.begin():
+            session.add(
+                BurnSettingsRevision(
+                    parent_revision=0,
+                    scope="*",
+                    settings={
+                        "burn_share": 0.0,
+                        "rank_shares": [0.5, 0.2, 0.13, 0.1, 0.07],
+                    },
+                    checksum="ab" * 32,
+                    reason="flatter payout curve",
+                    actor="operator@example.com",
+                )
+            )
+        app.state.burn_settings.invalidate()
+
+        # A v30 weight setter would ignore the field and fold the frozen curve.
+        mixed = await client.get("/api/v1/scoring/scores", headers=_ledger_headers())
+        assert mixed.status_code == 200
+        assert mixed.json().get("rank_shares") is None
+
+        async with session_maker() as session, session.begin():
+            heartbeat = await session.get(ValidatorHeartbeat, _VALIDATOR_HOTKEY)
+            assert heartbeat is not None
+            heartbeat.protocol_version = 31
+
+        ready = await client.get("/api/v1/scoring/scores", headers=_ledger_headers())
+        assert ready.status_code == 200
+        assert ready.json()["rank_shares"] == [0.5, 0.2, 0.13, 0.1, 0.07]
+
+    @pytest.mark.parametrize(
+        ("protocol", "refused"), [(None, True), (30, True), (31, False)]
+    )
+    async def test_a_pinned_curve_refuses_a_sub_31_requester(
+        self,
+        session_maker: async_sessionmaker[AsyncSession],
+        protocol: int | None,
+        refused: bool,
+    ) -> None:
+        """A v30 rejoiner mid-epoch must not fold the frozen curve beside v31."""
+        from fastapi import HTTPException
+
+        from ditto.api_models.validator import LedgerResponse
+        from ditto.api_server.endpoints.scoring import (
+            _require_statistical_cap_requester,
+        )
+
+        now = datetime.now(UTC)
+        if protocol is not None:
+            async with session_maker() as session, session.begin():
+                session.add(
+                    ValidatorHeartbeat(
+                        validator_hotkey=_VALIDATOR_HOTKEY,
+                        software_version="0.55.0",
+                        protocol_version=protocol,
+                        code_digest="ab" * 32,
+                        state="idle",
+                        reported_at=now,
+                        seen_at=now,
+                        signature="cd" * 64,
+                        capabilities=_scorer_capabilities(
+                            now, versions=[_BENCH_VERSION]
+                        ),
+                    )
+                )
+        ledger = LedgerResponse(
+            entries=[], count=0, rank_shares=[0.5, 0.2, 0.13, 0.1, 0.07]
+        )
+        async with session_maker() as session:
+            if refused:
+                with pytest.raises(HTTPException) as caught:
+                    await _require_statistical_cap_requester(
+                        session, _VALIDATOR_HOTKEY, ledger, now=now
+                    )
+                assert caught.value.status_code == 428
+                assert "protocol 31" in str(caught.value.detail)
+            else:
+                served = await _require_statistical_cap_requester(
+                    session, _VALIDATOR_HOTKEY, ledger, now=now
+                )
+                assert served.rank_shares == [0.5, 0.2, 0.13, 0.1, 0.07]

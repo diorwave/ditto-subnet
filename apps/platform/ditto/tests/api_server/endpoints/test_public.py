@@ -46,6 +46,7 @@ from ditto.api_models.public import (
     PublicSubmissionPipeline,
     PublicSystemMetrics,
     PublicV9BaseEvidence,
+    PublicValidatorScore,
     public_validation_failure_code,
 )
 from ditto.api_models.screener import (
@@ -53,6 +54,7 @@ from ditto.api_models.screener import (
     SourceReviewFinding,
 )
 from ditto.api_models.screener_review_settings import ScreenerReviewSettings
+from ditto.api_models.source_disclosure import SourceDisclosure
 from ditto.api_models.stack_health import (
     ComponentHealthState,
     ValidatorComponentHealth,
@@ -70,7 +72,10 @@ from ditto.api_server.dependencies import (
     get_storage_client,
 )
 from ditto.api_server.endpoints import public as public_endpoint
-from ditto.api_server.endpoints.public import _fleet_classification
+from ditto.api_server.endpoints.public import (
+    _fleet_classification,
+    _public_artifact_release,
+)
 from ditto.api_server.koth import TOP5_MAX_CONFIRMATION_SEEDS
 from ditto.api_server.storage import ObjectDownloadFailedError
 from ditto.api_server.validator_names import ValidatorNamesSnapshot
@@ -110,6 +115,7 @@ from ditto.db.models import (
     ValidatorSlotSettingsRevision,
     ValidatorTicket,
 )
+from ditto.db.queries.artifact_release_settings import ArtifactReleasePolicy
 from ditto.db.queries.audit import (
     EVENT_SCORE,
     GENESIS_HASH,
@@ -123,7 +129,6 @@ from ditto.db.queries.benchmark_rollout import (
     PRIORITY_COHORT_SIZE,
     SCORING_QUORUM,
 )
-from ditto.db.queries.coding_evaluations import CodingShadowRunBundle
 from ditto.db.queries.confirmation_bundles import (
     ActiveConfirmationWork,
     insert_confirmation_bundle_settings_revision,
@@ -431,6 +436,115 @@ def test_composite_breakdown_exposes_public_safe_quality_factor_telemetry() -> N
     assert "expected" not in breakdown.model_dump_json()
 
 
+def test_composite_breakdown_treats_memory_over_call_as_applied_factor() -> None:
+    # Issue #533: the scorer records memory_over_call as the exact multiplier
+    # it applied, so the breakdown can fold it rather than leaving it in the
+    # unexplained remainder.
+    breakdown = public_endpoint._composite_breakdown(
+        tool_mean=1.0,
+        memory_mean=1.0,
+        final_composite=0.875,
+        details={
+            "raw_composite": 0.875,
+            "tool_efficiency": 1.0,
+            "memory_over_call": 0.875,
+        },
+    )
+
+    assert breakdown is not None
+    factors = {factor.key: factor for factor in breakdown.quality_factors}
+    assert factors["memory_over_call"].metric == pytest.approx(0.875)
+    assert factors["memory_over_call"].multiplier == pytest.approx(0.875)
+    assert "other_quality_effects" not in factors
+
+
+def _gate_factor_score(details: dict) -> PublicValidatorScore:
+    return public_endpoint._public_validator_score(
+        SimpleNamespace(
+            validator_hotkey=_VALIDATOR_C,
+            composite=0.8,
+            tool_mean=0.9,
+            memory_mean=0.8,
+            median_ms=500,
+            n=120,
+            seed=42,
+            run_id="run-gate-factors",
+            signature="ab" * 64,
+            generated_at=datetime(2026, 10, 9, tzinfo=UTC),
+            details=details,
+        )
+    )
+
+
+def test_public_validator_score_publishes_every_stored_gate_factor() -> None:
+    score = _gate_factor_score(
+        {
+            "bench_version": 14,
+            "tool_efficiency": 0.995152,
+            "metamorphic_consistency": 0.961538,
+            "memory_over_call": 0.984615,
+            "conversational_sanity": 1,
+            "transform_robustness": 0.888889,
+            "audit_case_count": 9,
+            "audit_pairs": {
+                "both_correct": 7,
+                "base_only": 1,
+                "transform_only": 0,
+                "both_wrong": 1,
+            },
+            "audit_pairs_pooled": {
+                "both_correct": 20,
+                "base_only": 3,
+                "transform_only": 1,
+                "both_wrong": 2,
+            },
+        }
+    )
+
+    published = score.model_dump(mode="json")
+    assert published["tool_efficiency"] == pytest.approx(0.995152)
+    assert published["metamorphic_consistency"] == pytest.approx(0.961538)
+    assert published["memory_over_call"] == pytest.approx(0.984615)
+    assert published["conversational_sanity"] == 1.0
+    assert published["transform_robustness"] == pytest.approx(0.888889)
+    assert published["audit_case_count"] == 9
+    # Per-run counts, never the validator's cross-run pool.
+    assert published["audit_pairs"] == {
+        "both_correct": 7,
+        "base_only": 1,
+        "transform_only": 0,
+        "both_wrong": 1,
+    }
+
+
+def test_public_validator_score_gate_factors_are_optional_and_fail_closed() -> None:
+    legacy = _gate_factor_score({"bench_version": 8}).model_dump(mode="json")
+    for key in (
+        "audit_pairs",
+        "tool_efficiency",
+        "metamorphic_consistency",
+        "memory_over_call",
+        "conversational_sanity",
+    ):
+        assert legacy[key] is None
+
+    malformed = _gate_factor_score(
+        {
+            "tool_efficiency": True,
+            "metamorphic_consistency": 1.5,
+            "memory_over_call": "0.9",
+            "conversational_sanity": float("nan"),
+            "audit_pairs": {"both_correct": 3, "base_only": -1},
+        }
+    )
+    assert malformed.tool_efficiency is None
+    assert malformed.metamorphic_consistency is None
+    assert malformed.memory_over_call is None
+    assert malformed.conversational_sanity is None
+    assert malformed.audit_pairs is None
+    assert _gate_factor_score({"audit_pairs": {}}).audit_pairs is None
+
+
 def test_composite_breakdown_shows_no_token_penalty_when_within_budget() -> None:
     details = {
         "raw_composite": 0.493952,
@@ -543,86 +657,6 @@ def test_budgeted_token_record_still_requires_a_budget_percentile() -> None:
     )
     assert breakdown is not None
     assert breakdown.token_efficiency_multiplier is None
-
-
-def test_public_coding_shadow_keeps_absent_pending_stale_and_zero_distinct() -> None:
-    now = datetime(2026, 9, 10, 20, 0, tzinfo=UTC)
-    run = SimpleNamespace(
-        artifact_sha256="aa" * 32,
-        screened_image_sha256="bb" * 32,
-        bench_version=12,
-    )
-
-    def bundle(
-        *, results: dict[UUID, object], tickets: list[object]
-    ) -> CodingShadowRunBundle:
-        return cast(
-            CodingShadowRunBundle,
-            SimpleNamespace(run=run, results=results, tickets=tickets),
-        )
-
-    assert (
-        public_endpoint._public_coding_shadow(
-            None,
-            artifact_sha256="aa" * 32,
-            screened_image_sha256="bb" * 32,
-            bench_version=12,
-        )
-        is None
-    )
-
-    scheduled = public_endpoint._public_coding_shadow(
-        bundle(results={}, tickets=[]),
-        artifact_sha256="aa" * 32,
-        screened_image_sha256="bb" * 32,
-        bench_version=12,
-    )
-    assert scheduled is not None
-    assert scheduled.status == "scheduled" and scheduled.score is None
-
-    collecting = public_endpoint._public_coding_shadow(
-        bundle(
-            results={
-                UUID(int=1): SimpleNamespace(repair_mean_micros=0, created_at=now)
-            },
-            tickets=[SimpleNamespace()],
-        ),
-        artifact_sha256="aa" * 32,
-        screened_image_sha256="bb" * 32,
-        bench_version=12,
-    )
-    assert collecting is not None
-    assert collecting.status == "collecting"
-    assert collecting.result_count == 1 and collecting.score is None
-
-    stale = public_endpoint._public_coding_shadow(
-        bundle(results={}, tickets=[]),
-        artifact_sha256="cc" * 32,
-        screened_image_sha256="bb" * 32,
-        bench_version=12,
-    )
-    assert stale is not None
-    assert stale.status == "stale" and stale.score is None
-
-    zero = public_endpoint._public_coding_shadow(
-        bundle(
-            results={
-                UUID(int=index): SimpleNamespace(
-                    repair_mean_micros=0,
-                    created_at=now + timedelta(seconds=index),
-                )
-                for index in range(1, 4)
-            },
-            tickets=[SimpleNamespace()] * 3,
-        ),
-        artifact_sha256="aa" * 32,
-        screened_image_sha256="bb" * 32,
-        bench_version=12,
-    )
-    assert zero is not None
-    assert zero.status == "complete"
-    assert zero.score == 0.0 and zero.result_count == 3
-    assert zero.weight_eligible is False
 
 
 @pytest.mark.parametrize(
@@ -2170,6 +2204,18 @@ class TestPublicValidationFailureCode:
             == "inference_lane_saturated"
         )
 
+    def test_seed_deadline_is_published_without_attribution(self) -> None:
+        assert (
+            public_validation_failure_code("seed_deadline_exceeded")
+            == "seed_deadline_exceeded"
+        )
+        assert (
+            public_validation_failure_code(
+                "model_relay_unavailable:seed_deadline_exceeded"
+            )
+            is None
+        )
+
     def test_prefixed_admission_code(self) -> None:
         assert (
             public_validation_failure_code(
@@ -2508,7 +2554,7 @@ class TestPublicBenchmarkTimeline:
         """The chart is release history, so it has to render retired eras.
 
         The bounded newest-contract window dates a release from the rollout that
-        activated it and falls back to the changelog epoch. Historical score rows
+        activated it and falls back to the first accepted score. Historical score rows
         may predate the bench-version floor and are grandfathered by it. Reproducing
         that state is the only way to assert the fallback and the rollout-dated
         release in the same read, even after a new contract pushes an older era
@@ -2586,85 +2632,354 @@ class TestPublicBenchmarkTimeline:
         body = response.json()
         assert body["metric"] == "memory_mean"
         assert body["score_quorum"] == 3
-        # The window follows the changelog, so a new contract must land here
-        # without anyone editing a list of versions — this asserts the rule, not
-        # a snapshot of today's versions.
-        expected_versions = sorted(
-            version
-            for version in sorted(
-                (
-                    int(entry["version"])
-                    for entry in bench_glossary_data.version_entries()
-                    if int(entry["version"])
-                    >= public_endpoint._TIMELINE_MIN_BENCH_VERSION
-                ),
-                reverse=True,
-            )[: public_endpoint._TIMELINE_MAX_RELEASES]
-        )
-        assert [
-            release["bench_version"] for release in body["releases"]
-        ] == expected_versions
-        assert len(expected_versions) == public_endpoint._TIMELINE_MAX_RELEASES
+        assert [r["bench_version"] for r in body["releases"]] == [4, 5, 9]
         release_by_version = {
             release["bench_version"]: release for release in body["releases"]
         }
-        assert {4, 5, 8, 9, 10, 11}.issubset(release_by_version)
         assert release_by_version[4]["released_at"] == "2026-07-18T14:30:00Z"
         assert release_by_version[4]["activated_at"] == "2026-07-18T16:00:00Z"
-        assert release_by_version[5]["released_at"] == "2026-07-21T00:00:00Z"
         assert release_by_version[5]["activated_at"] is None
         assert release_by_version[9]["released_at"] == "2026-08-11T15:30:00Z"
         assert release_by_version[9]["activated_at"] is None
-        assert release_by_version[10]["released_at"] == "2027-02-01T00:00:00Z"
-        assert release_by_version[10]["activated_at"] is None
-        assert release_by_version[11]["released_at"] == "2026-08-16T00:00:00Z"
-        assert release_by_version[11]["activated_at"] is None
         assert [point["agent_id"] for point in body["points"]] == [
             first_id,
             second_id,
         ]
         assert [point["memory_mean"] for point in body["points"]] == [0.42, 0.72]
 
-    async def test_a_new_contract_enters_the_window_without_a_code_change(
+    async def test_discovers_v13_with_stale_glossary_and_bounds_the_ledger_window(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Shipping a bench_version must put it on the timeline by itself.
-
-        This endpoint used to carry the range as a literal, which is why a live
-        contract could drive validator weights while the public chart still
-        ended a generation earlier. The window now follows the changelog and
-        drops the oldest contract rather than growing without bound.
-        """
-        _install_db(app, session_maker)
-        entries = list(bench_glossary_data.version_entries())
-        newest = int(entries[0]["version"])
+        # The stale documentation that caused this incident must stay stale in
+        # the regression. Even a documented future contract cannot displace a
+        # competition that actually ran.
         monkeypatch.setattr(
             bench_glossary_data,
             "version_entries",
             lambda: [
-                {
-                    "version": newest + 1,
-                    "epoch": "2026-08-01",
-                    "title": "A contract nobody edited this endpoint for",
-                },
-                *entries,
+                {"version": 99, "epoch": "2027-01-01", "title": "Future docs"},
+                {"version": 10, "epoch": "2027-02-01", "title": "Known title"},
             ],
         )
+        ids = {}
+        for version in range(9, 14):
+            agent_id = await _seed_k3(
+                session_maker,
+                miner=_MINER_A,
+                composites=[0.61, 0.62, 0.63],
+                details={"bench_version": version},
+            )
+            ids[version] = agent_id
+            async with session_maker() as session, session.begin():
+                scores = await session.scalars(
+                    select(Score).where(Score.agent_id == UUID(agent_id))
+                )
+                for index, score in enumerate(scores):
+                    score.created_at = datetime(2026, 8, version, tzinfo=UTC)
+                    score.updated_at = score.created_at + timedelta(minutes=index)
+        # A provisional newest score discovers its era but never becomes a
+        # record. Only the quorum-backed submission above is drawn.
+        await _seed_k3(
+            session_maker,
+            miner=_MINER_B,
+            composites=[0.95, 0.96],
+            details={"bench_version": 13},
+        )
+        async with session_maker() as session, session.begin():
+            session.add(
+                BenchmarkRollout(
+                    rollout_id=uuid4(),
+                    from_version=12,
+                    desired_version=13,
+                    status="activated",
+                    cohort_size=5,
+                    created_at=datetime(2026, 8, 12, tzinfo=UTC),
+                    activated_at=datetime(2026, 8, 12, 12, tzinfo=UTC),
+                )
+            )
+        # Spy on the real reduction, rather than replacing its result: old
+        # competitions must never be loaded just to discard them in the UI.
+        original = public_endpoint.list_memory_leader_timeline
+        inspected = []
 
+        async def bounded_timeline(session, *, bench_versions, not_before_by_version):
+            inspected.extend(bench_versions)
+            return await original(
+                session,
+                bench_versions=bench_versions,
+                not_before_by_version=not_before_by_version,
+            )
+
+        monkeypatch.setattr(
+            public_endpoint, "list_memory_leader_timeline", bounded_timeline
+        )
+        _install_db(app, session_maker)
+        response = await client.get("/api/v1/public/bench/timeline")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["metric"] == "memory_mean"
+        assert body["score_quorum"] == 3
+        releases = {r["bench_version"]: r for r in body["releases"]}
+        assert list(releases) == [10, 11, 12, 13]
+        assert inspected == [10, 11, 12, 13]
+        assert releases[10]["title"] == "Known title"
+        # Observed score time beats an erroneous future glossary epoch.
+        assert releases[10]["released_at"] == "2026-08-10T00:00:00Z"
+        assert releases[12]["title"] == "DittoBench v12"
+        assert releases[13]["released_at"] == "2026-08-12T00:00:00Z"
+        assert releases[13]["activated_at"] == "2026-08-12T12:00:00Z"
+        assert [p["agent_id"] for p in body["points"]] == [
+            ids[v] for v in (10, 11, 12, 13)
+        ]
+        assert [p["memory_mean"] for p in body["points"]] == [0.62] * 4
+
+    async def test_new_rollout_enters_window_without_scores_or_documentation(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        async with session_maker() as session, session.begin():
+            for version in range(10, 15):
+                session.add(
+                    BenchmarkRollout(
+                        rollout_id=uuid4(),
+                        from_version=version - 1,
+                        desired_version=version,
+                        status="collecting" if version == 14 else "activated",
+                        cohort_size=5,
+                        created_at=datetime(2026, 8, version, tzinfo=UTC),
+                        activated_at=(
+                            None
+                            if version == 14
+                            else datetime(2026, 8, version, 12, tzinfo=UTC)
+                        ),
+                    )
+                )
+            session.add(
+                BenchmarkRollout(
+                    rollout_id=uuid4(),
+                    from_version=14,
+                    desired_version=99,
+                    status="superseded",
+                    cohort_size=5,
+                    created_at=datetime(2026, 9, 1, tzinfo=UTC),
+                )
+            )
         body = (await client.get("/api/v1/public/bench/timeline")).json()
+        assert [r["bench_version"] for r in body["releases"]] == [11, 12, 13, 14]
+        assert body["releases"][-1]["activated_at"] is None
+        assert body["points"] == []
 
-        versions = [release["bench_version"] for release in body["releases"]]
-        assert versions[-1] == newest + 1
-        assert len(versions) == public_endpoint._TIMELINE_MAX_RELEASES
-        assert versions == sorted(versions)
-        assert min(versions) >= public_endpoint._TIMELINE_MIN_BENCH_VERSION
+    async def test_documentation_alone_does_not_invent_competitions(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        body = (await client.get("/api/v1/public/bench/timeline")).json()
+        assert body["releases"] == []
+        assert body["points"] == []
+
+    async def test_new_competition_is_visible_while_awaiting_its_first_quorum(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        for version in range(10, 15):
+            await _seed_k3(
+                session_maker,
+                miner=_MINER_A,
+                composites=[0.61, 0.62] if version == 14 else [0.61, 0.62, 0.63],
+                details={"bench_version": version},
+            )
+        _install_db(app, session_maker)
+        body = (await client.get("/api/v1/public/bench/timeline")).json()
+        assert [r["bench_version"] for r in body["releases"]] == [11, 12, 13, 14]
+        assert {p["bench_version"] for p in body["points"]} == {11, 12, 13}
+
+    async def test_concurrent_score_removal_keeps_remaining_dated_competitions(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for version in (12, 13):
+            await _seed_k3(
+                session_maker,
+                miner=_MINER_A,
+                composites=[0.61, 0.62, 0.63],
+                details={"bench_version": version},
+            )
+        original_execute = AsyncSession.execute
+        removed = False
+
+        async def remove_score_before_timestamp_read(
+            session, statement, *args, **kwargs
+        ):
+            nonlocal removed
+            if not removed and "min(scores.created_at)" in str(statement):
+                removed = True
+                async with session_maker() as concurrent, concurrent.begin():
+                    await concurrent.execute(
+                        Score.__table__.delete().where(Score.bench_version == 13)
+                    )
+            return await original_execute(session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", remove_score_before_timestamp_read)
+        _install_db(app, session_maker)
+        response = await client.get("/api/v1/public/bench/timeline")
+        assert removed
+        assert response.status_code == 200
+        body = response.json()
+        assert [r["bench_version"] for r in body["releases"]] == [12]
+        assert {p["bench_version"] for p in body["points"]} == {12}
+
+
+def _check_finalized_admission_parity(monkeypatch):
+    """Reuse public-board scenarios to check the admission contract fields."""
+    original = public_endpoint.build_public_leaderboard
+
+    async def checked(*args, **kwargs):
+        full = await original(*args, **kwargs)
+        # Admission consumes only the default live board; historical callers
+        # keep their existing query-count contract and are outside this mode.
+        if kwargs.get("bench_version") is not None or (
+            len(args) > 3 and args[3] is not None
+        ):
+            return full
+        compact = await original(*args, **kwargs, admission_only=True)
+
+        def admission_rows(board):
+            return [
+                (
+                    entry.rank,
+                    entry.agent_id,
+                    entry.bench_version,
+                    entry.official_composite,
+                )
+                for entry in board.entries
+                if entry.finalized
+            ]
+
+        assert admission_rows(compact) == admission_rows(full)
+        return full
+
+    monkeypatch.setattr(public_endpoint, "build_public_leaderboard", checked)
+
+
+async def test_admission_keeps_full_confirmation_authority_and_skips_display(
+    app, session_maker, record_property
+):
+    from fastapi import Request, Response
+    from sqlalchemy import event
+
+    from ditto.tests.api_server.endpoints.test_admin_confirmation_bundles import (
+        activate_bench_version,
+        seed_completed_bundle,
+    )
+
+    confirmed, _ = await seed_completed_bundle(session_maker)
+    unconfirmed = await _seed_k3(
+        session_maker,
+        miner=_MINER_B,
+        composites=[0.99] * 3,
+        details={"bench_version": 9},
+    )
+    unconfirmed = UUID(unconfirmed)
+    base_only = UUID(
+        await _seed_k3(
+            session_maker,
+            miner="5" + "F" * 47,
+            composites=[0.97] * 3,
+            details={"bench_version": 9},
+        )
+    )
+    now = datetime.now(UTC)
+    async with session_maker() as session, session.begin():
+        agent = await session.get(Agent, confirmed)
+        assert agent is not None
+        agent.miner_hotkey = _MINER_A
+        for index in range(3):
+            session.add(
+                Score(
+                    agent_id=confirmed,
+                    validator_hotkey=f"validator-{index}",
+                    bench_version=9,
+                    run_id=f"confirmed-{index}",
+                    seed=index,
+                    composite=0.75,
+                    tool_mean=0.75,
+                    memory_mean=0.75,
+                    median_ms=500,
+                    n=114,
+                    generated_at=now,
+                )
+            )
+    for index, (agent_id, hotkey) in enumerate(
+        ((confirmed, _MINER_A), (unconfirmed, _MINER_B))
+    ):
+        await _seed_payment(
+            session_maker,
+            agent_id=str(agent_id),
+            miner_hotkey=hotkey,
+            miner_coldkey="5SharedConfirmationOwner",
+            index=index,
+        )
+    await activate_bench_version(session_maker, 9)
+    _install_db(app, session_maker)
+    app.state.session_maker = session_maker
+    request = Request({"type": "http", "app": app})
+    counts = []
+    for admission_only in (False, True):
+        statements = []
+        async with session_maker() as session:
+            bind = session.get_bind()
+
+            def before_execute(*args, observed=statements):
+                observed.append(args[2])
+
+            event.listen(bind, "before_cursor_execute", before_execute)
+            try:
+                board = await public_endpoint.build_public_leaderboard(
+                    request,
+                    Response(),
+                    session,
+                    admission_only=admission_only,
+                )
+            finally:
+                event.remove(bind, "before_cursor_execute", before_execute)
+        counts.append(len(statements))
+        finalized = [entry for entry in board.entries if entry.finalized]
+        assert [
+            (entry.rank, entry.agent_id, entry.bench_version) for entry in finalized
+        ] == [(1, confirmed, 9)]
+        assert finalized[0].official_composite == pytest.approx(0.65)
+        assert all(entry.agent_id != unconfirmed for entry in board.entries)
+        if not admission_only:
+            assert any(
+                entry.agent_id == base_only and not entry.finalized
+                for entry in board.entries
+            )
+        else:
+            assert len(board.entries) == 1
+    record_property("admission_statement_counts", counts)
+    assert counts[1] < counts[0]
 
 
 class TestPublicLeaderboard:
+    @pytest.fixture(autouse=True)
+    def admission_parity(self, monkeypatch):
+        _check_finalized_admission_parity(monkeypatch)
+
     async def test_leaderboard_publishes_confirmation_policy_mode(
         self,
         app: FastAPI,
@@ -6378,12 +6693,11 @@ class TestPublicFleet:
 
 
 class TestPublicActivity:
-    async def test_activity_and_operations_project_only_exact_coding_aggregate(
+    async def test_activity_and_operations_omit_the_retired_coding_shadow(
         self,
         app: FastAPI,
         client: httpx.AsyncClient,
         session_maker: async_sessionmaker[AsyncSession],
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         await _activate_era(session_maker)
         agent_id = UUID(
@@ -6391,49 +6705,14 @@ class TestPublicActivity:
                 session_maker,
                 miner=_MINER_A,
                 status=AgentStatus.EVALUATING,
-                name="coding-pipeline",
+                name="retired-coding",
                 screening_policy_version=SCREENING_POLICY_VERSION,
             )
         )
-        async with session_maker() as session:
-            agent = await session.get(Agent, agent_id)
-        assert agent is not None and agent.screened_image_sha256 is not None
-        completed_at = datetime(2026, 7, 31, 14, 0, tzinfo=UTC)
-        bundle = cast(
-            CodingShadowRunBundle,
-            SimpleNamespace(
-                run=SimpleNamespace(
-                    artifact_sha256=agent.sha256,
-                    screened_image_sha256=agent.screened_image_sha256,
-                    bench_version=_ERA,
-                ),
-                tickets=[SimpleNamespace()] * 3,
-                results={
-                    UUID(int=index): SimpleNamespace(
-                        repair_mean_micros=0,
-                        created_at=completed_at + timedelta(seconds=index),
-                    )
-                    for index in range(1, 4)
-                },
-            ),
-        )
-        latest = AsyncMock(return_value={agent_id: bundle})
-        monkeypatch.setattr(public_endpoint, "latest_coding_shadow_runs", latest)
         _install_db(app, session_maker)
 
         activity = (await client.get("/api/v1/public/activity")).json()
         operations = (await client.get("/api/v1/public/operations")).json()
-        expected = {
-            "status": "complete",
-            "score": 0.0,
-            "result_count": 3,
-            "score_quorum": 3,
-            "bench_version": _ERA,
-            "coding_contract_version": 1,
-            "completed_at": "2026-07-31T14:00:03Z",
-            "shadow_only": True,
-            "weight_eligible": False,
-        }
         activity_entry = next(
             entry for entry in activity["entries"] if entry["agent_id"] == str(agent_id)
         )
@@ -6442,21 +6721,9 @@ class TestPublicActivity:
             for entry in operations["activity"]["entries"]
             if entry["agent_id"] == str(agent_id)
         )
-        assert activity_entry["coding_shadow"] == expected
-        assert operations_entry["coding_shadow"] == expected
-        encoded = json.dumps(operations_entry["coding_shadow"])
-        for forbidden in (
-            "run_row_id",
-            "ticket_id",
-            "task_id",
-            "release_id",
-            "evidence_sha256",
-            "object_key",
-            "artifact_sha256",
-            "screened_image_sha256",
-        ):
-            assert forbidden not in encoded
-        assert latest.await_count == 2
+        # The field stays in the schema for old clients but is never produced.
+        assert "coding_shadow" not in activity_entry
+        assert "coding_shadow" not in operations_entry
 
     async def test_agent_summary_is_a_targeted_glance_level_projection(
         self,
@@ -6625,9 +6892,8 @@ class TestPublicActivity:
         # Includes one bounded query for the independent live LongMem lane
         # and one for live handle-claim reservations plus attested owner roots
         # so operations badges classify family children correctly.
-        # Plus one bounded miner-avatar lookup for the page's hotkeys and one
-        # exact-agent Coding-shadow aggregate lookup for the parallel public lane.
-        assert len(statements) <= 38
+        # Plus one bounded miner-avatar lookup for the page's hotkeys.
+        assert len(statements) <= 37
         body = response.json()
         assert body["active_bench_version"] == _ERA
         assert body["desired_bench_version"] == _NEXT_ERA
@@ -10503,9 +10769,8 @@ class TestPublicActivity:
         # that a currently available validator can actually consume, plus
         # one live handle-claim reservation read and one attested-owner fold
         # so family children keep a reserved handle.
-        # Plus one bounded miner-avatar lookup for the page's hotkeys and one
-        # exact-agent Coding-shadow aggregate lookup for the parallel public lane.
-        assert len(statements) <= 22
+        # Plus one bounded miner-avatar lookup for the page's hotkeys.
+        assert len(statements) <= 21
         assert body["count"] == 1
         assert body["total"] == 2
         assert body["total_pages"] == 2
@@ -12155,6 +12420,89 @@ class TestPublicArtifactRelease:
         king = await client.get(f"/api/v1/public/agent/{former_king_id}/artifact")
         assert king.status_code == 200
         storage.presigned_get_url.assert_awaited_once()
+
+    async def test_banned_king_source_is_released_but_never_a_rejected_one(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        now = datetime.now(UTC)
+        banned_king = await _seed_k3(
+            session_maker,
+            miner=_MINER_A,
+            composites=[0.7, 0.8, 0.9],
+            status=AgentStatus.BANNED,
+        )
+        rejected_king = await _seed_k3(
+            session_maker,
+            miner=_MINER_B,
+            composites=[0.7, 0.8, 0.9],
+            status=AgentStatus.REJECTED,
+        )
+        banned_commoner = await _seed_k3(
+            session_maker,
+            miner=_MINER_A,
+            composites=[0.4, 0.5, 0.6],
+            status=AgentStatus.BANNED,
+        )
+        for agent_id in (banned_king, rejected_king):
+            await _crown(
+                session_maker,
+                agent_id=agent_id,
+                first_crowned_at=now - timedelta(hours=49),
+            )
+        _install_db(app, session_maker)
+        storage = AsyncMock()
+        storage.presigned_get_url.return_value = "https://objects.example/source"
+
+        async def _storage():
+            return storage
+
+        app.dependency_overrides[get_storage_client] = _storage
+
+        # A ban does not withhold a king that earned verified winner emissions.
+        # A banned king that never reached a quorum is terminal, not "retry later".
+        unscored_banned_king = await _seed_k3(
+            session_maker,
+            miner=_MINER_B,
+            composites=[0.7],
+            status=AgentStatus.BANNED,
+        )
+        await _crown(
+            session_maker,
+            agent_id=unscored_banned_king,
+            first_crowned_at=now - timedelta(hours=49),
+        )
+        terminal = await client.get(
+            f"/api/v1/public/agent/{unscored_banned_king}/artifact"
+        )
+        assert terminal.status_code == 404
+        released = await client.get(f"/api/v1/public/agent/{banned_king}/artifact")
+        assert released.status_code == 200
+        for withheld in (rejected_king, banned_commoner):
+            response = await client.get(f"/api/v1/public/agent/{withheld}/artifact")
+            assert response.status_code == 404
+        storage.presigned_get_url.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            (AgentStatus.BANNED, "unavailable"),
+            (AgentStatus.SCORED, "awaiting_quorum"),
+        ],
+    )
+    def test_banned_submission_without_quorum_is_not_awaiting_one(
+        self, status: AgentStatus, expected: str
+    ) -> None:
+        release = _public_artifact_release(
+            status=status,
+            score_quorum=None,
+            policy=ArtifactReleasePolicy(SourceDisclosure.PUBLIC, 48),
+            king_reveal=None,
+            now=datetime.now(UTC),
+        )
+        assert release.status == expected
 
     async def test_king_source_is_embargoed_until_the_window_elapses(
         self,

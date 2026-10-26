@@ -98,9 +98,11 @@ effort on each OpenAI-compatible chat request. The accepted spellings are:
 ```
 
 The allowed values are exactly `low`, `medium`, and `high`. Omitting both
-fields selects `medium`. Supplying both is accepted only when the values agree;
-conflicting aliases, unknown values, wrong types, and caller-supplied provider
-controls fail before provider capacity or request accounting is spent.
+fields selects `medium`. When both aliases are present, the nested effort wins.
+The nested form may also repeat `"exclude": true`, the privacy value already
+pinned by the scorer. `"exclude": false`, wrong types, unknown effort values,
+and other caller-supplied provider controls fail before provider capacity or
+request accounting is spent.
 
 The trusted scorer broker canonicalizes either spelling to one provider body:
 
@@ -161,6 +163,18 @@ stays 9); every v13 field above is additive and optional for a v9-era harness,
 which simply sees a few more tools and richer schemas.
 
 ## Dataset
+
+### Generator-round datasets
+
+`generator-round-v1` is advertised and admitted whenever the scorer runs in
+trusted screened-image mode (`DITTOBENCH_ALLOW_SCREENED_IMAGES=1`, which every
+validator stack sets). It is independent of the private V13 transport below:
+round tickets are issued only by Platform, and only while the generator
+competition's `validator_rounds_enabled` setting is on, so that setting is the
+operator kill switch. A round request carries the exact round dataset bytes
+(at most `challenge.MaxRoundDatasetBytes` decoded) and their canonical SHA-256.
+Its report goes to Platform's round endpoint and never enters the agent score
+ledger.
 
 ### Private V13 control-plane transport (default off)
 
@@ -1032,13 +1046,14 @@ marked incomplete (`TestClaimSpanCaptureBooksHarnessAndCompletionSpans`
 (#1849), `TestClaimSpanCaptureBoundsCompletionsPerCase` (#1849)).
 
 **The published normaliser.** Both sides pass every span through
-`scoregates.NormalizeSpan` — Unicode NFKC, casefold, markdown/label stripping
+`scoregates.NormalizeSpan` — combining marks dropped and Unicode NFKC
+(`José` → `jose`), casefold, markdown/label stripping
 (emphasis, code fences, headings, list markers, `ANSWER:`-style labels),
 punctuation folded to spaces except `$ . , -` inside numbers, whitespace
-collapsed — then tokenize with the Bench v12 value-token rule
-(`scoregates.ValueTokenHashes`): every `CanonicalNumber` (strip `$` and
+collapsed — then tokenize with `scoregates.SpanTokens`, the Bench v12
+value-token rule widened to every script: every `CanonicalNumber` (strip `$` and
 grouping commas, drop trailing fractional zeros and leading zeros) plus every
-lowercase alphanumeric token of at least 4 characters. `$4,110.67`,
+lowercase letter/digit run of at least 4 characters. `$4,110.67`,
 `4110.67 dollars`, `**Answer:** $4110.67`, `{"answer":"4110.67"}` and
 `４１１０.６７` all yield the single claim token `4110.67`; `411067` does not.
 Miners run the same functions locally; the vectors are published in

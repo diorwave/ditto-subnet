@@ -42,22 +42,6 @@ from ditto.api_models.benchmark_progress import (
     BenchmarkProgress,
     benchmark_progress_signing_token,
 )
-from ditto.api_models.coding_certification import (
-    CodingCapabilityCertificationReceipt,
-    _canonical_json_bytes,
-    coding_certification_signing_message,
-)
-from ditto.api_models.coding_certification_leases import (
-    CodingCertificationLeaseStatus,
-)
-from ditto.api_models.coding_inference import (
-    CodingInferencePolicy,
-    CodingInferenceProviderSettlement,
-    CodingInferenceReceiptSet,
-    coding_inference_digest,
-    policy_digest,
-    provider_settlement_digest,
-)
 from ditto.api_models.confirmation_progress import (
     ConfirmationProgress,
     confirmation_progress_signing_token,
@@ -74,7 +58,9 @@ from ditto.api_models.stack_health import (
     validator_stack_health_signing_token,
 )
 from ditto.api_models.system_health import (
+    HostSpecs,
     SystemMetrics,
+    host_specs_signing_token,
     system_metrics_signing_token,
 )
 from ditto.api_models.ticket_status import TicketPurpose, TicketStatus
@@ -129,18 +115,12 @@ from ditto.db.models import (
     BenchmarkDataset,
     BenchmarkRollout,
     BenchmarkRolloutMember,
-    CodingCapabilityCertification,
-    CodingCertificationInferenceGrant,
-    CodingCertificationInferenceRequest,
-    CodingCertificationLease,
     ConfirmationBundle,
     ConfirmationBundleSettingsRevision,
     ConfirmationBundleSubject,
     ConfirmationBundleTicket,
     ConfirmationScore,
     ContinualRetestSettingsRevision,
-    CoreQualificationObservation,
-    CoreQualificationPolicyRevision,
     InferenceGrant,
     InferenceProviderRoute,
     InferenceRoutingPolicy,
@@ -630,6 +610,7 @@ def _heartbeat_payload(
     confirmation_progress: list[dict[str, object]] | None = None,
     updater_status: dict[str, object] | None = None,
     weights_fold: dict[str, object] | None = None,
+    host_specs: dict[str, object] | None = None,
 ) -> dict[str, object]:
     ts = timestamp if timestamp is not None else int(datetime.now(UTC).timestamp())
     hotkey = keypair.ss58_address
@@ -673,6 +654,18 @@ def _heartbeat_payload(
                         if weights_fold is not None
                         else ""
                     )
+                    if host_specs is not None:
+                        typed_fold = (
+                            WeightsFold.model_validate(weights_fold)
+                            if weights_fold is not None
+                            else None
+                        )
+                        typed_specs = HostSpecs.model_validate(host_specs)
+                        domain = "v32"
+                        fold_token = (
+                            f"{weights_fold_signing_token(typed_fold)}:"
+                            f"{host_specs_signing_token(typed_specs)}:"
+                        )
                     message = (
                         f"ditto-validator-heartbeat:{domain}:{hotkey}:0.1.0:"
                         f"{protocol_version}:{code_digest}:{state}:"
@@ -797,6 +790,8 @@ def _heartbeat_payload(
         payload["confirmation_progress"] = confirmation_progress
     if weights_fold is not None:
         payload["weights_fold"] = weights_fold
+    if host_specs is not None:
+        payload["host_specs"] = host_specs
     if updater_status is not None:
         payload["updater_status"] = updater_status
     return payload
@@ -1971,6 +1966,108 @@ class TestHeartbeat:
             row = await session.get(ValidatorHeartbeat, _VALIDATOR_HOTKEY)
             assert row is not None
             assert row.updater_status == updater
+
+    async def test_v32_persists_and_publishes_host_specs(
+        self,
+        app: FastAPI,
+        client: httpx.AsyncClient,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        _install_db(app, session_maker)
+        _install_chain(app)
+        timestamp = int(datetime.now(UTC).timestamp())
+        specs = {
+            "cpu_count": 16,
+            "cpu_physical_cores": 8,
+            "memory_total_mib": 65_536,
+            "disk_total_gib": 500,
+            "architecture": "x86_64",
+        }
+        common: dict[str, Any] = {
+            "timestamp": timestamp,
+            "protocol_version": 32,
+            "capabilities": _quorum_capabilities(),
+            "stack": _V7_STACK,
+            "stack_health": _V9_STACK_HEALTH,
+            "benchmark_capacity": _IDLE_CAPACITY,
+            "confirmation_progress": [],
+            "updater_status": {
+                "enabled": True,
+                "channel": "compat-2",
+                "state": "idle",
+                "current_descriptor": (
+                    "ghcr.io/ditto-assistant/ditto-subnet-stack@sha256:" + "a" * 64
+                ),
+                "current_version": "0.370.0",
+                "candidate_descriptor": None,
+                "candidate_version": None,
+                "failed_candidate_count": 0,
+                "retry_after": None,
+                "suppressed": False,
+                "last_failure_at": None,
+                "last_failure_reason": None,
+                "observed_at": timestamp,
+                "self_refresh_installed": False,
+            },
+        }
+        # A failed probe omits the block and signs the v23 domain.
+        without = await client.post(
+            "/api/v1/validator/heartbeat",
+            headers=_AUTH_HEADER,
+            json=_heartbeat_payload(**common),
+        )
+        assert without.status_code == 200, without.text
+
+        announced = await client.post(
+            "/api/v1/validator/heartbeat",
+            headers=_AUTH_HEADER,
+            json=_heartbeat_payload(
+                **{**common, "timestamp": timestamp + 1}, host_specs=specs
+            ),
+        )
+        assert announced.status_code == 200, announced.text
+        async with session_maker() as session:
+            row = await session.get(ValidatorHeartbeat, _VALIDATOR_HOTKEY)
+            assert row is not None
+            assert row.host_specs == specs
+
+        fleet = (await client.get("/api/v1/public/validators")).json()
+        member = next(
+            item
+            for item in fleet["validators"]
+            if item["validator_hotkey"] == _VALIDATOR_HOTKEY
+        )
+        assert member["host_specs"] == specs
+
+        # A later failed probe keeps the last announced hardware.
+        omitted = await client.post(
+            "/api/v1/validator/heartbeat",
+            headers=_AUTH_HEADER,
+            json=_heartbeat_payload(**{**common, "timestamp": timestamp + 2}),
+        )
+        assert omitted.status_code == 200, omitted.text
+        async with session_maker() as session:
+            row = await session.get(ValidatorHeartbeat, _VALIDATOR_HOTKEY)
+            assert row is not None
+            assert row.host_specs == specs
+
+        # The specs are signed: an inflated RAM figure fails verification.
+        tampered = _heartbeat_payload(
+            **{**common, "timestamp": timestamp + 3}, host_specs=specs
+        )
+        tampered["host_specs"] = {**specs, "memory_total_mib": 262_144}
+        rejected = await client.post(
+            "/api/v1/validator/heartbeat", headers=_AUTH_HEADER, json=tampered
+        )
+        assert rejected.status_code == 401, rejected.text
+
+        # Below v32 the block is refused outright.
+        legacy = _heartbeat_payload(**{**common, "protocol_version": 31})
+        legacy["host_specs"] = specs
+        refused = await client.post(
+            "/api/v1/validator/heartbeat", headers=_AUTH_HEADER, json=legacy
+        )
+        assert refused.status_code == 422, refused.text
 
     async def test_v27_persists_and_publishes_the_weights_fold(
         self,
@@ -8597,39 +8694,6 @@ class TestSubmitScore:
         assert response.status_code == 200, response.text
         activate.assert_not_awaited()
 
-    async def test_shadow_core_qualification_failure_never_rejects_score(
-        self,
-        app: FastAPI,
-        client: httpx.AsyncClient,
-        session_maker: async_sessionmaker[AsyncSession],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        observe = AsyncMock(side_effect=RuntimeError("shadow observer unavailable"))
-        monkeypatch.setattr(
-            "ditto.api_server.endpoints.validator.observe_core_qualification",
-            observe,
-        )
-        agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
-        _install_db(app, session_maker)
-        _install_chain(app)
-        await _seed_ticket(session_maker, agent_id)
-
-        response = await client.post(
-            f"/api/v1/validator/agent/{agent_id}/score",
-            json=_score_payload(agent_id),
-        )
-
-        assert response.status_code == 200, response.text
-        observe.assert_awaited_once()
-        async with session_maker() as session:
-            assert (
-                await session.get(
-                    Score,
-                    (agent_id, _BENCH_VERSION, _VALIDATOR_HOTKEY),
-                )
-                is not None
-            )
-
     async def test_finalized_score_retest_hot_swaps_without_leaving_finalized_state(
         self,
         app: FastAPI,
@@ -12851,6 +12915,8 @@ def _scorer_capable_capabilities(
         **_V7_CAPABILITIES,
         "ticket_inference": True,
         "signed_score_quorum": True,
+        # v13+ work also requires the Platform-issued sandbox memory cap.
+        "sandbox_memory_limit": True,
         "scorer_benchmarks": {
             "status": "fresh_verified",
             "supported_bench_versions": list(versions),
@@ -14251,599 +14317,6 @@ class TestTop5CatchUpConvergence:
                 )
             )
         assert issued == 2, "ordinary quorum scoring must be untouched"
-
-
-def _coding_certification_receipt(
-    *,
-    certification_id: str = "cert-endpoint-001",
-    harness_instance_id: str = "harness-endpoint-001",
-    failed: bool = False,
-    issued_at_unix: int | None = None,
-) -> CodingCapabilityCertificationReceipt:
-    vector = json.loads(
-        (
-            Path(__file__).parents[6]
-            / "packages"
-            / "dittobench-coding-contract"
-            / "testdata"
-            / "coding_certification_v1.json"
-        ).read_text(encoding="utf-8")
-    )["receipt"]
-    now = datetime.now(UTC)
-    vector["certification_id"] = certification_id
-    vector["harness_instance_id"] = harness_instance_id
-    vector["agent_artifact_sha256"] = _SHA256
-    if issued_at_unix is None:
-        issued_at_unix = int(now.timestamp())
-    vector["issued_at_unix"] = issued_at_unix
-    vector["expires_at_unix"] = issued_at_unix + 3600
-    if failed:
-        vector["status"] = "failed"
-        vector["failure_stage"] = "grade"
-        vector["failure_code"] = "public_canary_failed"
-    vector.pop("certification_sha256")
-    body = (
-        (
-            json.dumps(
-                vector,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            + "\n"
-        )
-        .replace("\u2028", "\\u2028")
-        .replace("\u2029", "\\u2029")
-        .encode()
-    )
-    vector["certification_sha256"] = hashlib.sha256(body).hexdigest()
-    return CodingCapabilityCertificationReceipt.model_validate_json(json.dumps(vector))
-
-
-async def _seed_claimed_certification_lease(
-    maker: async_sessionmaker[AsyncSession],
-    agent_id: UUID,
-    receipt: CodingCapabilityCertificationReceipt,
-    *,
-    screened_image_sha256: str = "12" * 32,
-    status: str = CodingCertificationLeaseStatus.CLAIMED.value,
-) -> UUID:
-    lease_id = uuid4()
-    now = datetime.now(UTC)
-    issued = now - timedelta(minutes=1)
-    deadline = now + timedelta(minutes=20)
-    async with maker() as session, session.begin():
-        agent = await session.get(Agent, agent_id)
-        assert agent is not None
-        policy = await session.scalar(
-            select(CoreQualificationPolicyRevision).where(
-                CoreQualificationPolicyRevision.bench_version == _BENCH_VERSION
-            )
-        )
-        if policy is None:
-            policy = CoreQualificationPolicyRevision(
-                bench_version=_BENCH_VERSION,
-                parent_revision=0,
-                enter_composite=0.8,
-                enter_tool_mean=0.8,
-                enter_memory_mean=0.8,
-                exit_composite=0.7,
-                exit_tool_mean=0.7,
-                exit_memory_mean=0.7,
-                enter_observations=2,
-                exit_observations=2,
-                weight_eligible=False,
-                checksum="cc" * 32,
-                reason="start shadow qualification",
-                actor="test-admin",
-            )
-            session.add(policy)
-            await session.flush()
-        observation = CoreQualificationObservation(
-            observation_id=uuid4(),
-            agent_id=agent.agent_id,
-            artifact_sha256=agent.sha256,
-            screened_image_sha256=screened_image_sha256,
-            bench_version=_BENCH_VERSION,
-            policy_revision=policy.revision,
-            policy_checksum=policy.checksum,
-            score_evidence_sha256="11" * 32,
-            score_count=3,
-            full_size=True,
-            complete_wave=True,
-            score_evidence={"scores": []},
-            median_composite=0.9,
-            median_tool_mean=0.9,
-            median_memory_mean=0.9,
-            entry_passed=True,
-            retention_passed=True,
-            qualified=True,
-            enter_streak=2,
-            exit_streak=0,
-            decision="entered",
-            source="score_commit",
-            actor=None,
-            reason=None,
-            weight_eligible=False,
-            observed_at=issued,
-        )
-        session.add(observation)
-        await session.flush()
-        authority = {
-            "schema": "dittobench-coding-certification-lease-v1",
-            "coding_contract_version": 1,
-            "weight_eligible": False,
-            "lease_id": str(lease_id),
-            "validator_hotkey": _VALIDATOR_HOTKEY,
-            "agent_id": str(agent.agent_id),
-            "agent_artifact_sha256": agent.sha256,
-            "screened_image_sha256": screened_image_sha256,
-            "bench_version": _BENCH_VERSION,
-            "core_qualification_observation_id": str(observation.observation_id),
-            "core_qualification_policy_checksum": policy.checksum,
-            "canary_manifest_sha256": receipt.canary_manifest_sha256,
-            "runner_plan_sha256": "ee" * 32,
-            "grader_plan_sha256": receipt.grader_plan_sha256,
-            "resource_profile_sha256": "11" * 32,
-            "inference_policy_sha256": "22" * 32,
-            "issued_at": issued.isoformat(),
-            "deadline": deadline.isoformat(),
-        }
-        session.add(
-            CodingCertificationLease(
-                lease_id=lease_id,
-                agent_id=agent.agent_id,
-                artifact_sha256=agent.sha256,
-                screened_image_sha256=screened_image_sha256,
-                screened_image_id=agent.screened_image_id or "sha256:" + "34" * 32,
-                screened_image_ref=agent.screened_image_ref
-                or f"ditto-screen/{agent.agent_id}:latest",
-                screened_image_upload_id=agent.screened_image_upload_id or uuid4(),
-                validator_hotkey=_VALIDATOR_HOTKEY,
-                bench_version=_BENCH_VERSION,
-                coding_contract_version=1,
-                core_qualification_observation_id=observation.observation_id,
-                core_qualification_policy_checksum=policy.checksum,
-                canary_manifest_sha256=receipt.canary_manifest_sha256,
-                runner_plan_sha256="ee" * 32,
-                grader_plan_sha256=receipt.grader_plan_sha256,
-                resource_profile_sha256="11" * 32,
-                inference_policy_sha256="22" * 32,
-                status=status,
-                weight_eligible=False,
-                issued_at=issued,
-                deadline=deadline,
-                claimed_at=now if status == "claimed" else None,
-                authority=authority,
-            )
-        )
-    return lease_id
-
-
-def _finalize_coding_receipt(
-    vector: dict[str, object],
-) -> CodingCapabilityCertificationReceipt:
-    payload = json.loads(json.dumps(vector))
-    payload.pop("certification_sha256", None)
-    payload["certification_sha256"] = hashlib.sha256(
-        _canonical_json_bytes(payload)
-    ).hexdigest()
-    return CodingCapabilityCertificationReceipt.model_validate(payload)
-
-
-async def _seed_canary_complete_settlement(
-    maker: async_sessionmaker[AsyncSession],
-    lease_id: UUID,
-    receipt: CodingCapabilityCertificationReceipt,
-) -> CodingCapabilityCertificationReceipt:
-    vector = json.loads(
-        (
-            Path(__file__).parents[6]
-            / "packages/dittobench-coding-contract/testdata"
-            / "coding_inference_policy_v1.json"
-        ).read_text(encoding="utf-8")
-    )
-    policy = CodingInferencePolicy.model_validate(vector["policy"])
-    raw = dict(vector["provider_settlements"]["complete"][0])
-    grant_id = uuid4()
-    raw["ticket_id"] = str(lease_id)
-    raw["grant_id"] = str(grant_id)
-    settlement = CodingInferenceProviderSettlement.model_validate_json(json.dumps(raw))
-    settlement_sha256 = provider_settlement_digest(settlement, policy)
-    now = datetime.now(UTC)
-    async with maker() as session, session.begin():
-        lease = await session.get(CodingCertificationLease, lease_id)
-        assert lease is not None
-        session.add(
-            CodingCertificationInferenceGrant(
-                grant_id=grant_id,
-                lease_id=lease_id,
-                validator_hotkey=_VALIDATOR_HOTKEY,
-                case_id=settlement.case_id,
-                profile_capability_id=settlement.profile_capability_id,
-                inference_grant_sha256=policy_digest(policy),
-                model=policy.model,
-                provider_api=policy.provider_api,
-                provider_route=policy.provider_route,
-                receipt_provider=policy.receipt_provider,
-                provider_route_profile=policy.provider_route_profile,
-                provider_account_guardrail=policy.provider_account_guardrail,
-                provider_pipeline_policy=policy.provider_pipeline_policy,
-                provider_cache_policy=policy.provider_cache_policy,
-                reasoning_effort=policy.reasoning_effort,
-                status="revoked",
-                bearer_digest=None,
-                revoke_bearer_digest="dd" * 32,
-                broker_public_key=None,
-                generation=settlement.generation,
-                request_budget=32,
-                prompt_token_budget=10_000,
-                completion_token_budget=2_000,
-                cost_budget_usd_micros=policy.max_cost_usd_micros,
-                request_count=1,
-                prompt_tokens=settlement.prompt_tokens,
-                completion_tokens=settlement.completion_tokens,
-                cost_usd_micros=settlement.cost_usd_micros,
-                active_requests=0,
-                expires_at=lease.deadline,
-                revoked_at=now,
-                weight_eligible=False,
-                created_at=now - timedelta(minutes=1),
-                updated_at=now,
-            )
-        )
-        session.add(
-            CodingCertificationInferenceRequest(
-                request_row_id=uuid4(),
-                grant_id=grant_id,
-                lease_id=lease_id,
-                generation=settlement.generation,
-                sequence=1,
-                request_sequence=settlement.request_sequence,
-                attempt=settlement.attempt,
-                request_id=settlement.request_id,
-                case_id=settlement.case_id,
-                profile_capability_id=settlement.profile_capability_id,
-                inference_grant_sha256=policy_digest(policy),
-                locked_request_sha256=settlement.locked_request_sha256,
-                status="complete",
-                provider_settlement_sha256=settlement_sha256,
-                provider_generation_id=settlement.provider_generation_id,
-                provider_settlement_json=settlement.model_dump_json(by_alias=True),
-                unsettled_reason=None,
-                started_at=now - timedelta(seconds=5),
-                settled_at=now,
-                weight_eligible=False,
-            )
-        )
-    from ditto.db.queries.coding_certifications import _receipt_from_settlement
-
-    reconstructed = _receipt_from_settlement(
-        settlement,
-        sequence=1,
-        prompt_sha256=policy.prompt_sha256,
-        tool_schema_sha256=policy.tool_schema_sha256,
-        settlement_sha256=settlement_sha256,
-    )
-    receipt_set = CodingInferenceReceiptSet.model_validate_json(
-        json.dumps(
-            {
-                "schema": "dittobench-coding-inference-receipt-set-v1",
-                "coding_contract_version": 1,
-                "ticket_id": str(lease_id),
-                "case_id": settlement.case_id,
-                "profile_capability_id": settlement.profile_capability_id,
-                "grant_id": str(grant_id),
-                "generation": settlement.generation,
-                "inference_grant_sha256": policy_digest(policy),
-                "request_budget": 32,
-                "prompt_token_budget": 10_000,
-                "completion_token_budget": 2_000,
-                "receipts": [reconstructed.model_dump(mode="json", by_alias=True)],
-            }
-        )
-    )
-    payload = receipt.model_dump(mode="json", by_alias=True)
-    payload["inference_grant_sha256"] = policy_digest(policy)
-    payload["model_evidence"] = {
-        "model": policy.model,
-        "provider": policy.provider_route,
-        "provider_route_profile": policy.provider_route_profile,
-        "reasoning_effort": policy.reasoning_effort,
-        "inference_grant_sha256": policy_digest(policy),
-        "prompt_sha256": policy.prompt_sha256,
-        "tool_schema_sha256": policy.tool_schema_sha256,
-        "usage_status": "complete",
-        "fallback_used": False,
-        "cost_source": "provider_receipt_v1",
-        "currency": "USD",
-        "provider_receipt_set_sha256": coding_inference_digest(receipt_set),
-        "requests": 1,
-        "prompt_tokens": settlement.prompt_tokens,
-        "completion_tokens": settlement.completion_tokens,
-        "total_tokens": settlement.total_tokens,
-        "cost_usd_micros": settlement.cost_usd_micros,
-        "retry_count": 0,
-    }
-    return _finalize_coding_receipt(payload)
-
-
-def _coding_certification_payload(
-    agent_id: UUID,
-    lease_id: UUID,
-    *,
-    receipt: CodingCapabilityCertificationReceipt | None = None,
-    screened_image_sha256: str = "12" * 32,
-) -> dict[str, object]:
-    receipt = receipt or _coding_certification_receipt()
-    message = coding_certification_signing_message(
-        validator_hotkey=_VALIDATOR_HOTKEY,
-        agent_id=agent_id,
-        bench_version=_BENCH_VERSION,
-        lease_id=lease_id,
-        screened_image_sha256=screened_image_sha256,
-        certification_sha256=receipt.certification_sha256,
-    )
-    return {
-        "validator_hotkey": _VALIDATOR_HOTKEY,
-        "bench_version": _BENCH_VERSION,
-        "lease_id": str(lease_id),
-        "screened_image_sha256": screened_image_sha256,
-        "receipt": receipt.model_dump(mode="json", by_alias=True),
-        "signature": _KEYPAIR.sign(message).hex(),
-    }
-
-
-async def test_shadow_coding_certification_is_append_only_idempotent_and_visible(
-    app: FastAPI,
-    client: httpx.AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
-    await _seed_ticket(session_maker, agent_id)
-    receipt = _coding_certification_receipt()
-    lease_id = await _seed_claimed_certification_lease(session_maker, agent_id, receipt)
-    receipt = await _seed_canary_complete_settlement(session_maker, lease_id, receipt)
-    _install_db(app, session_maker)
-    _install_chain(app)
-    app.state.config = replace(
-        app.state.config, admin_api_token="test-admin-token-at-least-32-characters"
-    )
-    payload = _coding_certification_payload(agent_id, lease_id, receipt=receipt)
-    endpoint = f"/api/v1/validator/agent/{agent_id}/coding-certification"
-
-    first = await client.post(endpoint, json=payload)
-    assert first.status_code == 200, first.text
-    assert first.json()["idempotent"] is False
-    assert first.json()["active"] is True
-
-    replay = await client.post(endpoint, json=payload)
-    assert replay.status_code == 200, replay.text
-    assert replay.json()["idempotent"] is True
-    async with session_maker() as session:
-        assert (
-            await session.scalar(
-                select(func.count()).select_from(CodingCapabilityCertification)
-            )
-            == 1
-        )
-        ticket = await session.get(
-            ValidatorTicket, (agent_id, _BENCH_VERSION, _VALIDATOR_HOTKEY)
-        )
-        assert ticket is not None and ticket.status is TicketStatus.ISSUED
-        assert await session.scalar(select(func.count()).select_from(Score)) == 0
-
-    admin = await client.get(
-        f"/api/v1/admin/agents/{agent_id}/coding-certifications",
-        headers={"Authorization": "Bearer test-admin-token-at-least-32-characters"},
-    )
-    assert admin.status_code == 200, admin.text
-    assert admin.headers["cache-control"] == "no-store"
-    assert admin.json()["coding_certified"] is True
-    assert admin.json()["active_certification_count"] == 1
-    assert admin.json()["certifications"][0]["lease_id"] == str(lease_id)
-    assert receipt.model_evidence is not None
-    async with session_maker() as session:
-        stored = await session.scalar(
-            select(CodingCapabilityCertification).where(
-                CodingCapabilityCertification.agent_id == agent_id
-            )
-        )
-        assert stored is not None
-        assert stored.settlement_generation is not None
-        assert stored.settlement_inference_grant_sha256 == (
-            receipt.inference_grant_sha256
-        )
-        assert stored.settlement_provider_receipt_set_sha256 == (
-            receipt.model_evidence.provider_receipt_set_sha256
-        )
-
-    async with session_maker() as session, session.begin():
-        agent = await session.get(Agent, agent_id, with_for_update=True)
-        assert agent is not None
-        agent.screened_image_sha256 = "13" * 32
-    stale = await client.get(
-        f"/api/v1/admin/agents/{agent_id}/coding-certifications",
-        headers={"Authorization": "Bearer test-admin-token-at-least-32-characters"},
-    )
-    assert stale.status_code == 200
-    assert stale.json()["coding_certified"] is False
-    assert stale.json()["certifications"][0]["stale_reason"] == (
-        "screened_image_changed"
-    )
-
-
-async def test_shadow_coding_certification_rejects_conflict_image_and_signature(
-    app: FastAPI,
-    client: httpx.AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
-    await _seed_ticket(session_maker, agent_id)
-    receipt = _coding_certification_receipt()
-    lease_id = await _seed_claimed_certification_lease(session_maker, agent_id, receipt)
-    receipt = await _seed_canary_complete_settlement(session_maker, lease_id, receipt)
-    _install_db(app, session_maker)
-    _install_chain(app)
-    endpoint = f"/api/v1/validator/agent/{agent_id}/coding-certification"
-    original = _coding_certification_payload(agent_id, lease_id, receipt=receipt)
-
-    nil_lease = dict(original)
-    nil_lease["lease_id"] = "00000000-0000-0000-0000-000000000000"
-    naive = await client.post(endpoint, json=nil_lease)
-    assert naive.status_code == 422
-
-    assert (await client.post(endpoint, json=original)).status_code == 200
-
-    changed = _coding_certification_payload(
-        agent_id,
-        lease_id,
-        receipt=_coding_certification_receipt(harness_instance_id="harness-changed"),
-    )
-    conflict = await client.post(endpoint, json=changed)
-    assert conflict.status_code == 409
-
-    stale_image = _coding_certification_payload(
-        agent_id, lease_id, screened_image_sha256="13" * 32
-    )
-    stale = await client.post(endpoint, json=stale_image)
-    assert stale.status_code == 409
-
-    bad_signature = dict(original)
-    bad_signature["signature"] = "00" * 64
-    rejected = await client.post(endpoint, json=bad_signature)
-    assert rejected.status_code == 401
-
-    out_of_range = _coding_certification_payload(
-        agent_id,
-        lease_id,
-        receipt=_coding_certification_receipt(
-            certification_id="cert-out-of-range-001",
-            harness_instance_id="harness-out-of-range-001",
-            issued_at_unix=10**20,
-        ),
-    )
-    rejected = await client.post(endpoint, json=out_of_range)
-    assert rejected.status_code == 409
-    assert "outside supported bounds" in rejected.text
-
-
-async def test_shadow_coding_certification_rejects_unclaimed_lease(
-    app: FastAPI,
-    client: httpx.AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
-    receipt = _coding_certification_receipt()
-    lease_id = await _seed_claimed_certification_lease(
-        session_maker,
-        agent_id,
-        receipt,
-        status=CodingCertificationLeaseStatus.ISSUED.value,
-    )
-    _install_db(app, session_maker)
-    _install_chain(app)
-    rejected = await client.post(
-        f"/api/v1/validator/agent/{agent_id}/coding-certification",
-        json=_coding_certification_payload(agent_id, lease_id, receipt=receipt),
-    )
-    assert rejected.status_code == 409
-    assert "claimed certification lease" in rejected.text
-
-
-async def test_shadow_coding_certification_rejects_certified_without_settlement(
-    app: FastAPI,
-    client: httpx.AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
-    receipt = _coding_certification_receipt()
-    lease_id = await _seed_claimed_certification_lease(session_maker, agent_id, receipt)
-    _install_db(app, session_maker)
-    _install_chain(app)
-    rejected = await client.post(
-        f"/api/v1/validator/agent/{agent_id}/coding-certification",
-        json=_coding_certification_payload(agent_id, lease_id, receipt=receipt),
-    )
-    assert rejected.status_code == 409
-    assert "settlement is missing" in rejected.text
-
-
-async def test_shadow_coding_certification_accepts_unused_inference_without_settlement(
-    app: FastAPI,
-    client: httpx.AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
-    receipt = _coding_certification_receipt()
-    lease_id = await _seed_claimed_certification_lease(session_maker, agent_id, receipt)
-    payload = receipt.model_dump(mode="json", by_alias=True)
-    payload["status"] = "failed"
-    payload["failure_stage"] = "run"
-    payload["failure_code"] = "coding_inference_not_observed"
-    payload["model_evidence"] = None
-    unused = _finalize_coding_receipt(payload)
-    _install_db(app, session_maker)
-    _install_chain(app)
-    accepted = await client.post(
-        f"/api/v1/validator/agent/{agent_id}/coding-certification",
-        json=_coding_certification_payload(agent_id, lease_id, receipt=unused),
-    )
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["status"] == "failed"
-    assert accepted.json()["accepted"] is True
-    assert accepted.json()["active"] is False
-
-
-async def test_shadow_coding_certification_rejects_unbound_legacy_certified_replay(
-    app: FastAPI,
-    client: httpx.AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = await _seed_agent(session_maker, status=AgentStatus.EVALUATING)
-    await _seed_ticket(session_maker, agent_id)
-    receipt = _coding_certification_receipt()
-    lease_id = await _seed_claimed_certification_lease(session_maker, agent_id, receipt)
-    receipt = await _seed_canary_complete_settlement(session_maker, lease_id, receipt)
-    async with session_maker() as session, session.begin():
-        agent = await session.get(Agent, agent_id)
-        lease = await session.get(CodingCertificationLease, lease_id)
-        assert agent is not None and lease is not None
-        session.add(
-            CodingCapabilityCertification(
-                certification_row_id=uuid4(),
-                agent_id=agent_id,
-                artifact_sha256=agent.sha256,
-                screened_image_sha256=agent.screened_image_sha256,
-                validator_hotkey=_VALIDATOR_HOTKEY,
-                bench_version=_BENCH_VERSION,
-                lease_id=lease_id,
-                ticket_deadline=lease.deadline,
-                coding_contract_version=receipt.coding_contract_version,
-                certification_id=receipt.certification_id,
-                status=receipt.status.value,
-                failure_stage=None,
-                failure_code=None,
-                certification_sha256=receipt.certification_sha256,
-                canary_manifest_sha256=receipt.canary_manifest_sha256,
-                transcript_object_key=receipt.authoring_transcript_object_key,
-                frozen_submission_object_key=receipt.frozen_submission_object_key,
-                issued_at=datetime.fromtimestamp(receipt.issued_at_unix, UTC),
-                expires_at=datetime.fromtimestamp(receipt.expires_at_unix, UTC),
-                weight_eligible=False,
-                receipt=receipt.model_dump(mode="json", by_alias=True),
-                signature="99" * 64,
-            )
-        )
-    _install_db(app, session_maker)
-    _install_chain(app)
-    replay = await client.post(
-        f"/api/v1/validator/agent/{agent_id}/coding-certification",
-        json=_coding_certification_payload(agent_id, lease_id, receipt=receipt),
-    )
-    assert replay.status_code == 409
-    assert "durable settlement binding" in replay.text
 
 
 async def test_v30_treasury_capability_is_signed_and_cannot_be_retrofitted(

@@ -69,6 +69,17 @@ from ditto.api_models.coding_inference_grants import (
     CodingInferenceRevokeRequest,
     CodingInferenceRevokeResponse,
 )
+from ditto.api_models.generator_ledger import GeneratorLedgerResponse
+from ditto.api_models.generator_round_validator import (
+    GeneratorRoundCaseResult,
+    GeneratorRoundFailReason,
+    GeneratorRoundFailRequest,
+    GeneratorRoundFailResponse,
+    GeneratorRoundJobRequest,
+    GeneratorRoundJobResponse,
+    GeneratorRoundScoreRequest,
+    GeneratorRoundScoreResponse,
+)
 from ditto.api_models.inference import (
     InferenceExchangeRequest,
     InferenceExchangeResponse,
@@ -297,6 +308,11 @@ def _inference_budget_evidence(response: httpx.Response) -> dict[str, int]:
     return evidence
 
 
+def _is_transient_platform_status(status_code: int) -> bool:
+    """Request timeout, rate limit, or server error: retry later, blame nobody."""
+    return status_code in (408, 429) or status_code >= 500
+
+
 def _weight_receipt_conflict_code(response: httpx.Response) -> str:
     """Platform's bounded ``<code>: ...`` 409 category; never echo the rest."""
     try:
@@ -327,6 +343,7 @@ class PlatformClient:
         self, observation: ReceiptDiagnosticObservation
     ) -> None:
         report = ReceiptDiagnosticReport(
+            schema_version=3,
             validator_hotkey=self._config.validator_hotkey,
             netuid=self._config.netuid,
             timestamp=int(datetime.now(UTC).timestamp()),
@@ -1970,6 +1987,112 @@ class PlatformClient:
             )
         return JobResponse.model_validate(resp.json())
 
+    async def request_generator_round_job(
+        self, *, slot_id: str
+    ) -> GeneratorRoundJobResponse | None:
+        """Ask Platform for one generator-round panel run on ``slot_id``.
+
+        ``None`` (HTTP 204) means no round panel run is claimable: no round is
+        running, every panel agent is done or leased, or this validator's
+        scorer lacks the ``generator_rounds`` capability.
+        """
+        payload = GeneratorRoundJobRequest(
+            validator_hotkey=self._config.validator_hotkey,
+            slot_id=slot_id,
+            nonce=uuid4(),
+            requested_at=datetime.now(UTC),
+        )
+        payload.signature = self._keypair.sign(payload.signing_message()).hex()
+        url = f"{self._base}{_PREFIX}/generator-round-job"
+        try:
+            resp = await self._client.post(
+                url, headers=self._headers, json=payload.model_dump(mode="json")
+            )
+        except httpx.HTTPError as exc:
+            raise PlatformError(f"generator round job request failed: {exc}") from exc
+        if resp.status_code == 204:
+            return None
+        if resp.status_code != 200:
+            raise PlatformError(
+                f"generator round job rejected ({resp.status_code}): {resp.text[:200]}"
+            )
+        return GeneratorRoundJobResponse.model_validate(resp.json())
+
+    async def submit_generator_round_score(
+        self,
+        job: GeneratorRoundJobResponse,
+        *,
+        run_id: str,
+        results: list[GeneratorRoundCaseResult],
+    ) -> GeneratorRoundScoreResponse:
+        """Post one panel agent's signed per-case round results."""
+        payload = GeneratorRoundScoreRequest(
+            validator_hotkey=self._config.validator_hotkey,
+            round_index=job.round_index,
+            ticket_deadline=job.deadline,
+            dataset_sha256=job.dataset_sha256,
+            run_id=run_id,
+            results=results,
+        )
+        payload.signature = self._keypair.sign(
+            payload.signing_message(job.agent_id)
+        ).hex()
+        url = f"{self._base}{_PREFIX}/agent/{job.agent_id}/generator-round-score"
+        try:
+            resp = await self._client.post(
+                url, headers=self._headers, json=payload.model_dump(mode="json")
+            )
+        except httpx.HTTPError as exc:
+            raise PlatformError(f"generator round submit failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise PlatformError(
+                f"generator round results rejected ({resp.status_code}): "
+                f"{resp.text[:200]}"
+            )
+        return GeneratorRoundScoreResponse.model_validate(resp.json())
+
+    async def fail_generator_round_job(
+        self,
+        job: GeneratorRoundJobResponse,
+        *,
+        reason: GeneratorRoundFailReason,
+        detail: str | None = None,
+    ) -> GeneratorRoundFailResponse | None:
+        """Best-effort release of a round lease this host could not finish.
+
+        Never raises: an unreleased round lease simply expires, and a round run
+        never charges the agent an attempt either way.
+        """
+        payload = GeneratorRoundFailRequest(
+            validator_hotkey=self._config.validator_hotkey,
+            round_index=job.round_index,
+            ticket_deadline=job.deadline,
+            reason=reason,
+            detail=(detail or None) and detail[:500],
+            nonce=uuid4(),
+            requested_at=datetime.now(UTC),
+        )
+        payload.signature = self._keypair.sign(
+            payload.signing_message(job.agent_id)
+        ).hex()
+        url = f"{self._base}{_PREFIX}/agent/{job.agent_id}/generator-round-fail"
+        try:
+            async with asyncio.timeout(30):
+                resp = await self._client.post(
+                    url, headers=self._headers, json=payload.model_dump(mode="json")
+                )
+        except (httpx.HTTPError, TimeoutError) as exc:
+            logger.warning("generator round release failed: %s", exc)
+            return None
+        if resp.status_code != 200:
+            logger.warning(
+                "generator round release rejected (%s): %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+            return None
+        return GeneratorRoundFailResponse.model_validate(resp.json())
+
     async def get_ledger(self) -> LedgerResponse:
         """Pull the best-score-per-payment-coldkey ledger folded into weights.
 
@@ -2080,6 +2203,40 @@ class PlatformClient:
         except (ValidationError, ValueError) as e:
             raise PlatformError("router ledger response was invalid") from e
 
+    async def get_generator_ledger(self) -> GeneratorLedgerResponse:
+        """Pull the shadow generator-competition ledger (best-effort).
+
+        Same signed proof-of-possession as :meth:`get_router_ledger`, against
+        ``GET /scoring/generator-ledger``. :class:`PlatformGeneratorLedgerSource`
+        degrades any failure to an empty ledger.
+        """
+        url = f"{self._base}{_SCORING_PREFIX}/generator-ledger"
+        requested_at = datetime.now(UTC)
+        nonce = uuid4()
+        proof_headers = {
+            **self._headers,
+            "X-Validator-Ledger-Nonce": str(nonce),
+            "X-Validator-Ledger-Requested-At": requested_at.isoformat(),
+            "X-Validator-Ledger-Signature": sign_ledger_request(
+                self._keypair,
+                validator_hotkey=self._config.validator_hotkey,
+                nonce=nonce,
+                requested_at=requested_at,
+            ),
+        }
+        try:
+            resp = await self._client.get(url, headers=proof_headers)
+        except httpx.HTTPError as e:
+            raise PlatformError(f"generator ledger fetch failed: {e}") from e
+        if resp.status_code != 200:
+            raise PlatformError(
+                f"generator ledger rejected ({resp.status_code}): {resp.text[:200]}"
+            )
+        try:
+            return GeneratorLedgerResponse.model_validate(resp.json())
+        except (ValidationError, ValueError) as e:
+            raise PlatformError("generator ledger response was invalid") from e
+
     async def get_private_dataset(
         self, agent_id: UUID, *, dataset_sha256: str, deadline: datetime
     ) -> bytes:
@@ -2097,8 +2254,17 @@ class PlatformClient:
             async with self._client.stream(
                 "POST", url, headers=self._headers, json=payload.model_dump(mode="json")
             ) as response:
+                if _is_transient_platform_status(response.status_code):
+                    # A Platform or database blip says nothing about the agent;
+                    # handing it back as scoring_error would spend the miner's
+                    # base attempt and let this slot fail every lease it claims.
+                    raise PlatformInfrastructureError(
+                        f"private dataset download unavailable ({response.status_code})"
+                    )
                 if response.status_code != 200:
-                    raise PlatformError("private dataset download rejected")
+                    raise PlatformError(
+                        f"private dataset download rejected ({response.status_code})"
+                    )
                 parts = []
                 total = 0
                 async for chunk in response.aiter_bytes(65536):
@@ -2108,7 +2274,9 @@ class PlatformClient:
                     parts.append(chunk)
                 body = b"".join(parts)
         except httpx.HTTPError:
-            raise PlatformError("private dataset transport failed") from None
+            raise PlatformInfrastructureError(
+                "private dataset transport failed"
+            ) from None
         if not body or hashlib.sha256(body).hexdigest() != dataset_sha256:
             raise PlatformError("private dataset digest mismatch")
         return body

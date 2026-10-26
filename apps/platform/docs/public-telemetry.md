@@ -155,7 +155,8 @@ rate-limited, `Cache-Control: public, max-age=30`. Read-only, aggregate-only.
   public-safe, read-only projection of the validator's frozen first-seen KOTH
   fold over finalized authoritative entries: the fixed 0.007 composite-point
   incumbent hysteresis, the
-  statistical band, and the 65% / 14% / 10% / 7% / 4% ranked distribution.
+  statistical band, and the ranked distribution in `rank_shares` (frozen default
+  65% / 14% / 10% / 7% / 4%, or the operator curve once the fleet folds it).
   When `tie_weighting_active` is true, contiguous evidence-tied recipients pool
   only the shares of the ranks they occupy and split that pool equally. Exact
   effective-composite ties qualify directly; non-exact ties require paired
@@ -420,15 +421,28 @@ rate-limited, `Cache-Control: public, max-age=30`. Read-only, aggregate-only.
   heartbeat-capable software; this endpoint does not pretend to enumerate every
   on-chain permit holder.
 
+  From protocol v32 each row also carries signed `host_specs` — logical and
+  physical CPUs, total RAM (MiB), total root disk (GiB), and architecture,
+  probed once per boot — so "is this host smaller than its peers?" is
+  answerable without asking the operator. The coarse percentages above say how
+  busy a host is; `host_specs` says how big it is. Older validators and a failed
+  probe publish `host_specs: null`.
+
   Slot capacity is published as two distinct numbers, because they answer two
   different questions. `configured_slots` (with `healthy_slots`) is what the
   validator *advertises*; `allowed_slots` is what the platform will actually
-  fund on it right now — the operator's `max_concurrent_slots` cap narrowing the
+  fund on it right now — the operator's `max_concurrent_slots` cap (or that
+  validator's own per-validator override) narrowing the
   advertisement, clamped to one while that validator's disk ceiling is tripped.
   The response-level `slot_policy` carries the fleet-wide cap and disk ceiling
   so the difference is explainable without re-deriving the policy. Advertised
   capacity above `allowed_slots` never receives a ticket, and presenting it as
-  available capacity overstates the fleet.
+  available capacity overstates the fleet. `reserved_round_slots` is how many of
+  `allowed_slots` are held back for generator-competition round runs while
+  validator rounds are enabled and the validator advertises round support
+  (`min(R, allowed_slots - 1)`, zero otherwise):
+  canonical and continual-retest work may hold at most
+  `allowed_slots - reserved_round_slots` leases on that validator.
 
   Heartbeat protocol v7 signs a closed `capabilities` object and a fixed
   six-component `stack` identity (`ditto_subnet`, `dittobench_api`,
