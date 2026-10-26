@@ -977,6 +977,17 @@ class ProvenanceNormaliserTest(unittest.TestCase):
             ["VK-48HJXP6A63"],
         )
 
+    def test_v14_replay_carries_mixed_hyphen_forms(self) -> None:
+        """Mirrors ``TestV14ClaimAlternativesCarryMixedHyphenForms``."""
+        self.assertEqual(
+            GATES.claim_alternatives({"bench_version": 14, "expected_answer": "AB-12-CD"}),
+            ["AB-12-CD", "AB‐12-CD", "AB-12‐CD", "AB‐12‐CD"],
+        )
+        self.assertEqual(
+            GATES.claim_alternatives({"bench_version": 14, "expected_answer": "a-b-c-d-e-f"}),
+            ["a-b-c-d-e-f", "a‐b‐c‐d‐e‐f"],
+        )
+
     def test_slot_not_in_prose_accepts_unit_alternatives_and_rejects_substitution(
         self,
     ) -> None:

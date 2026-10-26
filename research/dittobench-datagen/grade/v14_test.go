@@ -92,3 +92,24 @@ func TestV14ClaimAlternativesCarryTheTypographicHyphenForm(t *testing.T) {
 		t.Fatalf("v14 list claim vocabulary = %q", got)
 	}
 }
+
+// TestV14ClaimAlternativesCarryMixedHyphenForms: the fold credits a reply that
+// mixes ASCII and typographic hyphens, so the provenance vocabulary carries
+// every mixed spelling too, bounded at maxMixedHyphenForms hyphens.
+func TestV14ClaimAlternativesCarryMixedHyphenForms(t *testing.T) {
+	mc := protocol.MemoryCase{BenchVersion: protocol.BenchVersionV14, AnswerKind: protocol.AnswerValue, ExpectedAnswer: "AB-12-CD"}
+	got := ClaimAlternatives(mc)
+	want := []string{"AB-12-CD", "AB‐12-CD", "AB-12‐CD", "AB‐12‐CD"}
+	if len(got) != 1 || len(got[0]) != len(want) {
+		t.Fatalf("v14 mixed-hyphen vocabulary = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[0][i] != want[i] {
+			t.Fatalf("v14 mixed-hyphen vocabulary = %q, want %q", got, want)
+		}
+	}
+	long := protocol.MemoryCase{BenchVersion: protocol.BenchVersionV14, AnswerKind: protocol.AnswerValue, ExpectedAnswer: "a-b-c-d-e-f"}
+	if got := ClaimAlternatives(long); len(got) != 1 || len(got[0]) != 2 || got[0][1] != "a‐b‐c‐d‐e‐f" {
+		t.Fatalf("v14 long-form vocabulary must stay bounded: %q", got)
+	}
+}
