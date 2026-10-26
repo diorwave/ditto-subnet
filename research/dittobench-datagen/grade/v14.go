@@ -191,7 +191,7 @@ var removalTimeWordsV14 = map[string]bool{
 	"today": true, "tonight": true, "tomorrow": true, "yesterday": true, "morning": true, "afternoon": true,
 	"evening": true, "night": true, "weekend": true, "week": true, "weeks": true, "month": true, "months": true,
 	"year": true, "years": true, "day": true, "days": true, "hour": true, "hours": true, "minute": true,
-	"minutes": true, "moment": true, "time": true, "next": true, "later": true, "soon": true,
+	"minutes": true, "moment": true, "time": true, "fortnight": true, "fortnights": true, "next": true, "later": true, "soon": true,
 	"spring": true, "summer": true, "autumn": true, "fall": true, "winter": true,
 	"season": true, "seasons": true,
 }
@@ -275,7 +275,7 @@ func progressiveVerbV14(w string) []string {
 			return nil
 		}
 	}
-	if strings.HasSuffix(w, "ing") || strings.HasSuffix(w, "ed") {
+	if (strings.HasSuffix(w, "ing") || strings.HasSuffix(w, "ed")) && !baseVerbsLikeInflectionsV14[w] {
 		return nil
 	}
 	// A "u" after "q" spells a consonant sound (quit, equip).
@@ -292,6 +292,11 @@ func progressiveVerbV14(w string) []string {
 		return []string{w[:n-1] + "ing"}
 	}
 	last := w[n-1]
+	if last == 'c' && n >= 3 && isVowel(n-2) {
+		// A final c after a vowel takes k to keep its hard sound: panic ->
+		// panicking, mimic -> mimicking, picnic -> picnicking.
+		return []string{w + "king"}
+	}
 	if n >= 3 && !isVowel(n-1) && isVowel(n-2) && !isVowel(n-3) && strings.IndexByte("wxy", last) < 0 {
 		doubled := w + string(last) + "ing"
 		groups := 0
@@ -313,6 +318,18 @@ func progressiveVerbV14(w string) []string {
 	return []string{w + "ing"}
 }
 
+// baseVerbsLikeInflectionsV14 are base verbs whose spelling happens to end in
+// -ing or -ed, so the inflection guard in progressiveVerbV14 must not skip
+// them ("bring it" -> "bringing it", "need it" -> "needing it"). Any other
+// word ending in -ing or -ed is read as already inflected and gets no form.
+var baseVerbsLikeInflectionsV14 = map[string]bool{
+	"bring": true, "cling": true, "fling": true, "ring": true, "sing": true, "sling": true,
+	"spring": true, "sting": true, "string": true, "swing": true, "wing": true, "wring": true,
+	"bleed": true, "breed": true, "embed": true, "exceed": true, "feed": true, "heed": true,
+	"need": true, "proceed": true, "seed": true, "shed": true, "shred": true, "sled": true,
+	"speed": true, "succeed": true, "wed": true, "weed": true,
+}
+
 // multisyllableDoublingV14 lists the multisyllabic verbs whose final
 // consonant doubles before -ing. true: both spellings are standard (US
 // "canceling", UK "cancelling"); false: only the doubled one is (stress on
@@ -325,7 +342,7 @@ var multisyllableDoublingV14 = map[string]bool{
 	"control": false, "defer": false, "equip": false, "expel": false, "forget": false,
 	"infer": false, "occur": false, "omit": false, "patrol": false, "permit": false,
 	"prefer": false, "propel": false, "rebel": false, "refer": false, "regret": false,
-	"submit": false, "transfer": false, "unplug": false, "unzip": false,
+	"submit": false, "transfer": false, "unplug": false, "unzip": false, "embed": false,
 }
 
 // ── Gerund and post-posed negation of an action (progressiveActions) ────────

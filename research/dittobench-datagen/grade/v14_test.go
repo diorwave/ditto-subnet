@@ -223,6 +223,7 @@ func TestRemovedThenPlace(t *testing.T) {
 		"pe kit will be removed in winter":             false,
 		"pe kit is removed this season":                false,
 		"pe kit is removed in two weeks":               false,
+		"pe kit is removed in a fortnight":             false,
 		"pe kit has been removed from today":           false,
 		"pe kit has been removed from":                 false,
 		"pe kit has been removed by the school":        false,
@@ -294,6 +295,22 @@ func TestV14ProgressiveActionClaims(t *testing.T) {
 	checkVersionVectors(t, status, []versionVector{
 		{"v14 value claim keeps the exact form", protocol.BenchVersionV14, say("We are pausing it."), 0},
 	})
+	// The provenance gate checks the credited span against the accepted forms
+	// of credited claims, so a credited progressive form must be among them.
+	pause.BenchVersion = protocol.BenchVersionV14
+	v := Memory(pause, say("We are pausing it."))
+	if v.Score != 1 || v.Provenance == nil {
+		t.Fatalf("v14 progressive action not credited with provenance: %+v", v)
+	}
+	found := false
+	for _, group := range v.Provenance.Alternatives {
+		for _, form := range group {
+			found = found || form == "pausing it"
+		}
+	}
+	if !found {
+		t.Fatalf("provenance alternatives omit the credited progressive form: %q", v.Provenance.Alternatives)
+	}
 }
 
 // TestProgressiveVerbSpelling pins the conservative -ing speller.
@@ -308,6 +325,11 @@ func TestProgressiveVerbSpelling(t *testing.T) {
 		"happen": "happening", "order": "ordering", "deliver": "delivering", "unlock": "unlocking",
 		"travel": "traveling travelling", "admit": "admitting", "prefer": "preferring",
 		"quit": "quitting", "equip": "equipping",
+		// A final c after a vowel takes k.
+		"panic": "panicking", "mimic": "mimicking", "sync": "syncing",
+		// Base verbs that merely end in -ing/-ed are not inflections.
+		"bring": "bringing", "need": "needing", "shed": "shedding", "embed": "embedding",
+		"proceed": "proceeding",
 	} {
 		if got := strings.Join(progressiveVerbV14(in), " "); got != want {
 			t.Errorf("progressiveVerbV14(%q) = %q, want %q", in, got, want)
