@@ -41,7 +41,10 @@ class DecisionQuestion(BaseModel):
 
 
 class DecisionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    """Unknown top-level fields are allowed here; the relay, not this model,
+    refuses the four it owns (``DECISION_REFUSED_TOP_LEVEL_FIELDS``)."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     state: str | dict[str, Any] | list[Any]
     questions: Annotated[dict[str, DecisionQuestion], Field(min_length=1)]
