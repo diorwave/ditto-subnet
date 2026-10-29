@@ -52,6 +52,8 @@ chain, storage, fingerprinting, and atomic-commit contracts have parity tests.
   upstream responses are fully buffered, sanitized, and re-serialized.
   The coding route is a separate disabled-by-default shadow lane; see
   [`CODING-SHADOW.md`](CODING-SHADOW.md).
+  `POST /api/v1/inference/decisions` is the dark decision-model lane; see
+  [Decision lane](#decision-lane-dark).
 - `internal/chain` — Pylon client: `/health` block probe and the
   validator-permit and registered-owner checks (`/block/recent/neurons`), with
   one-block snapshot caching and single-flight refreshes.
@@ -93,11 +95,11 @@ grant's total:
 Missing usage books zero; untrusted usage is priced at the clamp; stale
 reclamation and rotation cancel with zero ledger cost. A future lane joins
 the ceiling purely by adding to `inference_grants.ledger_cost_microusd` at its
-settlement. The dark decision lane (#3273) is priced already
-(`decision_input_microusd_per_mtok`, input tokens only, exact half-to-even);
-its settlement must add that figure to `ledger_cost_microusd` as well as to
-`decision_cost_microusd`, and its admission must run the same step-8/13b
-checks, for the ceiling to cover it.
+settlement. The dark decision lane does exactly that: its settlement adds the
+same input-token × `decision_input_microusd_per_mtok` figure it books as
+`decision_cost_microusd` to `ledger_cost_microusd`, and its admission runs the
+same step-8/13b checks, so a ceiling reached on any lane refuses chat,
+embeddings and decisions alike with 4110.
 
 **Knobs** live on the inference concurrency board
 (`InferenceConcurrencySettings`, written through Backroom with revision,
@@ -116,19 +118,19 @@ only — the call that crosses the ceiling finishes and is billed:
 |---|---|
 | `off`, or null ceiling | nothing; byte-identical to a grant minted before #3271 |
 | `shadow` | admit; `cost_ceiling_would_decline += 1` on the grant and `ditto_inference_cost_ceiling_would_decline_total{lane}` |
-| `enforce` | decline **4110 `COST_CEILING_EXHAUSTED`** (HTTP 429, terminal) on both lanes |
+| `enforce` | decline **4110 `COST_CEILING_EXHAUSTED`** (HTTP 429, terminal) on every lane |
 
 The settle transaction is the committed writer of `status = 'exhausted'`
 once settled ledger cost meets an enforced ceiling (on whichever lane
-crossed it). Step 8 checks the cost wall first, so every later chat **and**
-embedding call is 4110, not 4102/4104.
+crossed it). Step 8 checks the cost wall first, so every later chat,
+embedding **and** decision call is 4110, not 4102/4104.
 
 **Wire evidence** (all absent unless the grant has a live ceiling):
 
 - `/exchange` body `cost_ceiling_microusd` (integer) and `cost_ceiling_mode`
   (`shadow` | `enforce`), plus fallback headers
   `X-Ditto-Cost-Ceiling-Microusd` / `X-Ditto-Cost-Ceiling-Mode`.
-- Every authenticated proxied response on both lanes — successes, provider
+- Every authenticated proxied response on every lane — successes, provider
   failures, non-deliverable 409s and terminal 429 declines — carries
   `X-Ditto-Ledger-Cost-Microusd: <decimal>`: the grant's total after this
   request's settlement, or the current settled total on a decline. The
@@ -140,6 +142,55 @@ until Backroom shows the validator fleet runs a 4110-aware scorer, and size
 the ceiling from the ledger-cost distribution and `would_decline` counts.
 (3) Only then switch to `enforce`. An old broker treats an unknown 4110 as
 platform fault and would re-lease the run indefinitely.
+
+## Decision lane (dark)
+
+`POST /api/v1/inference/decisions` brokers a decision model (TypeSafe Jev)
+through OpenRouter's System One endpoint,
+`POST https://openrouter.ai/api/v1/systemone`, with the existing
+`OPENROUTER_API_KEY`. No other credential exists for it.
+`DITTO_DECISION_UPSTREAM_URL` may override the URL, but only to that same
+pinned OpenRouter path (it is a credential boundary like the chat and
+embedding URLs).
+
+The lane is off until the operator turns on `decision_lane` on the inference
+concurrency board (Backroom `set_inference_concurrency_settings`) with
+`enabled: true` and an exact `model`, e.g. `typesafe/jev-1.14` (never
+`~typesafe/jev-latest`). While it is off, the route answers the same 404 an
+unmounted path does, and grants are minted with no decision pin. The board
+also sets the stamped price (`input_microusd_per_mtok`, default 42000 =
+$0.042 per million input tokens), the per-run `request_budget` and
+`token_budget`, and the live concurrency and requests-per-minute rails. The
+model, price and walls are stamped onto each grant at mint, and `enabled` is
+a live kill switch.
+
+The body is the System One body (`{state, questions, assets?}`) passed
+through nearly verbatim. Harnesses may use any question type the provider
+supports (choice, score, noul, box), as many questions as the provider
+allows, and any state. The relay forces `model` to the grant's pin. It
+refuses only the fields it owns (`provider`, `session_id`, `user`,
+`trace`). It answers
+`{model, answers, usage: {input_tokens, output_tokens}}`, with `answers`
+passed through verbatim.
+
+The relay's controls are:
+
+- **Pin verification.** A response served by a model other than the pin
+  (or a dated snapshot of it, such as `typesafe/jev-1.13-20260917`) is an
+  uncharged infrastructure failure (502, `decision_model_mismatch`).
+- **Metering.** Receipted `usage.input_tokens` × the stamped price is booked
+  as `decision_cost_microusd`, which is ledger cost, never the provider
+  bill. Output is free.
+- **Walls.** The lane has its own request and token walls (4102/4104). They
+  never mark the grant exhausted, so chat survives a spent decision wall.
+  The run's cost ceiling is different: decision spend counts toward it, and
+  an enforced ceiling refuses every lane with 4110.
+- **Outages.** These use the existing 502/503/504 shapes, which the scorer
+  maps to the no-fault `model_relay_unavailable`.
+- **Provider rejections.** A provider 400/422 on the harness's own questions
+  is returned as an uncharged 400.
+
+No new decline or infra codes are introduced. The lane carries no score.
 
 ## Inference trace capture (`internal/traces`)
 

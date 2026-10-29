@@ -174,6 +174,22 @@ func finishInferenceRequest(ctx context.Context, q *postgres.Queries, p finishPa
 			}
 			updated.Status = "exhausted"
 		}
+	} else if request.RequestKind == kindDecision {
+		active := grant.DecisionActiveRequests
+		if wasStarted {
+			active = max32(0, active-1)
+		}
+		updated, err = q.ApplyGrantDecisionSettlement(ctx, postgres.ApplyGrantDecisionSettlementParams{
+			DecisionActiveRequests: active,
+			DecisionTokens:         promptTokens,
+			DecisionCostMicrousd:   costMicrousd,
+			LedgerCostMicrousd:     ledgerCost,
+			Now:                    pgTime(p.now),
+			GrantID:                pgUUID(p.grantID),
+		})
+		if err != nil {
+			return false, nil, err
+		}
 	} else {
 		active := grant.EmbeddingActiveRequests
 		if wasStarted {

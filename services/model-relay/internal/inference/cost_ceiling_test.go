@@ -138,28 +138,31 @@ func TestLedgerHeaderOnlyWithLiveCeiling(t *testing.T) {
 	}
 }
 
-func TestDecisionLaneLedgerIsExactHalfEvenPerMillion(t *testing.T) {
+func TestDecisionLaneLedgerMatchesTheLanePricer(t *testing.T) {
 	g := pricedGrant()
 	g.DecisionInputMicrousdPerMtok = 42_000 // $0.042 per million input tokens
 	for _, tc := range []struct{ tokens, want int64 }{
 		{0, 0},
+		{476, 20}, // 19.992
 		{1_000_000, 42_000},
-		{25, 1},  // 1.05 -> 1
-		{125, 5}, // 5.25 -> 5
+		{25, 1}, // 1.05
 		{1_000_000_000, 42_000_000},
 	} {
-		if got := ledgerCostMicrousd(g, kindDecision, tc.tokens, 999, 7777); got != tc.want {
-			t.Fatalf("tokens=%d: got %d want %d", tc.tokens, got, tc.want)
+		got := ledgerCostMicrousd(g, kindDecision, tc.tokens, 999, 7777)
+		if got != tc.want || got != decisionLedgerCost(tc.tokens, g.DecisionInputMicrousdPerMtok) {
+			t.Fatalf("tokens=%d: got %d want %d (lane pricer %d)", tc.tokens, got, tc.want,
+				decisionLedgerCost(tc.tokens, g.DecisionInputMicrousdPerMtok))
 		}
 	}
-	// Exact half-to-even: 0.5 -> 0, 1.5 -> 2.
-	if got := decisionLedgerMicrousd(1, 500_000); got != 0 {
+	g.DecisionInputMicrousdPerMtok = 500_000 // exact halves round to even
+	if got := ledgerCostMicrousd(g, kindDecision, 1, 0, 0); got != 0 {
 		t.Fatalf("0.5 must round to even 0, got %d", got)
 	}
-	if got := decisionLedgerMicrousd(3, 500_000); got != 2 {
+	if got := ledgerCostMicrousd(g, kindDecision, 3, 0, 0); got != 2 {
 		t.Fatalf("1.5 must round to even 2, got %d", got)
 	}
-	if got := decisionLedgerMicrousd(math.MaxInt64, math.MaxInt64); got != maxLedgerCostMicrousd {
+	g.DecisionInputMicrousdPerMtok = math.MaxInt64
+	if got := ledgerCostMicrousd(g, kindDecision, math.MaxInt64, 0, 0); got != maxLedgerCostMicrousd {
 		t.Fatalf("overflow must clamp, got %d", got)
 	}
 }

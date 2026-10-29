@@ -2,7 +2,6 @@ package inference
 
 import (
 	"math"
-	"math/big"
 	"net/http"
 	"strconv"
 
@@ -87,7 +86,13 @@ func clampLedger(v float64) int64 {
 // Half-to-even rounding matches the embedding settle and Python's round().
 func ledgerCostMicrousd(g *postgres.InferenceGrant, kind string, promptTokens, completionTokens, trustedProviderCost int64) int64 {
 	if kind == kindDecision {
-		return decisionLedgerMicrousd(promptTokens, g.DecisionInputMicrousdPerMtok)
+		// The decision lane's own pricer (decisionLedgerCost: input tokens x
+		// micro-USD per million, half-to-even), clamped. Output is unbilled,
+		// and the same figure is booked as decision_cost_microusd.
+		if g.DecisionInputMicrousdPerMtok <= 0 {
+			return 0
+		}
+		return clampLedger(float64(max64(0, promptTokens)) * float64(g.DecisionInputMicrousdPerMtok) / 1_000_000)
 	}
 	if kind == kindEmbedding {
 		price, ok := finitePrice(g.EmbeddingPriceMicrousdPerToken, true)
@@ -107,30 +112,6 @@ func ledgerCostMicrousd(g *postgres.InferenceGrant, kind string, promptTokens, c
 	}
 	return clampLedger((float64(max64(0, promptTokens))*promptPrice +
 		float64(max64(0, completionTokens))*completionPrice) * 1_000_000)
-}
-
-// kindDecision is the dark decision-model lane (#3273). The relay serves no
-// decision route yet; its settlement must add this ledger cost to
-// inference_grants.ledger_cost_microusd (as well as decision_cost_microusd)
-// for the run's ceiling to see it.
-const kindDecision = "decision"
-
-// decisionLedgerMicrousd prices input tokens at the stamped integer micro-USD
-// per million (output is unbilled), exact half-to-even, clamped.
-func decisionLedgerMicrousd(inputTokens, microusdPerMtok int64) int64 {
-	if inputTokens <= 0 || microusdPerMtok <= 0 {
-		return 0
-	}
-	product := new(big.Int).Mul(big.NewInt(inputTokens), big.NewInt(microusdPerMtok))
-	quotient, remainder := new(big.Int).QuoRem(product, big.NewInt(1_000_000), new(big.Int))
-	twice := new(big.Int).Mul(remainder, big.NewInt(2))
-	if c := twice.Cmp(big.NewInt(1_000_000)); c > 0 || (c == 0 && quotient.Bit(0) == 1) {
-		quotient.Add(quotient, big.NewInt(1))
-	}
-	if !quotient.IsInt64() || quotient.Int64() > maxLedgerCostMicrousd {
-		return maxLedgerCostMicrousd
-	}
-	return quotient.Int64()
 }
 
 // embeddingCatalogCostMicrousd is the embedding lane's cost_microusd: the

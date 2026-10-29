@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -465,4 +466,66 @@ func TestExchangeCarriesCostCeilingOnlyWhenLive(t *testing.T) {
 			}
 		})
 	}
+}
+
+// decisionCeilingFixture is a decision-lane grant (pin, 42000 micro-USD per
+// million input tokens) with chat and embeddings wired too, stamped with an
+// enforced ceiling. One decision call books 20 (476 input tokens).
+func decisionCeilingFixture(t *testing.T, ceiling int64) *pgFixture {
+	t.Helper()
+	var calls atomic.Int32
+	decision := decisionUpstream(t, decisionPin, http.StatusOK, nil, &calls)
+	f := decisionFixture(t, decision.URL, true)
+	chat := fakeChatUpstream(t, nil)
+	t.Cleanup(chat.Close)
+	embed := fakeEmbeddingUpstream()
+	t.Cleanup(embed.Close)
+	f.deps.Cfg.Inference.UpstreamURL = chat.URL
+	f.deps.Cfg.Inference.EmbeddingFallbackURL = embed.URL
+	f.deps.Cfg.Inference.PerplexityAPIKey = "test-pplx-key"
+	f.seedRoute(t)
+	f.stampCostCeiling(t, ceiling, "enforce")
+	return f
+}
+
+func TestCostCeilingDecisionLaneBooksLedgerAndIsRefusedWith4110(t *testing.T) {
+	f := decisionCeilingFixture(t, 30)
+	// 0 < 30: admitted, books 20 on both the lane meter and the ledger.
+	w := postDecision(f, uuid.New())
+	if w.Code != http.StatusOK {
+		t.Fatalf("first decision: %d %s", w.Code, w.Body.String())
+	}
+	expectLedgerHeader(t, w, "20")
+	// 20 < 30: admitted; crosses (40) and finishes.
+	w = postDecision(f, uuid.New())
+	if w.Code != http.StatusOK {
+		t.Fatalf("crossing decision must finish: %d %s", w.Code, w.Body.String())
+	}
+	expectLedgerHeader(t, w, "40")
+	var decisionCost, ledger int64
+	var status string
+	if err := f.pool.QueryRow(t.Context(),
+		`SELECT decision_cost_microusd, ledger_cost_microusd, status FROM inference_grants WHERE grant_id = $1`,
+		f.grantID).Scan(&decisionCost, &ledger, &status); err != nil {
+		t.Fatalf("read grant: %v", err)
+	}
+	if decisionCost != 40 || ledger != 40 || status != "exhausted" {
+		t.Fatalf("decision ledger: lane=%d ledger=%d status=%s", decisionCost, ledger, status)
+	}
+	// The run's ceiling ends every lane with 4110.
+	w = postDecision(f, uuid.New())
+	expectEnvelope(t, w, 429, relayhttp.CodeDeclineCostCeiling, "decision grant has spent its cost ceiling")
+	expectLedgerHeader(t, w, "40")
+	expectEnvelope(t, f.chatCall(t), 429, relayhttp.CodeDeclineCostCeiling, "inference grant has spent its cost ceiling")
+	expectEnvelope(t, f.embeddingCall(t), 429, relayhttp.CodeDeclineCostCeiling, "embedding grant has spent its cost ceiling")
+}
+
+func TestCostCeilingChatDrivenCeilingRefusesTheDecisionLane(t *testing.T) {
+	f := decisionCeilingFixture(t, 20)
+	if w := f.chatCall(t); w.Code != http.StatusOK {
+		t.Fatalf("chat crossing call: %d %s", w.Code, w.Body.String())
+	}
+	w := postDecision(f, uuid.New())
+	expectEnvelope(t, w, 429, relayhttp.CodeDeclineCostCeiling, "decision grant has spent its cost ceiling")
+	expectLedgerHeader(t, w, "22")
 }
