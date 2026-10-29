@@ -24190,6 +24190,8 @@ export interface components {
          */
         InferenceConcurrencySettings: {
             benchmark_runtime?: components["schemas"]["BenchmarkRuntimeSettings"];
+            /** Case Cost Report Microusd */
+            case_cost_report_microusd?: number | null;
             /**
              * Chat Global Concurrency
              * @default 96
@@ -24230,6 +24232,12 @@ export interface components {
              * @default 25000000
              */
             chat_token_budget: number;
+            /**
+             * Cost Ceiling Mode
+             * @default off
+             * @enum {string}
+             */
+            cost_ceiling_mode: "off" | "shadow" | "enforce";
             decision_lane?: components["schemas"]["DecisionLaneSettings"];
             /**
              * Embedding Global Concurrency
@@ -24261,6 +24269,8 @@ export interface components {
              * @default 40000
              */
             embedding_per_validator_requests_per_minute: number;
+            /** Run Cost Ceiling Microusd */
+            run_cost_ceiling_microusd?: number | null;
         };
         /** InferenceConcurrencySettingsRevision */
         InferenceConcurrencySettingsRevision: {
@@ -24413,6 +24423,10 @@ export interface components {
         InferenceExchangeResponse: {
             /** Bearer */
             bearer: string;
+            /** Cost Ceiling Microusd */
+            cost_ceiling_microusd?: number | null;
+            /** Cost Ceiling Mode */
+            cost_ceiling_mode?: ("off" | "shadow" | "enforce") | null;
             /** Decision Model */
             decision_model?: string | null;
             /** Decision Request Budget */
