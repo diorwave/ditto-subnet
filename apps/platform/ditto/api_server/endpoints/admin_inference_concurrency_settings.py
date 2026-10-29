@@ -147,14 +147,17 @@ async def create_settings_revision(
             ),
         )
     settings = payload.settings
-    if "benchmark_runtime" not in payload.settings.model_fields_set:
-        # Rolling-upgrade compatibility: an older Backroom knows the original
-        # hosted-inference fields but not this additive v10 object. Preserve
-        # the effective runtime policy rather than resetting an operator's
-        # case-concurrency or delay selection to the shipped defaults.
-        settings = settings.model_copy(
-            update={"benchmark_runtime": settings_from_row(latest).benchmark_runtime}
-        )
+    # Rolling-upgrade compatibility: an older Backroom knows the original
+    # hosted-inference fields but not these additive objects. Preserve the
+    # effective value rather than resetting an operator's case-concurrency,
+    # delay selection, or decision-lane pin to the shipped defaults.
+    preserved = {
+        field: getattr(settings_from_row(latest), field)
+        for field in ("benchmark_runtime", "decision_lane")
+        if field not in payload.settings.model_fields_set
+    }
+    if preserved:
+        settings = settings.model_copy(update=preserved)
     try:
         row = await insert_inference_concurrency_settings_revision(
             session,

@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from ditto.api_models.inference_concurrency_settings import (
+    InferenceConcurrencySettings,
+)
 from ditto.api_server.dependencies import get_session
 from ditto.api_server.inference_concurrency_settings import (
     InferenceConcurrencySettingsResolver,
@@ -134,9 +137,14 @@ class TestWrite:
             # A non-default cap proves a legacy write carries it forward.
             "sandbox_memory_limit_mib": 8_192,
         }
+        decision_lane = {
+            **InferenceConcurrencySettings().decision_lane.model_dump(mode="json"),
+            "enabled": True,
+            "model": "typesafe/jev-1.14",
+        }
         first = await client.post(
             _URL,
-            json=_payload(benchmark_runtime=runtime),
+            json=_payload(benchmark_runtime=runtime, decision_lane=decision_lane),
             headers=_HEADERS,
         )
         assert first.status_code == 200, first.text
@@ -154,6 +162,7 @@ class TestWrite:
         )
         assert legacy.status_code == 200, legacy.text
         assert legacy.json()["settings"]["benchmark_runtime"] == runtime
+        assert legacy.json()["settings"]["decision_lane"] == decision_lane
 
     async def test_wrong_confirmation_is_refused(
         self,

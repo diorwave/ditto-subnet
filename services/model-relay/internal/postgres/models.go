@@ -288,6 +288,14 @@ type InferenceGrant struct {
 	EmbeddingCostMicrousd        int64              `json:"embeddingCostMicrousd"`
 	EmbeddingActiveRequests      int32              `json:"embeddingActiveRequests"`
 	UsageAccountingVersion       int32              `json:"usageAccountingVersion"`
+	DecisionModel                pgtype.Text        `json:"decisionModel"`
+	DecisionInputMicrousdPerMtok int64              `json:"decisionInputMicrousdPerMtok"`
+	DecisionRequestBudget        int32              `json:"decisionRequestBudget"`
+	DecisionTokenBudget          int64              `json:"decisionTokenBudget"`
+	DecisionRequestCount         int32              `json:"decisionRequestCount"`
+	DecisionTokens               int64              `json:"decisionTokens"`
+	DecisionCostMicrousd         int64              `json:"decisionCostMicrousd"`
+	DecisionActiveRequests       int32              `json:"decisionActiveRequests"`
 }
 
 type InferenceProviderRoute struct {

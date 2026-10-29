@@ -1722,6 +1722,13 @@ async def exchange_inference_grant(
         embedding_request_budget=grant.embedding_request_budget,
         embedding_token_budget=grant.embedding_token_budget,
         max_output_tokens=config.max_output_tokens,
+        decision_model=grant.decision_model,
+        decision_request_budget=(
+            grant.decision_request_budget if grant.decision_model else None
+        ),
+        decision_token_budget=(
+            grant.decision_token_budget if grant.decision_model else None
+        ),
     )
 
 

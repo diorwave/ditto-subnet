@@ -7959,6 +7959,36 @@ class InferenceGrant(Base):
     embedding_active_requests: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    decision_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The pinned decision model version, or NULL when the lane was not granted.
+
+    Stamped at mint from the operator's ``decision_lane`` board and immutable
+    for the lease, like ``allowed_models``. The relay sends it upstream and
+    refuses (as infrastructure) any answer served by a different version.
+    """
+    decision_input_microusd_per_mtok: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    """Stamped list price, micro-USD per million input tokens (output is free)."""
+    decision_request_budget: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    decision_token_budget: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    decision_request_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    decision_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    decision_cost_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    """Receipted input tokens x the stamped price: ledger cost, never a bill."""
+    decision_active_requests: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     request_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
@@ -8048,6 +8078,15 @@ class InferenceGrant(Base):
         ),
         CheckConstraint(
             "active_requests >= 0", name="inference_grants_active_requests"
+        ),
+        CheckConstraint(
+            "decision_input_microusd_per_mtok >= 0 AND decision_request_budget >= 0 "
+            "AND decision_token_budget >= 0 AND decision_request_count >= 0 "
+            "AND decision_tokens >= 0 AND decision_cost_microusd >= 0 "
+            "AND decision_active_requests >= 0 "
+            "AND (decision_model IS NULL OR "
+            "(decision_request_budget > 0 AND decision_token_budget > 0))",
+            name="inference_grants_decision_accounting",
         ),
         Index("inference_grants_expiry_idx", "expires_at"),
     )
@@ -8405,7 +8444,7 @@ class InferenceRequest(Base):
             name="inference_requests_status",
         ),
         CheckConstraint(
-            "request_kind IN ('chat', 'embedding')",
+            "request_kind IN ('chat', 'embedding', 'decision')",
             name="inference_requests_kind",
         ),
         CheckConstraint(

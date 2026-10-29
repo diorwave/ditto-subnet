@@ -20766,6 +20766,81 @@ export interface components {
             status: string;
         };
         /**
+         * DecisionLaneSettings
+         * @description The operator knob for the dark decision-model lane. Off by default.
+         *
+         *     ``enabled`` and ``model`` are read at grant mint: a grant minted while the
+         *     lane is off carries no decision model and zero walls, which is the
+         *     pre-lane grant exactly. ``model`` is ONE pinned OpenRouter model version
+         *     chosen by the operator, e.g. ``typesafe/jev-1.14`` (there is no miner
+         *     allow-list, and a floating ``-latest`` alias is refused); the relay sends
+         *     it upstream and treats a different served version as an infrastructure
+         *     failure. How a harness uses the lane is unrestricted: the controls are the
+         *     pin, metering, the walls and this switch.
+         *
+         *     The price and walls are stamped onto the grant at mint, so a later revision
+         *     never changes a live lease. Concurrency and requests-per-minute are live
+         *     admission rails, like the chat and embedding ones. ``enabled`` is also a
+         *     live kill switch at the relay: turning it off refuses new decision calls
+         *     fleet-wide within the settings refresh interval.
+         *
+         *     This lane carries no score. Scored use folds into bench v15.
+         */
+        DecisionLaneSettings: {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Global Concurrency
+             * @default 64
+             */
+            global_concurrency: number;
+            /**
+             * Global Requests Per Minute
+             * @default 6000
+             */
+            global_requests_per_minute: number;
+            /**
+             * Input Microusd Per Mtok
+             * @default 42000
+             */
+            input_microusd_per_mtok: number;
+            /** Model */
+            model?: string | null;
+            /**
+             * Per Ticket Concurrency
+             * @default 8
+             */
+            per_ticket_concurrency: number;
+            /**
+             * Per Ticket Requests Per Minute
+             * @default 600
+             */
+            per_ticket_requests_per_minute: number;
+            /**
+             * Per Validator Concurrency
+             * @default 32
+             */
+            per_validator_concurrency: number;
+            /**
+             * Per Validator Requests Per Minute
+             * @default 2400
+             */
+            per_validator_requests_per_minute: number;
+            /**
+             * Request Budget
+             * @default 4096
+             */
+            request_budget: number;
+            /**
+             * Token Budget
+             * @default 25000000
+             */
+            token_budget: number;
+        };
+        /**
          * DeferredSourceReviewSettings
          * @description Hot-swappable post-score deep-review admission and anomaly policy.
          *
@@ -24155,6 +24230,7 @@ export interface components {
              * @default 25000000
              */
             chat_token_budget: number;
+            decision_lane?: components["schemas"]["DecisionLaneSettings"];
             /**
              * Embedding Global Concurrency
              * @default 96
@@ -24337,6 +24413,12 @@ export interface components {
         InferenceExchangeResponse: {
             /** Bearer */
             bearer: string;
+            /** Decision Model */
+            decision_model?: string | null;
+            /** Decision Request Budget */
+            decision_request_budget?: number | null;
+            /** Decision Token Budget */
+            decision_token_budget?: number | null;
             /** Embedding Request Budget */
             embedding_request_budget?: number | null;
             /** Embedding Token Budget */

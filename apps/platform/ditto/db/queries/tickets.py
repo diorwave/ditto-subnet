@@ -1125,6 +1125,7 @@ async def issue_ticket(
                 grant.broker_public_key = None
                 grant.active_requests = 0
                 grant.embedding_active_requests = 0
+                grant.decision_active_requests = 0
                 grant.updated_at = now
             ticket.provider_outage_attempted_epoch = parked_epoch
         ticket.provider_outage_epoch = None
