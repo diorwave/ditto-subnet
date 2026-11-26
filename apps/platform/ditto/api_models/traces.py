@@ -71,6 +71,11 @@ class TraceRecordSummary(BaseModel):
     status: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    ledger_cost_microusd: int | None = None
+    """What the call booked against the run's cost ceiling (#3271), at the
+    grant-stamped list price. Absent on records written before it existed."""
+    ledger_cost_after: int | None = None
+    """The grant's settled ledger total once the call settled (#3271)."""
     provider: str | None = None
     latency_ms: int | None = None
     body_bytes: int | None = None

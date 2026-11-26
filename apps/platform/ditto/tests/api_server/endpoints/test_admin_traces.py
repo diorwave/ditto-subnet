@@ -84,12 +84,15 @@ def _record(i: int, case: str | None = None) -> bytes:
                 "status": "active",
                 "generation": 1,
                 "request_count": i,
+                # Odd records predate the ledger fields (#3271).
+                **({} if i % 2 else {"ledger_cost_after": 22 * (i + 1)}),
             },
             "usage": {
                 "prompt_tokens": 10 + i,
                 "completion_tokens": 5,
                 "cost_microusd": 1,
                 "usage_available": True,
+                **({} if i % 2 else {"ledger_cost_microusd": 22}),
             },
             "upstream": {
                 "provider": "deepinfra",
@@ -215,6 +218,9 @@ async def test_peek_returns_bounded_summaries_and_optional_bodies(
         and first["prompt_tokens"] == 14
     )
     assert first["provider"] == "deepinfra" and first["status"] == "completed"
+    assert first["ledger_cost_microusd"] == 22 and first["ledger_cost_after"] == 110
+    older = body["records"][1]
+    assert older["ledger_cost_microusd"] is None and older["ledger_cost_after"] is None
     assert first["record"] is None  # summaries never carry bodies by default
     assert body["scan_complete"] is True
 

@@ -115,6 +115,10 @@ type Grant struct {
 	RouteQuant      string          `json:"route_quantization,omitempty"`
 	RequestCount    int32           `json:"request_count"` // calls booked on the grant before this one
 	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	// LedgerCostAfter is the grant's settled ledger cost (micro-USD, every
+	// lane, list price) once this call settled: the figure the run's cost
+	// ceiling reads (#3271). Omitted when the call did not settle.
+	LedgerCostAfter *int64 `json:"ledger_cost_after,omitempty"`
 	// Confirmation-lane grants carry their purpose binding.
 	TicketID        string `json:"ticket_id,omitempty"`
 	BundleID        string `json:"bundle_id,omitempty"`
@@ -185,6 +189,10 @@ type Usage struct {
 	CompletionTokens int64 `json:"completion_tokens"`
 	CostMicrousd     int64 `json:"cost_microusd"`
 	UsageAvailable   bool  `json:"usage_available"`
+	// LedgerCostMicrousd is what this call booked against the run's cost
+	// ceiling: settled units at the grant-stamped list price (#3271), unlike
+	// CostMicrousd, the provider bill. Omitted when the call did not settle.
+	LedgerCostMicrousd *int64 `json:"ledger_cost_microusd,omitempty"`
 }
 
 // Outcome is the ledger-side result.

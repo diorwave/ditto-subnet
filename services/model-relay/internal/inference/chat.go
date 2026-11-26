@@ -84,6 +84,11 @@ type settleOutcome struct {
 	terminalErrorCode  pgtype.Text
 	routeObservable    bool
 	recordObservation  bool // chat only; embeddings never observe routes
+	// Set by settleRequest once its transaction commits (#3271): the ledger
+	// cost this call booked and the grant's settled total after it. Nil when
+	// the call did not settle here; the trace then omits both.
+	ledgerCostMicrousd *int64
+	ledgerCostAfter    *int64
 }
 
 // settleRequest runs transaction B. It must run exactly once for every
@@ -106,6 +111,7 @@ func (d *Deps) settleRequest(parent context.Context, h *proxyHeaders, o *settleO
 	if latencyMs < 0 {
 		latencyMs = 0
 	}
+	booked := int64(-1)
 	deliverable, settledGrant, err := finishInferenceRequest(ctx, q, finishParams{
 		grantID:            h.grant,
 		nonce:              h.nonce,
@@ -123,6 +129,7 @@ func (d *Deps) settleRequest(parent context.Context, h *proxyHeaders, o *settleO
 		openrouterAttempts: int32(clampInt(o.openrouterAttempts, 0, 1<<30)),
 		fallbackPhase:      int32(o.fallbackPhase),
 		terminalErrorCode:  o.terminalErrorCode,
+		bookedLedger:       &booked,
 	})
 	if err != nil {
 		return false, nil, err
@@ -148,6 +155,10 @@ func (d *Deps) settleRequest(parent context.Context, h *proxyHeaders, o *settleO
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, nil, err
+	}
+	if booked >= 0 && settledGrant != nil {
+		after := settledGrant.LedgerCostMicrousd
+		o.ledgerCostMicrousd, o.ledgerCostAfter = &booked, &after
 	}
 	return deliverable, settledGrant, nil
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/ditto-assistant/model-relay/internal/metrics"
 	"github.com/ditto-assistant/model-relay/internal/relayhttp"
 	"github.com/ditto-assistant/model-relay/internal/testutil"
+	"github.com/ditto-assistant/model-relay/internal/traces"
 )
 
 // The fake chat upstream reports 12 prompt + 5 completion tokens and a
@@ -483,5 +484,56 @@ func TestExchangeCarriesCostCeilingOnlyWhenLive(t *testing.T) {
 				t.Fatalf("fallback headers: %v", w.Header())
 			}
 		})
+	}
+}
+
+func TestCostCeilingTraceCarriesLedgerCostAndGrantTotal(t *testing.T) {
+	f := newCeilingFixture(t)
+	f.stampCostCeiling(t, -1, "off")
+	spool, dir := newTraceSpool(t)
+	f.deps.Traces = spool
+	for range 2 {
+		if w := f.chatCall(t); w.Code != 200 {
+			t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+		}
+	}
+	recs := drainTraces(t, spool, dir)
+	if len(recs) != 2 {
+		t.Fatalf("want 2 trace records, got %d", len(recs))
+	}
+	// Booked in every mode: the per-call list-price cost, and the grant's
+	// settled total after each call, which the provider bill never moves.
+	for i, r := range recs {
+		if r.Usage == nil || r.Usage.LedgerCostMicrousd == nil || *r.Usage.LedgerCostMicrousd != ledgerPerChatCall {
+			t.Fatalf("record %d usage ledger: %+v", i, r.Usage)
+		}
+		if r.Usage.CostMicrousd != providerCostPerCall {
+			t.Fatalf("record %d provider bill moved: %d", i, r.Usage.CostMicrousd)
+		}
+		want := int64(ledgerPerChatCall * (i + 1))
+		if r.Grant == nil || r.Grant.LedgerCostAfter == nil || *r.Grant.LedgerCostAfter != want {
+			t.Fatalf("record %d grant ledger_cost_after: want %d, got %+v", i, want, r.Grant)
+		}
+	}
+}
+
+func TestCostCeilingDeclineTraceOmitsLedgerFields(t *testing.T) {
+	f := newCeilingFixture(t)
+	f.stampCostCeiling(t, ledgerPerChatCall, "enforce")
+	spool, dir := newTraceSpool(t)
+	f.deps.Traces = spool
+	if w := f.chatCall(t); w.Code != 200 {
+		t.Fatalf("crossing call: %d %s", w.Code, w.Body.String())
+	}
+	if w := f.chatCall(t); w.Code != 429 {
+		t.Fatalf("want 4110, got %d: %s", w.Code, w.Body.String())
+	}
+	recs := drainTraces(t, spool, dir)
+	if len(recs) != 2 || recs[1].Event != traces.EventDeclined {
+		t.Fatalf("want settled + declined, got %+v", recs)
+	}
+	// Nothing settled on the declined call, so it books nothing.
+	if recs[1].Usage != nil || recs[1].Grant == nil || recs[1].Grant.LedgerCostAfter != nil {
+		t.Fatalf("declined record must omit ledger fields: %+v %+v", recs[1].Usage, recs[1].Grant)
 	}
 }

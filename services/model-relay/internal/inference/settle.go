@@ -30,6 +30,10 @@ type finishParams struct {
 	openrouterAttempts int32
 	fallbackPhase      int32
 	terminalErrorCode  pgtype.Text
+	// bookedLedger, when set, receives the ledger cost this call booked on
+	// the request row (#3271). It is written only once the request settles
+	// here, so a replayed or already-reclaimed request leaves it untouched.
+	bookedLedger *int64
 }
 
 // finishInferenceRequest reproduces ditto/db/queries/inference.py::
@@ -146,6 +150,9 @@ func finishInferenceRequest(ctx context.Context, q *postgres.Queries, p finishPa
 		Nonce:              pgUUID(p.nonce),
 	}); err != nil {
 		return false, nil, err
+	}
+	if p.bookedLedger != nil {
+		*p.bookedLedger = ledgerCost
 	}
 	var updated postgres.InferenceGrant
 	if request.RequestKind == kindChat {

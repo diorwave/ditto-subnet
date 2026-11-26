@@ -304,6 +304,8 @@ def _summarize(index: int, line: bytes, include_bodies: bool) -> TraceRecordSumm
         status=_opt_str(outcome.get("status")),
         prompt_tokens=_opt_int(usage.get("prompt_tokens")),
         completion_tokens=_opt_int(usage.get("completion_tokens")),
+        ledger_cost_microusd=_opt_int(usage.get("ledger_cost_microusd")),
+        ledger_cost_after=_opt_int(grant.get("ledger_cost_after")),
         provider=_opt_str(upstream.get("provider")),
         latency_ms=_opt_int(upstream.get("latency_ms")),
         body_bytes=_opt_int(req.get("body_bytes")),

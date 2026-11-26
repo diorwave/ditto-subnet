@@ -211,6 +211,15 @@ size/age, zstd-compressed and PUT to every configured sink under
 traces/v1/lane=<inference|confirmation>/kind=<chat|embedding>/dt=YYYY-MM-DD/hour=HH/<relay>-<first>-<last>-<id>.jsonl.zst
 ```
 
+Settled records also carry the ledger cost behind the per-run cost ceiling
+(#3271), in every mode: `usage.ledger_cost_microusd` is what the call booked at
+the grant-stamped list price (unlike `usage.cost_microusd`, the provider bill),
+and `grant.ledger_cost_after` is the grant's settled total once it committed.
+Both are omitted on a declined call and whenever the settle transaction did
+not book the request (a replay, an already reclaimed row, a failed commit), and
+the Postgres backfill does not write them. Adding them does not bump the
+schema version.
+
 A successful upstream result is not proof of delivery: inspect
 `response.http_status` and `response.deliverable` alongside `outcome.status`.
 When the admission succeeded but the settlement transaction failed, the relay

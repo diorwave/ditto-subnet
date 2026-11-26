@@ -84,6 +84,16 @@ func traceInferenceGrant(g *postgres.InferenceGrant, model string) *traces.Grant
 	}
 }
 
+// traceSettledGrant snapshots the admission-time grant and adds the settled
+// ledger total, which only the settle transaction knows (#3271).
+func traceSettledGrant(g *postgres.InferenceGrant, model string, o *settleOutcome) *traces.Grant {
+	grant := traceInferenceGrant(g, model)
+	if grant != nil && o != nil {
+		grant.LedgerCostAfter = o.ledgerCostAfter
+	}
+	return grant
+}
+
 func traceConfirmationGrant(g *postgres.ConfirmationInferenceGrant) *traces.Grant {
 	if g == nil {
 		return nil
@@ -268,7 +278,7 @@ func (d *Deps) traceChatSettled(t chatTrace) {
 	d.trace(&traces.Record{
 		Event:   traces.EventSettled,
 		Request: traceRequest(t.r, t.headers, traces.LaneInference, traces.KindChat, t.body, t.receivedAt),
-		Grant:   traceInferenceGrant(t.grant, t.model),
+		Grant:   traceSettledGrant(t.grant, t.model, t.outcome),
 		Admission: &traces.Admission{
 			ReservedTokens: t.reserved, MaxChargeableTokens: t.chargeable, AdmittedAt: traces.TimePtr(t.admittedAt),
 		},
@@ -295,6 +305,7 @@ func (d *Deps) traceChatSettled(t chatTrace) {
 		Usage: &traces.Usage{
 			PromptTokens: t.outcome.promptTokens, CompletionTokens: t.outcome.completionTokens,
 			CostMicrousd: t.outcome.costMicrousd, UsageAvailable: t.outcome.usageAvailable,
+			LedgerCostMicrousd: t.outcome.ledgerCostMicrousd,
 		},
 		Outcome: &traces.Outcome{Status: t.outcome.status, StartedAt: traces.TimePtr(t.admittedAt), CompletedAt: traces.TimePtr(finished)},
 	})
@@ -352,7 +363,7 @@ func (d *Deps) traceEmbeddingSettled(t embeddingTrace) {
 	d.trace(&traces.Record{
 		Event:   traces.EventSettled,
 		Request: traceRequest(t.r, t.headers, traces.LaneInference, traces.KindEmbedding, t.body, t.receivedAt),
-		Grant:   traceInferenceGrant(t.grant, t.model),
+		Grant:   traceSettledGrant(t.grant, t.model, t.outcome),
 		Admission: &traces.Admission{
 			ReservedTokens: t.reserved, MaxChargeableTokens: t.chargeable, AdmittedAt: traces.TimePtr(t.admittedAt),
 		},
@@ -377,6 +388,7 @@ func (d *Deps) traceEmbeddingSettled(t embeddingTrace) {
 		Usage: &traces.Usage{
 			PromptTokens: t.outcome.promptTokens, CompletionTokens: t.outcome.completionTokens,
 			CostMicrousd: t.outcome.costMicrousd, UsageAvailable: t.outcome.usageAvailable,
+			LedgerCostMicrousd: t.outcome.ledgerCostMicrousd,
 		},
 		Outcome: &traces.Outcome{Status: t.outcome.status, StartedAt: traces.TimePtr(t.admittedAt), CompletedAt: traces.TimePtr(finished)},
 	})
@@ -419,7 +431,7 @@ func (d *Deps) traceDecisionSettled(t decisionTrace) {
 	d.trace(&traces.Record{
 		Event:   traces.EventSettled,
 		Request: traceRequest(t.r, t.headers, traces.LaneInference, traces.KindDecision, t.body, t.receivedAt),
-		Grant:   traceInferenceGrant(t.grant, t.model),
+		Grant:   traceSettledGrant(t.grant, t.model, t.outcome),
 		Admission: &traces.Admission{
 			ReservedTokens: t.reserved, MaxChargeableTokens: t.chargeable, AdmittedAt: traces.TimePtr(t.receivedAt),
 		},
@@ -444,6 +456,7 @@ func (d *Deps) traceDecisionSettled(t decisionTrace) {
 		Usage: &traces.Usage{
 			PromptTokens: t.outcome.promptTokens, CompletionTokens: t.outcome.completionTokens,
 			CostMicrousd: t.outcome.costMicrousd, UsageAvailable: t.outcome.usageAvailable,
+			LedgerCostMicrousd: t.outcome.ledgerCostMicrousd,
 		},
 		Outcome: &traces.Outcome{Status: t.outcome.status, StartedAt: traces.TimePtr(t.receivedAt), CompletedAt: traces.TimePtr(finished)},
 	})
