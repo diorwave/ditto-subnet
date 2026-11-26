@@ -3075,6 +3075,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/inference-ledger-cost-distribution": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Inference Ledger Cost Distribution
+         * @description Ledger cost per run, per bench version, for sizing the cost ceiling.
+         *
+         *     Reads leases that ended in the window, so a live run's partial spend never
+         *     drags a percentile down. Ledger cost is list price, never the provider
+         *     bill (#3271).
+         */
+        get: operations["get_inference_ledger_cost_distribution_api_v1_admin_inference_ledger_cost_distribution_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/inference-routes": {
         parameters: {
             query?: never;
@@ -30145,6 +30169,32 @@ export interface components {
             /** Rows */
             rows: components["schemas"]["InferenceAdmissionRejectionRow"][];
         };
+        /**
+         * InferenceAllowanceWallWindow
+         * @description Scoring grants that reached a run wall, by wall, over one window.
+         *
+         *     A run that ends as ``inference_allowance_exhausted`` left its grant at one
+         *     of these walls. ``request`` and ``token`` are the chat walls and ``cost``
+         *     is an enforced ledger cost ceiling (#3271), named in admission's order
+         *     (cost before token before request). ``unknown`` is a grant marked
+         *     exhausted whose meters prove no wall: a v1 grant or a legacy row. It is
+         *     reported so that a gap is visible, never folded into a named wall. The
+         *     window counts grants whose lease ended inside it or is still live.
+         */
+        InferenceAllowanceWallWindow: {
+            /** Cost */
+            cost: number;
+            /** Grants At Wall */
+            grants_at_wall: number;
+            /** Request */
+            request: number;
+            /** Token */
+            token: number;
+            /** Unknown */
+            unknown: number;
+            /** Window Seconds */
+            window_seconds: number;
+        };
         /** InferenceCalibrationRoute */
         InferenceCalibrationRoute: {
             /** Model */
@@ -30543,6 +30593,16 @@ export interface components {
         /** InferenceFailureTaxonomy */
         InferenceFailureTaxonomy: {
             /**
+             * Allowance Walls
+             * @default []
+             */
+            allowance_walls: components["schemas"]["InferenceAllowanceWallWindow"][];
+            /**
+             * Allowance Window Seconds
+             * @default []
+             */
+            allowance_window_seconds: number[];
+            /**
              * Confirmation Groups
              * @default []
              */
@@ -30730,6 +30790,76 @@ export interface components {
             tokens_per_second: number;
             /** Window Seconds */
             window_seconds: number;
+        };
+        /**
+         * InferenceLedgerCostBench
+         * @description Ledger cost per run for one bench version's ended leases.
+         */
+        InferenceLedgerCostBench: {
+            /** Bench Version */
+            bench_version: number;
+            /** Cost Wall Grants */
+            cost_wall_grants: number;
+            /** Enforce Grants */
+            enforce_grants: number;
+            /** Grants */
+            grants: number;
+            /** Grants With Would Decline */
+            grants_with_would_decline: number;
+            /** Max Microusd */
+            max_microusd: number | null;
+            /** P50 Microusd */
+            p50_microusd: number | null;
+            /** P95 Microusd */
+            p95_microusd: number | null;
+            /** P99 Microusd */
+            p99_microusd: number | null;
+            /** Shadow Grants */
+            shadow_grants: number;
+            /** Total Microusd */
+            total_microusd: number;
+            /** Unbooked Grants */
+            unbooked_grants: number;
+            /** Would Decline */
+            would_decline: number;
+        };
+        /**
+         * InferenceLedgerCostDistribution
+         * @description What one run costs, so the operator can size the ceiling from data.
+         */
+        InferenceLedgerCostDistribution: {
+            /**
+             * Aggregation Basis
+             * @default grant_expires_at_ended_leases
+             * @constant
+             */
+            aggregation_basis: "grant_expires_at_ended_leases";
+            /** Benches */
+            benches: components["schemas"]["InferenceLedgerCostBench"][];
+            /** Case Cost Report Microusd */
+            case_cost_report_microusd: number | null;
+            /**
+             * Cost Ceiling Mode
+             * @enum {string}
+             */
+            cost_ceiling_mode: "off" | "shadow" | "enforce";
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Run Cost Ceiling Microusd */
+            run_cost_ceiling_microusd: number | null;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
         };
         /**
          * InferenceRateLimitBurst
@@ -47537,6 +47667,10 @@ export interface components {
             lane?: string | null;
             /** Latency Ms */
             latency_ms?: number | null;
+            /** Ledger Cost After */
+            ledger_cost_after?: number | null;
+            /** Ledger Cost Microusd */
+            ledger_cost_microusd?: number | null;
             /** Nonce */
             nonce?: string | null;
             /** Prompt Tokens */
@@ -58293,6 +58427,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InferenceGrantCostSnapshot"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_inference_ledger_cost_distribution_api_v1_admin_inference_ledger_cost_distribution_get: {
+        parameters: {
+            query?: {
+                hours?: number;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InferenceLedgerCostDistribution"];
                 };
             };
             /** @description Validation Error */

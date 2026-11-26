@@ -478,6 +478,7 @@ import {
   inferenceFailureTaxonomySchema,
   inferenceRuntimeMetricsSchema,
   inferenceGrantCostsSchema,
+  inferenceLedgerCostDistributionSchema,
   sourceReviewQueueSloSchema,
   athReviewQueueSloSchema,
   validatorCapacitySummarySchema,
@@ -2165,6 +2166,14 @@ export async function fetchInferenceGrantCosts(hours: number) {
   const window = z.number().int().min(1).max(744).parse(hours)
   return inferenceGrantCostsSchema.parse(await platformAdminRequest(
     `/api/v1/admin/inference-grant-costs?hours=${window}`,
+    { timeoutMs: 30_000 },
+  ))
+}
+
+export async function fetchInferenceLedgerCostDistribution(hours: number) {
+  const window = z.number().int().min(1).max(744).parse(hours)
+  return inferenceLedgerCostDistributionSchema.parse(await platformAdminRequest(
+    `/api/v1/admin/inference-ledger-cost-distribution?hours=${window}`,
     { timeoutMs: 30_000 },
   ))
 }

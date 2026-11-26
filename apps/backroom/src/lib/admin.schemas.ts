@@ -33,6 +33,10 @@ type GeneratedSourceReviewNote = PlatformComponents['schemas']['SourceReviewNote
 type GeneratedValidatorUpdaterStatus = PlatformComponents['schemas']['ValidatorUpdaterStatus']
 type GeneratedAdminActiveHotkeyBan = PlatformComponents['schemas']['AdminActiveHotkeyBan']
 type GeneratedEffectiveCompetitionFee = PlatformComponents['schemas']['EffectiveCompetitionFee']
+type GeneratedInferenceAllowanceWallWindow =
+  PlatformComponents['schemas']['InferenceAllowanceWallWindow']
+type GeneratedInferenceLedgerCostBench =
+  PlatformComponents['schemas']['InferenceLedgerCostBench']
 type GeneratedAdminHotkeyBanAuditEntry =
   PlatformComponents['schemas']['AdminHotkeyBanAuditEntry']
 type GeneratedAdminHotkeyBanControl = PlatformComponents['schemas']['AdminHotkeyBanControl']
@@ -3322,6 +3326,35 @@ export const inferenceGrantCostsSchema = z.object({
   })),
 })
 
+// Per-run ledger cost for sizing the cost ceiling (#3271): leases that ended in
+// the window, per bench version. Ledger cost is list price, never the bill.
+const microusdOrNullSchema = z.number().int().nonnegative().nullable()
+
+export const inferenceLedgerCostDistributionSchema = z.object({
+  observed_at: z.string(),
+  window_start: z.string(),
+  window_end: z.string(),
+  aggregation_basis: z.literal('grant_expires_at_ended_leases'),
+  run_cost_ceiling_microusd: microusdOrNullSchema,
+  cost_ceiling_mode: z.enum(['off', 'shadow', 'enforce']),
+  case_cost_report_microusd: microusdOrNullSchema,
+  benches: z.array(z.object({
+    bench_version: z.number().int(),
+    grants: z.number().int().nonnegative(),
+    unbooked_grants: z.number().int().nonnegative(),
+    p50_microusd: microusdOrNullSchema,
+    p95_microusd: microusdOrNullSchema,
+    p99_microusd: microusdOrNullSchema,
+    max_microusd: microusdOrNullSchema,
+    total_microusd: z.number().int().nonnegative(),
+    shadow_grants: z.number().int().nonnegative(),
+    enforce_grants: z.number().int().nonnegative(),
+    would_decline: z.number().int().nonnegative(),
+    grants_with_would_decline: z.number().int().nonnegative(),
+    cost_wall_grants: z.number().int().nonnegative(),
+  } satisfies PlatformResponseShape<GeneratedInferenceLedgerCostBench>)),
+})
+
 export const inferenceRuntimeMetricsSchema = z.object({
   observed_at: z.string(),
   settings_revision: z.number().int().nonnegative(),
@@ -3530,6 +3563,20 @@ export const inferenceFailureTaxonomySchema = z.object({
       }),
     )
     .default([]),
+  // Scoring grants at a run wall per hour/day/week window (#3271): the
+  // Platform-side record behind inference_allowance_exhausted. Defaults keep
+  // a Platform predating the split readable.
+  allowance_window_seconds: z.array(z.number().int().positive()).default([]),
+  allowance_walls: z
+    .array(z.object({
+      window_seconds: z.number().int().positive(),
+      grants_at_wall: z.number().int().nonnegative(),
+      request: z.number().int().nonnegative(),
+      token: z.number().int().nonnegative(),
+      cost: z.number().int().nonnegative(),
+      unknown: z.number().int().nonnegative(),
+    } satisfies PlatformResponseShape<GeneratedInferenceAllowanceWallWindow>))
+    .default([]),
 })
 
 export const runtimeProfileCaptureInputSchema = z
@@ -3591,6 +3638,9 @@ export const MAX_CHAT_TOKEN_BUDGET = 200_000_000
 export const MAX_CHAT_CONCURRENCY = 512
 export const MAX_EMBEDDING_CONCURRENCY = 512
 export const MAX_REQUESTS_PER_MINUTE = 100_000
+// Per-run ledger cost ceiling bound (#3271), micro-USD: $1,000 per run, the
+// Platform's MAX_RUN_COST_CEILING_MICROUSD.
+export const MAX_RUN_COST_CEILING_MICROUSD = 1_000_000_000
 export const MAX_BENCHMARK_CASE_CONCURRENCY = 64
 export const MAX_RELAY_DELAY_FINGERPRINT_MS = 5_000
 export const MIN_SANDBOX_MEMORY_LIMIT_MIB = 512
@@ -3716,6 +3766,13 @@ export const scoredProviderRoutingSchema = z.enum([
   'bf16_price_order',
 ])
 
+// off: no admission effect. shadow: admit, count what enforce would decline.
+// enforce: the first admission after settled ledger cost reaches the ceiling
+// is declined with 4110 and the grant is exhausted on every lane.
+export const costCeilingModeSchema = z.enum(['off', 'shadow', 'enforce'])
+
+const runCostMicrousdSchema = z.number().int().min(1).max(MAX_RUN_COST_CEILING_MICROUSD)
+
 const inferenceConcurrencySettingsBaseSchema = z.object({
   // Chat completions one scoring ticket's grant may spend in total. Ships at
   // 16384, ~15x the heaviest observed run.
@@ -3760,7 +3817,56 @@ const inferenceConcurrencySettingsBaseSchema = z.object({
     .transform((value) => value ?? 'throughput'),
   danilabs_percent: z.number().int().min(0).max(100)
     .nullish().transform((value) => value ?? 0),
+  // Additive rolling-upgrade fields (#3271): a Platform predating the per-run
+  // cost ceiling omits them, which reads as no ceiling, mode off.
+  // Ledger micro-USD one run's grant may settle: receipted units x the list
+  // prices stamped at mint, over every lane, never the provider bill. Null
+  // means no ceiling. Stamped on the grant at mint, so a revision governs the
+  // next lease only.
+  run_cost_ceiling_microusd: runCostMicrousdSchema
+    .nullish()
+    .transform((value) => value ?? null),
+  cost_ceiling_mode: costCeilingModeSchema
+    .nullish()
+    .transform((value) => value ?? 'off'),
+  // Report-only per-case threshold; never an admission input.
+  case_cost_report_microusd: runCostMicrousdSchema
+    .nullish()
+    .transform((value) => value ?? null),
 })
+
+type CostCeilingFields = {
+  run_cost_ceiling_microusd?: number | null
+  cost_ceiling_mode?: z.infer<typeof costCeilingModeSchema>
+  case_cost_report_microusd?: number | null
+}
+
+// Mirrors the Platform model validator. A key a write omits keeps its
+// effective value on Platform, so a rule is checked here only when every key
+// it reads is present; Platform re-validates the merged policy either way.
+const refineCostCeiling = (value: CostCeilingFields, context: z.RefinementCtx) => {
+  const mode = value.cost_ceiling_mode
+  const ceiling = value.run_cost_ceiling_microusd
+  if (mode !== undefined && mode !== 'off' && ceiling === null) {
+    context.addIssue({
+      code: 'custom',
+      message: `cost_ceiling_mode ${mode} needs run_cost_ceiling_microusd: a mode with no ceiling would read as protected while bounding nothing`,
+      path: ['cost_ceiling_mode'],
+    })
+  }
+  const caseReport = value.case_cost_report_microusd
+  if (
+    typeof caseReport === 'number' &&
+    typeof ceiling === 'number' &&
+    caseReport > ceiling
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message: 'case_cost_report_microusd may not exceed run_cost_ceiling_microusd',
+      path: ['case_cost_report_microusd'],
+    })
+  }
+}
 
 // The platform enforces this hierarchy with its own model validator and 422s a
 // violation. Mirrored here so the operator sees which field is wrong before a
@@ -3768,7 +3874,12 @@ const inferenceConcurrencySettingsBaseSchema = z.object({
 const refineInferenceConcurrencyHierarchy = (
   value: Omit<
     z.infer<typeof inferenceConcurrencySettingsBaseSchema>,
-    'decision_lane' | 'scored_provider_routing' | 'danilabs_percent'
+    | 'decision_lane'
+    | 'scored_provider_routing'
+    | 'danilabs_percent'
+    | 'run_cost_ceiling_microusd'
+    | 'cost_ceiling_mode'
+    | 'case_cost_report_microusd'
   >,
   context: z.RefinementCtx,
 ) => {
@@ -3843,8 +3954,9 @@ const refineInferenceConcurrencyHierarchy = (
   }
 }
 
-export const inferenceConcurrencySettingsSchema =
-  inferenceConcurrencySettingsBaseSchema.superRefine(refineInferenceConcurrencyHierarchy)
+export const inferenceConcurrencySettingsSchema = inferenceConcurrencySettingsBaseSchema
+  .superRefine(refineInferenceConcurrencyHierarchy)
+  .superRefine(refineCostCeiling)
 
 // decision_lane is optional on writes and never defaulted: Platform preserves
 // the effective lane when a revision omits it, so a concurrency change can
@@ -3857,8 +3969,15 @@ const inferenceConcurrencySettingsWriteSchema = inferenceConcurrencySettingsBase
     // effective route, so a concurrency change never flips provider routing.
     scored_provider_routing: scoredProviderRoutingSchema.optional(),
     danilabs_percent: z.number().int().min(0).max(100).optional(),
+    // Optional on writes like the fields above: omitting one keeps its
+    // effective value, so a concurrency change never arms or disarms the
+    // cost ceiling. Send null to clear a ceiling or the case threshold.
+    run_cost_ceiling_microusd: runCostMicrousdSchema.nullable().optional(),
+    cost_ceiling_mode: costCeilingModeSchema.optional(),
+    case_cost_report_microusd: runCostMicrousdSchema.nullable().optional(),
   })
   .superRefine(refineInferenceConcurrencyHierarchy)
+  .superRefine(refineCostCeiling)
 
 export const inferenceConcurrencySettingsRevisionSchema = z.object({
   revision: z.number().int().nonnegative(),
@@ -10272,6 +10391,10 @@ export const traceRecordSummarySchema = z.object({
   status: z.string().nullish(),
   prompt_tokens: z.number().int().nullish(),
   completion_tokens: z.number().int().nullish(),
+  // Ledger cost (#3271): what the call booked against the run's cost ceiling
+  // and the grant's settled total after it. Absent on older records.
+  ledger_cost_microusd: z.number().int().nonnegative().nullish(),
+  ledger_cost_after: z.number().int().nonnegative().nullish(),
   provider: z.string().nullish(),
   latency_ms: z.number().int().nullish(),
   body_bytes: z.number().int().nullish(),

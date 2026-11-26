@@ -184,6 +184,9 @@ describe('admin API schemas', () => {
       decision_lane: DEFAULT_DECISION_LANE_SETTINGS,
       scored_provider_routing: 'throughput',
       danilabs_percent: 0,
+      run_cost_ceiling_microusd: null,
+      cost_ceiling_mode: 'off',
+      case_cost_report_microusd: null,
     })
     expect(() => inferenceConcurrencySettingsSchema.parse({
       ...settings,
@@ -219,6 +222,9 @@ describe('admin API schemas', () => {
       decision_lane: DEFAULT_DECISION_LANE_SETTINGS,
       scored_provider_routing: 'throughput',
       danilabs_percent: 0,
+      run_cost_ceiling_microusd: null,
+      cost_ceiling_mode: 'off',
+      case_cost_report_microusd: null,
     })
     expect(() => inferenceConcurrencySettingsSchema.parse({
       ...settings,
@@ -256,6 +262,9 @@ describe('admin API schemas', () => {
       decision_lane: DEFAULT_DECISION_LANE_SETTINGS,
       scored_provider_routing: 'throughput',
       danilabs_percent: 0,
+      run_cost_ceiling_microusd: null,
+      cost_ceiling_mode: 'off',
+      case_cost_report_microusd: null,
     })
     expect(() => inferenceConcurrencySettingsSchema.parse({
       ...settings,
@@ -331,6 +340,67 @@ describe('admin API schemas', () => {
     expect(write({ scored_provider_routing: 'bf16_price_order_canary' }).settings
       .scored_provider_routing).toBe('bf16_price_order_canary')
     expect(() => write({ scored_provider_routing: 'fp4_cheapest' })).toThrow()
+  })
+
+  it('reads the cost ceiling as off when Platform predates it and guards writes', () => {
+    const settings = {
+      chat_request_budget: 8192,
+      chat_token_budget: 25_000_000,
+      chat_per_ticket_concurrency: 16,
+      chat_per_validator_concurrency: 48,
+      chat_global_concurrency: 96,
+      embedding_per_ticket_concurrency: 12,
+      embedding_per_validator_concurrency: 48,
+      embedding_global_concurrency: 96,
+      ...INFERENCE_RPM,
+      benchmark_runtime: {
+        case_concurrency: 4,
+        relay_delay_fingerprint_mode: 'off' as const,
+        relay_delay_fingerprint_min_ms: 25,
+        relay_delay_fingerprint_max_ms: 250,
+        sandbox_memory_limit_mib: 6144,
+        memory_factor_posture: 'shadow',
+        memory_factor_free_mib: 512,
+        memory_factor_floor_bps: 9000,
+      },
+    }
+    expect(inferenceConcurrencySettingsSchema.parse(settings)).toMatchObject({
+      run_cost_ceiling_microusd: null,
+      cost_ceiling_mode: 'off',
+      case_cost_report_microusd: null,
+    })
+    expect(inferenceConcurrencySettingsSchema.parse({
+      ...settings,
+      run_cost_ceiling_microusd: 750_000,
+      cost_ceiling_mode: 'shadow',
+      case_cost_report_microusd: 50_000,
+    })).toMatchObject({ run_cost_ceiling_microusd: 750_000, cost_ceiling_mode: 'shadow' })
+
+    const write = (extra: Record<string, unknown>) =>
+      setInferenceConcurrencySettingsInputSchema.parse({
+        expectedRevision: 0,
+        settings: { ...settings, ...extra },
+        reason: 'size the per-run cost ceiling',
+        confirmation: INFERENCE_CONCURRENCY_CONFIRMATION,
+      })
+    // Omitted means "keep the value in force" on Platform, never a default.
+    const omitted = write({}).settings
+    expect(omitted.run_cost_ceiling_microusd).toBeUndefined()
+    expect(omitted.cost_ceiling_mode).toBeUndefined()
+    expect(omitted.case_cost_report_microusd).toBeUndefined()
+    expect(write({ run_cost_ceiling_microusd: 750_000, cost_ceiling_mode: 'enforce' })
+      .settings.cost_ceiling_mode).toBe('enforce')
+    expect(write({ run_cost_ceiling_microusd: null, cost_ceiling_mode: 'off' })
+      .settings.run_cost_ceiling_microusd).toBeNull()
+    // A mode alone defers the ceiling check to Platform's merged policy.
+    expect(write({ cost_ceiling_mode: 'shadow' }).settings.cost_ceiling_mode).toBe('shadow')
+    expect(() => write({ run_cost_ceiling_microusd: null, cost_ceiling_mode: 'shadow' }))
+      .toThrow(/needs run_cost_ceiling_microusd/)
+    expect(() => write({ run_cost_ceiling_microusd: 100, case_cost_report_microusd: 101 }))
+      .toThrow(/may not exceed run_cost_ceiling_microusd/)
+    expect(() => write({ run_cost_ceiling_microusd: 1_000_000_001 })).toThrow()
+    expect(() => write({ run_cost_ceiling_microusd: 0 })).toThrow()
+    expect(() => write({ cost_ceiling_mode: 'audit' })).toThrow()
   })
 
   it('requires exact confirmation for v9 contract retests only', () => {

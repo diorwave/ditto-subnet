@@ -10,6 +10,7 @@ import {
   MAX_EMBEDDING_CONCURRENCY,
   MAX_REQUESTS_PER_MINUTE,
   MAX_RELAY_DELAY_FINGERPRINT_MS,
+  MAX_RUN_COST_CEILING_MICROUSD,
   DEFAULT_SANDBOX_MEMORY_LIMIT_MIB,
   MAX_SANDBOX_MEMORY_LIMIT_MIB,
   MIN_SANDBOX_MEMORY_LIMIT_MIB,
@@ -116,6 +117,22 @@ const fields = [
 ] as const
 
 type FieldKey = (typeof fields)[number]['key']
+type CostCeilingMode = 'off' | 'shadow' | 'enforce'
+
+// A blank micro-USD input means "none" (null). Anything else must be a whole
+// number inside the Platform bound, or it is reported invalid.
+function parseOptionalMicrousd(value: string): { value: number | null; bad: boolean } {
+  if (value.trim() === '') return { value: null, bad: false }
+  const parsed = Number(value)
+  return {
+    value: parsed,
+    bad: !Number.isInteger(parsed) || parsed < 1 || parsed > MAX_RUN_COST_CEILING_MICROUSD,
+  }
+}
+
+function dollars(microusd: number | null): string {
+  return microusd === null ? 'none' : `$${(microusd / 1_000_000).toFixed(2)}`
+}
 type Draft = Record<FieldKey, string>
 
 function draftFrom(control: InferenceConcurrencySettingsControl): Draft {
@@ -169,6 +186,15 @@ export function InferenceConcurrencyControlPanel({
   const [sandboxMemoryMib, setSandboxMemoryMib] = useState(
     String(initialState.effective.settings.benchmark_runtime.sandbox_memory_limit_mib),
   )
+  const [costCeiling, setCostCeiling] = useState(
+    String(initialState.effective.settings.run_cost_ceiling_microusd ?? ''),
+  )
+  const [costMode, setCostMode] = useState<CostCeilingMode>(
+    initialState.effective.settings.cost_ceiling_mode,
+  )
+  const [caseCostReport, setCaseCostReport] = useState(
+    String(initialState.effective.settings.case_cost_report_microusd ?? ''),
+  )
   const [reason, setReason] = useState('')
   const [confirmation, setConfirmation] = useState('')
   const [loading, setLoading] = useState(false)
@@ -219,7 +245,25 @@ export function InferenceConcurrencyControlPanel({
     parsedDelayMaxMs < parsedDelayMinMs ||
     parsedDelayMaxMs > MAX_RELAY_DELAY_FINGERPRINT_MS
 
+  const ceiling = parseOptionalMicrousd(costCeiling)
+  const caseReport = parseOptionalMicrousd(caseCostReport)
+  // The Platform model validator's two cost rules, surfaced before a round trip.
+  const costModeWithoutCeiling = costMode !== 'off' && !ceiling.bad && ceiling.value === null
+  const caseAboveCeiling =
+    !ceiling.bad &&
+    !caseReport.bad &&
+    ceiling.value !== null &&
+    caseReport.value !== null &&
+    caseReport.value > ceiling.value
+  const costInvalid =
+    ceiling.bad || caseReport.bad || costModeWithoutCeiling || caseAboveCeiling
+  const costChanged =
+    ceiling.value !== effective.settings.run_cost_ceiling_microusd ||
+    costMode !== effective.settings.cost_ceiling_mode ||
+    caseReport.value !== effective.settings.case_cost_report_microusd
+
   const changed =
+    costChanged ||
     fields.some((field) => parsed[field.key] !== effective.settings[field.key]) ||
     parsedDaniPercent !== effective.settings.danilabs_percent ||
     parsedCaseConcurrency !== effective.settings.benchmark_runtime.case_concurrency ||
@@ -234,6 +278,7 @@ export function InferenceConcurrencyControlPanel({
     !hierarchyBroken &&
     !runtimeInvalid &&
     !daniInvalid &&
+    !costInvalid &&
     reason.trim().length >= 8 &&
     confirmation === INFERENCE_CONCURRENCY_CONFIRMATION
 
@@ -257,6 +302,9 @@ export function InferenceConcurrencyControlPanel({
     setSandboxMemoryMib(
       String(next.effective.settings.benchmark_runtime.sandbox_memory_limit_mib),
     )
+    setCostCeiling(String(next.effective.settings.run_cost_ceiling_microusd ?? ''))
+    setCostMode(next.effective.settings.cost_ceiling_mode)
+    setCaseCostReport(String(next.effective.settings.case_cost_report_microusd ?? ''))
     setReason('')
     setConfirmation('')
   }
@@ -305,6 +353,16 @@ export function InferenceConcurrencyControlPanel({
               parsed.embedding_per_validator_requests_per_minute,
             embedding_global_requests_per_minute: parsed.embedding_global_requests_per_minute,
             danilabs_percent: parsedDaniPercent,
+            // Sent only when edited: an omitted cost field keeps its value on
+            // Platform, so this panel never arms or disarms the ceiling by
+            // accident (and still writes to a Platform predating it).
+            ...(costChanged
+              ? {
+                  run_cost_ceiling_microusd: ceiling.value,
+                  cost_ceiling_mode: costMode,
+                  case_cost_report_microusd: caseReport.value,
+                }
+              : {}),
             benchmark_runtime: {
               // Keep the fields this panel does not edit (the SN-500 memory
               // factor policy): a revision is never a diff.
@@ -457,6 +515,97 @@ export function InferenceConcurrencyControlPanel({
             validator more than the fleet.
           </p>
         ) : null}
+
+        <fieldset className="mt-6 border-t border-[var(--line)] pt-5">
+          <legend className="pr-3 text-xs font-semibold text-[var(--muted-strong)]">
+            Per-run cost ceiling
+          </legend>
+          <p className="mb-4 max-w-[76ch] text-[11px] leading-4 text-[var(--muted)]">
+            Ledger cost is receipted units times the list prices stamped on the grant at mint,
+            summed over every lane, never the provider bill. The ceiling and mode are stamped
+            on each new grant, so a change governs the next lease. Roll out as shadow first, and
+            switch to enforce only once the validator fleet runs a 4110-aware scorer: an older
+            broker reads 4110 as a platform fault and re-leases the run. Size the ceiling from
+            get_inference_ledger_cost_distribution.
+          </p>
+          <div className="grid gap-4 lg:grid-cols-3">
+            <label className="text-xs font-medium text-[var(--muted-strong)]">
+              Run ceiling (micro-USD){' '}
+              <span className="font-normal text-[var(--muted)]">(blank = none)</span>
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={MAX_RUN_COST_CEILING_MICROUSD}
+                step={1}
+                value={costCeiling}
+                disabled={readOnly || loading}
+                onChange={(event) => setCostCeiling(event.target.value)}
+                className="mt-2 block min-h-11 w-44 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-sm outline-none focus:border-[var(--cyan)] disabled:opacity-45"
+              />
+              <span className="mt-2 block text-[11px] font-normal leading-4 text-[var(--muted)]">
+                {ceiling.bad
+                  ? `Must be a whole number between 1 and ${MAX_RUN_COST_CEILING_MICROUSD.toLocaleString()}.`
+                  : `${dollars(ceiling.value)} per run.`}
+              </span>
+            </label>
+
+            <label className="text-xs font-medium text-[var(--muted-strong)]">
+              Ceiling mode
+              <select
+                value={costMode}
+                disabled={readOnly || loading}
+                onChange={(event) => setCostMode(event.target.value as CostCeilingMode)}
+                className="mt-2 block min-h-11 w-44 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-sm outline-none focus:border-[var(--cyan)] disabled:opacity-45"
+              >
+                <option value="off">Off</option>
+                <option value="shadow">Shadow</option>
+                <option value="enforce">Enforce</option>
+              </select>
+              <span className="mt-2 block text-[11px] font-normal leading-4 text-[var(--muted)]">
+                Off changes nothing. Shadow admits and counts what enforce would decline.
+                Enforce answers 4110 once settled ledger cost reaches the ceiling.
+              </span>
+            </label>
+
+            <label className="text-xs font-medium text-[var(--muted-strong)]">
+              Case report threshold (micro-USD){' '}
+              <span className="font-normal text-[var(--muted)]">(blank = none)</span>
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={MAX_RUN_COST_CEILING_MICROUSD}
+                step={1}
+                value={caseCostReport}
+                disabled={readOnly || loading}
+                onChange={(event) => setCaseCostReport(event.target.value)}
+                className="mt-2 block min-h-11 w-44 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-sm outline-none focus:border-[var(--cyan)] disabled:opacity-45"
+              />
+              <span className="mt-2 block text-[11px] font-normal leading-4 text-[var(--muted)]">
+                {caseReport.bad
+                  ? `Must be a whole number between 1 and ${MAX_RUN_COST_CEILING_MICROUSD.toLocaleString()}.`
+                  : 'Report-only; never an admission input.'}
+              </span>
+            </label>
+          </div>
+          {costModeWithoutCeiling ? (
+            <p className="mt-3 text-[11px] text-[var(--red)]">
+              Shadow and enforce need a run ceiling: a mode with no ceiling bounds nothing.
+            </p>
+          ) : null}
+          {caseAboveCeiling ? (
+            <p className="mt-3 text-[11px] text-[var(--red)]">
+              The case report threshold may not exceed the run ceiling.
+            </p>
+          ) : null}
+          {costChanged && !costInvalid ? (
+            <p className="mt-3 text-[11px] font-medium text-[var(--amber)]">
+              In force: {dollars(effective.settings.run_cost_ceiling_microusd)} ·{' '}
+              {effective.settings.cost_ceiling_mode}
+            </p>
+          ) : null}
+        </fieldset>
 
         <fieldset className="mt-6 border-t border-[var(--line)] pt-5">
           <legend className="pr-3 text-xs font-semibold text-[var(--muted-strong)]">

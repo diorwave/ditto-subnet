@@ -792,6 +792,7 @@ describe('Backroom MCP tools', () => {
         'get_emission_eligibility_policy',
         'get_inference_concurrency_settings',
         'get_decision_lane',
+        'get_inference_ledger_cost_distribution',
         'get_inference_runtime_metrics',
         'get_source_review_queue_slo',
         'get_outlier_escalation',
@@ -1228,7 +1229,11 @@ describe('Backroom MCP tools', () => {
     // The audited frontier oracle rerun write (rerun_generator_round_frontier;
     // one-line summary, detail in tool help) adds 707 bytes: measured 256,203
     // bytes; keep about 0.5 KB.
-    expect(Buffer.byteLength(JSON.stringify(response.tools), 'utf8')).toBeLessThanOrEqual(256_800)
+    // The per-run cost ceiling (#3271): the ledger-cost distribution read (one
+    // bounded integer input, one-line summary, detail in tool help) and three
+    // optional cost fields on the settings write measure 257,038 bytes; keep
+    // about 0.5 KB.
+    expect(Buffer.byteLength(JSON.stringify(response.tools), 'utf8')).toBeLessThanOrEqual(257_550)
     const descriptions = response.tools.map((tool) => tool.description ?? '')
     // Includes concise rollout and protected-policy controls; tutorials live
     // in get_backroom_tool_help, not here. The budget admits the screener
@@ -1298,7 +1303,9 @@ describe('Backroom MCP tools', () => {
       // keep about 200 chars.
       // The ten one-line model_context (CPM) summaries add 665 chars:
       // measured 31,153; keep about 200 chars.
-      31_350,
+      // The ledger cost distribution summary and the run walls in the
+      // failure taxonomy summary (#3271) measure 31,438; keep about 200 chars.
+      31_650,
     )
     expect(Math.max(...descriptions.map((value) => value.length))).toBeLessThanOrEqual(600)
     expect(
@@ -6452,6 +6459,59 @@ describe('Backroom MCP tools', () => {
       active: true,
       tickets: [{ slot_id: 'slot-0' }],
     })
+    // A Platform predating the run-wall split still parses, with no walls.
+    expect(readJsonResult(response)).toMatchObject({
+      allowance_window_seconds: [],
+      allowance_walls: [],
+    })
+
+    await client.close()
+    await server.close()
+  })
+
+  it('reads the ledger cost distribution over a bounded window of ended leases', async () => {
+    process.env.DITTO_ADMIN_API_TOKEN = 'platform-admin-token'
+    const distribution = {
+      observed_at: '2026-11-26T12:00:00Z',
+      window_start: '2026-11-19T12:00:00Z',
+      window_end: '2026-11-26T12:00:00Z',
+      aggregation_basis: 'grant_expires_at_ended_leases',
+      run_cost_ceiling_microusd: 750_000,
+      cost_ceiling_mode: 'shadow',
+      case_cost_report_microusd: null,
+      benches: [{
+        bench_version: 15, grants: 8, unbooked_grants: 1,
+        p50_microusd: 300, p95_microusd: 900, p99_microusd: 900, max_microusd: 900,
+        total_microusd: 2_400, shadow_grants: 1, enforce_grants: 1,
+        would_decline: 4, grants_with_would_decline: 1, cost_wall_grants: 1,
+      }],
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json(distribution))
+      .mockResolvedValueOnce(Response.json(distribution))
+    vi.stubGlobal('fetch', fetchMock)
+    const { client, server } = await connect([BACKROOM_READ_SCOPE])
+
+    const defaulted = await client.callTool({
+      name: 'get_inference_ledger_cost_distribution', arguments: {},
+    })
+    expect(defaulted.isError).not.toBe(true)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      'https://platform-api.heyditto.ai/api/v1/admin/inference-ledger-cost-distribution?hours=168',
+    )
+    expect(readJsonResult(defaulted)).toMatchObject(distribution)
+
+    const day = await client.callTool({
+      name: 'get_inference_ledger_cost_distribution', arguments: { hours: 24 },
+    })
+    expect(day.isError).not.toBe(true)
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('?hours=24')
+
+    const unbounded = await client.callTool({
+      name: 'get_inference_ledger_cost_distribution', arguments: { hours: 745 },
+    })
+    expect(unbounded.isError).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
 
     await client.close()
     await server.close()

@@ -422,6 +422,7 @@ import {
   fetchScoringLeaseSettings,
   fetchInferenceRuntimeMetrics,
   fetchInferenceGrantCosts,
+  fetchInferenceLedgerCostDistribution,
   fetchSourceReviewQueueSlo,
   fetchAthReviewQueueSlo,
   fetchOutlierEscalation,
@@ -873,7 +874,7 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
   get_outlier_escalation_dry_run:
     'Replay outlier escalation on the scored ledger: rows it would hold.',
   get_inference_failure_taxonomy:
-    'Read hosted-inference outcome groups, report-only 429 bursts, and confirmation-lane (reader/judge) failures; unknown routes retained.',
+    'Read hosted-inference outcome groups, report-only 429 bursts, confirmation-lane (reader/judge) failures and run walls; unknown routes retained.',
   start_runtime_profile:
     'Capture bounded private relay pprof.',
   download_runtime_profile:
@@ -1034,6 +1035,8 @@ const MCP_CATALOG_DESCRIPTIONS: Record<string, string> = {
     'Read hosted budgets/concurrency, relay policy and optional history (default 0).',
   get_decision_lane:
     'Read the dark decision-model lane: switch, pinned model, price, walls and ledger usage.',
+  get_inference_ledger_cost_distribution:
+    'Read per-run ledger cost by bench version to size the cost ceiling. See tool help.',
   set_source_release_policy:
     'Set complete disclosure policy with CAS, reason and exact confirmation. Shortening may publish; releases cannot be recalled. See tool help.',
   set_efficiency_bonus_settings:
@@ -3960,6 +3963,21 @@ export function createBackroomMcpServer(props: McpGrantProps) {
   )
 
   registerTool(
+    'get_inference_ledger_cost_distribution',
+    {
+      title: 'Get the per-run ledger cost distribution',
+      description:
+        'Read what one scoring run costs, to size the per-run cost ceiling (#3271) before shadow and again before enforce. Per bench version, over leases that ENDED in the window (a live run is excluded so its partial spend cannot drag a percentile down): grants, p50/p95/p99/max and total ledger cost in micro-USD, shadow_grants and enforce_grants (grants minted with that mode), would_decline (shadow admissions enforce would have refused, summed) and grants_with_would_decline, and cost_wall_grants (enforced grants that reached their ceiling). Ledger cost is receipted units times the list prices stamped on the grant at mint, over every lane; it is never the provider bill, so routing and cache hits do not move it. unbooked_grants receipted usage but booked no ledger (leases settled before the ledger existed) and are left out of every figure. The ceiling, mode and case threshold in force now are returned for comparison; each grant ran under the one stamped at its own mint. Set them with set_inference_concurrency_settings. hours is 1-744, default 168. Requires backroom:read and changes nothing.',
+      inputSchema: {
+        hours: z.number().int().min(1).max(744).optional()
+          .describe('Window of ended leases, default 168.'),
+      },
+      annotations: toolAnnotations('read'),
+    },
+    async ({ hours }) => result(await fetchInferenceLedgerCostDistribution(hours ?? 168)),
+  )
+
+  registerTool(
     'get_inference_runtime_metrics',
     {
       title: 'Get hosted inference runtime metrics',
@@ -4077,7 +4095,8 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         'rate_limit_bursts is a REPORT-ONLY five-minute signal per lane: rate_limited_failures (upstream_http_429 started in the last 300 s), a provisional threshold pending measurement, and peak_global_concurrency (the same 300 s peak get_inference_runtime_metrics reports) against global_concurrency_limit. active means count >= threshold AND peak < limit: the upstream pool, not Ditto admission, was the bottleneck. tickets (most 429s first, capped; tickets_total / tickets_truncated) name agent_id, bench_version, validator_hotkey, slot_id, ticket_deadline and that ticket\'s 429 count. active enforces, reroutes, and retries nothing. ' +
         'In-flight requests are excluded from the groups on purpose (no route and no code yet) and counted as in_flight instead, so failure_share is failed over settled. Counts and identifiers only: no prompts, responses, keys, headers, or trace bodies. This changes nothing and admits nothing -- route admission and provider-fallback policy are not controlled here. ' +
         'confirmation_lanes and confirmation_groups cover the LongMem confirmation grants, which lanes/groups above DO NOT and never did: those read inference_requests, and a confirmation call writes confirmation_inference_requests instead. Through 2026-10 that lane lost 83% of its bundles to provider rejections while this tool reported rate_limited_failures 0 and rate_limit_bursts.active false in every window, so a zero here is not evidence about confirmation. Its windows are confirmation_window_seconds (1 hour / 1 day / 7 days) because a bundle runs a few times a day, not thousands of times an hour. ' +
-        'Each failed confirmation_groups row now carries the relay\'s own reason: failure_kind (upstream_error_envelope is the documented OpenRouter in-body failure, a 200 whose body is only an error object, with its error.code in upstream_error_code; upstream_status, upstream_backpressure, transport_timeout, transport_error, response_invalid, response_too_large, identity_mismatch, receipt_invalid, settle_rejected), upstream_http_status (the final status when a response arrived at all), max_upstream_attempts (dispatches including relay retries; also recorded on completed calls, where above 1 means a call that only succeeded after retrying), and receipt_free (true only on positive evidence that no provider receipt exists: a refused connection or a gateway envelope proving no endpoint was selected; a timeout is null because it may have been billed). The relay retries a receipt-free 5xx, a refused connection, or a transient (408/429/5xx) error envelope up to 4 attempts with jittered backoff, within a 12-retry budget per grant; timeouts are never retried. failure_kind, upstream_http_status and receipt_free are null on completed calls and on failures settled before they were recorded, so a failed group with failure_kind null is unexplained, not healthy. failed_without_provider equal to failed at a sub-second failed_p50_duration_ms is still the pre-provider shape. bundles_with_failure counts distinct bundles that saw a failure, and a bundle dies on its first one. Every (window, lane) pair is reported even when idle, so an absent lane is a bug, not a quiet one.',
+        'Each failed confirmation_groups row now carries the relay\'s own reason: failure_kind (upstream_error_envelope is the documented OpenRouter in-body failure, a 200 whose body is only an error object, with its error.code in upstream_error_code; upstream_status, upstream_backpressure, transport_timeout, transport_error, response_invalid, response_too_large, identity_mismatch, receipt_invalid, settle_rejected), upstream_http_status (the final status when a response arrived at all), max_upstream_attempts (dispatches including relay retries; also recorded on completed calls, where above 1 means a call that only succeeded after retrying), and receipt_free (true only on positive evidence that no provider receipt exists: a refused connection or a gateway envelope proving no endpoint was selected; a timeout is null because it may have been billed). The relay retries a receipt-free 5xx, a refused connection, or a transient (408/429/5xx) error envelope up to 4 attempts with jittered backoff, within a 12-retry budget per grant; timeouts are never retried. failure_kind, upstream_http_status and receipt_free are null on completed calls and on failures settled before they were recorded, so a failed group with failure_kind null is unexplained, not healthy. failed_without_provider equal to failed at a sub-second failed_p50_duration_ms is still the pre-provider shape. bundles_with_failure counts distinct bundles that saw a failure, and a bundle dies on its first one. Every (window, lane) pair is reported even when idle, so an absent lane is a bug, not a quiet one. ' +
+        'allowance_walls splits the scoring grants that reached a run wall over allowance_window_seconds (1 hour / 1 day / 7 days; a grant counts while its lease is live or once it ended inside the window): request and token are the chat walls, cost is an enforced per-run cost ceiling (#3271), named in admission order (cost before token before request). This is the Platform-side record behind a run that ends as inference_allowance_exhausted, read from the grant meters the Platform bills from; the scorer\'s own diagnostics.wall never reaches the Platform. unknown is a grant marked exhausted whose meters prove no wall (a v1 grant or legacy row): a gap to explain, never a quiet zero. A shadow ceiling is not a wall; see get_inference_ledger_cost_distribution.',
       annotations: toolAnnotations('read'),
     },
     async () => result(await fetchInferenceFailureTaxonomy()),
@@ -4113,7 +4132,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
     {
       title: 'Peek at records inside one trace object',
       description:
-        'Read up to 50 records from one trace object without downloading it: the platform fetches and zstd-decodes the object server-side under hard caps (64 MiB compressed; an over-limit object is a 413 telling you to use download_inference_trace). Every record comes back as a compact summary (recorded_at, event, lane, kind, run_id, case_id, grant/nonce, agent, bench_version, status, tokens, provider, latency); includeBodies=true attaches each full record — request body, per-phase raw provider responses, sanitized response — and any single record over 512 KiB is elided with record_omitted="too_large". offsetRecords + records_scanned page through a file; scan_complete=false means a bounded scan ended before the file did. This is the first debugging read for "what did the model actually see/say" on a specific case or run. Requires backroom:artifact:read.',
+        'Read up to 50 records from one trace object without downloading it: the platform fetches and zstd-decodes the object server-side under hard caps (64 MiB compressed; an over-limit object is a 413 telling you to use download_inference_trace). Every record comes back as a compact summary (recorded_at, event, lane, kind, run_id, case_id, grant/nonce, agent, bench_version, status, tokens, ledger_cost_microusd and ledger_cost_after when the call settled (#3271), provider, latency); includeBodies=true attaches each full record — request body, per-phase raw provider responses, sanitized response — and any single record over 512 KiB is elided with record_omitted="too_large". offsetRecords + records_scanned page through a file; scan_complete=false means a bounded scan ended before the file did. This is the first debugging read for "what did the model actually see/say" on a specific case or run. Requires backroom:artifact:read.',
       inputSchema: peekInferenceTraceInputSchema,
       annotations: toolAnnotations('read'),
     },
@@ -4156,6 +4175,7 @@ export function createBackroomMcpServer(props: McpGrantProps) {
         'chat_request_budget (1-32768, ships at 16384) and chat_token_budget (1-200000000, ships at 25000000) are the per-grant chat allowances. Both are STAMPED ONTO A GRANT WHEN IT IS MINTED and read from the grant row thereafter, so a revision governs the next lease and can never retroactively exhaust a run already in flight. chat_token_budget is the one to move when a legitimate strategy stuffs large contexts and dies partway through a run: raising chat_request_budget alone left the heaviest agents failing in exactly the same place, because tokens rather than calls were binding. It is a CAP, not a spend — an agent is charged what it consumes, so raising it changes only which runs are permitted to finish. ' +
         'The chat limits (each 1-512, shipping at 16/48/96) and embedding limits (each 1-512, shipping at 12/48/96) must each satisfy per_ticket <= per_validator <= global, and are enforced at admission rather than stamped. The six request-per-minute limits (1-100000, shipping at chat 1920/7680/23040 and embedding 10000/40000/100000) are the same live admission 503: 8-wide overlapping /run sat on the old boot-time 240 chat RPM cap and died as inference_lane_saturated while concurrency looked idle. Lowering either per-ticket value is a live emergency brake and is safe to pull mid-run. Global concurrency is enforced by a cross-grant aggregate, so it is best-effort under a simultaneous burst and should be sized as a load-shedding backstop with headroom, not as an exact valve. ' +
         'scored_provider_routing picks the OpenRouter provider preference for scored gpt-oss chat: throughput (default), bf16_price_order or bf16_price_order_canary. danilabs_percent (0–100, default 0) samples eligible GPT-OSS requests only when a relay trial key, scope and unexpired free-trial deadline are configured. Large requests stay on OpenRouter; failures are not automatically replayed. Omit either field to preserve it. ' +
+        'The per-run cost ceiling (#3271): run_cost_ceiling_microusd (1-1000000000 ledger micro-USD, or null for none), cost_ceiling_mode (off, the default; shadow admits and counts what enforce would decline; enforce answers 4110 once settled ledger cost reaches the ceiling and refuses every lane after) and case_cost_report_microusd (report-only, at most the ceiling, or null). Shadow and enforce need a ceiling. Ledger cost is list price stamped at mint, never the provider bill, and the ceiling and mode are stamped on each new grant, so a change governs the next lease. Omit all three to preserve them; send null to clear. Roll out shadow first and enforce only once the validator fleet runs a 4110-aware scorer: an older broker reads 4110 as a platform fault and re-leases the run. Size the ceiling with get_inference_ledger_cost_distribution. ' +
         'Every bound above uses the same hard ceiling enforced by the platform and Go relay, so Backroom cannot persist a value the admission process would refuse. The platform remains the authority on every bound and refusal. Requires backroom:write.',
       inputSchema: setInferenceConcurrencySettingsInputSchema,
       annotations: toolAnnotations('write', true),

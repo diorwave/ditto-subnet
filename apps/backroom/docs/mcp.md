@@ -1417,6 +1417,55 @@ The lane ships disabled and carries no score. To enable it, send
 Omitting `decision_lane` keeps the current value. The lane authenticates with
 the relay's existing OpenRouter key, and it needs no other credential.
 
+## Per-run cost ceiling (#3271)
+
+`set_inference_concurrency_settings` carries three optional cost fields:
+
+- `run_cost_ceiling_microusd`: ledger micro-USD one run's grant may settle,
+  1 to 1,000,000,000, or `null` for none;
+- `cost_ceiling_mode`: `off` (default), `shadow` or `enforce`;
+- `case_cost_report_microusd`: a report-only per-case threshold, at most the
+  ceiling, or `null`.
+
+Ledger cost is receipted units times the list prices stamped on the grant at
+mint, summed over every lane. It is never the provider bill. The ceiling and
+mode are stamped on each new grant, so a revision governs the next lease. A
+write that omits all three keeps them; `null` clears one. Shadow and enforce
+need a ceiling. `get_inference_concurrency_settings` returns them, and a
+Platform that predates them reads as no ceiling, mode `off`. The Inference
+concurrency page edits them and sends them only when changed.
+
+Roll out in order: ship the 4110-aware scorer, run `shadow`, and switch to
+`enforce` only once the validator fleet runs that scorer. An older broker
+reads 4110 as a platform fault and re-leases the run.
+
+`get_inference_ledger_cost_distribution` sizes the ceiling. It is backed by
+`GET /api/v1/admin/inference-ledger-cost-distribution?hours=168` (1–744) and
+reads leases that **ended** in the window, per bench version:
+
+- p50/p95/p99/max and total ledger cost per run;
+- `shadow_grants`, `enforce_grants`, `would_decline` (shadow admissions
+  enforce would have refused) and `grants_with_would_decline`;
+- `cost_wall_grants`: enforced grants that reached their ceiling;
+- `unbooked_grants`: leases that receipted usage but booked no ledger cost
+  (settled before the ledger existed). They are left out of every figure.
+
+The ceiling, mode and case threshold in force are returned for comparison.
+
+`get_inference_failure_taxonomy` adds `allowance_walls` over
+`allowance_window_seconds` (1 hour, 1 day, 7 days). It counts the scoring
+grants that reached a run wall, split into `request`, `token` and `cost`
+(an enforced ceiling), in admission's order: cost, then token, then request.
+That is the Platform-side record behind a run that ends as
+`inference_allowance_exhausted`; it reads the grant meters the Platform bills
+from, because the scorer's `diagnostics.wall` never reaches the Platform.
+`unknown` is a grant marked exhausted whose meters prove no wall, such as a v1
+grant. It is reported, never folded into a named wall.
+
+`peek_inference_trace` summaries carry `ledger_cost_microusd` (what the call
+booked) and `ledger_cost_after` (the grant's settled total) when the relay
+settled the call. Older records leave both null.
+
 ## Inference cost attribution
 
 `get_inference_runtime_metrics` accepts optional `costWindowHours` (1–744).
