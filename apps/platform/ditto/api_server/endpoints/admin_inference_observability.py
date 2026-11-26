@@ -14,6 +14,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ditto.api_models.inference_cost_ceiling import (
+    InferenceAllowanceWallWindow,
+    InferenceLedgerCostBench,
+    InferenceLedgerCostDistribution,
+)
 from ditto.api_models.inference_costs import (
     InferenceGrantCostGroup,
     InferenceGrantCostSnapshot,
@@ -58,6 +63,13 @@ from ditto.db.queries.confirmation_failure_taxonomy import (
 )
 from ditto.db.queries.inference_concurrency_settings import (
     latest_inference_concurrency_settings_revision,
+)
+from ditto.db.queries.inference_cost_ceiling import (
+    ALLOWANCE_WALL_WINDOWS_SECONDS,
+    LEDGER_COST_DEFAULT_HOURS,
+    LEDGER_COST_MAX_HOURS,
+    load_allowance_wall_rows,
+    load_ledger_cost_distribution,
 )
 from ditto.db.queries.inference_costs import load_inference_grant_costs
 from ditto.db.queries.inference_failure_taxonomy import (
@@ -112,6 +124,42 @@ async def get_inference_grant_costs(
         ),
         grants=sum(group.grants for group in groups),
         unclassified_grants=sum(group.grants for group in unknown),
+    )
+
+
+@router.get(
+    "/admin/inference-ledger-cost-distribution",
+    response_model=InferenceLedgerCostDistribution,
+)
+async def get_inference_ledger_cost_distribution(
+    _admin: AdminDep,
+    session: SessionDep,
+    hours: Annotated[
+        int, Query(ge=1, le=LEDGER_COST_MAX_HOURS)
+    ] = LEDGER_COST_DEFAULT_HOURS,
+) -> InferenceLedgerCostDistribution:
+    """Ledger cost per run, per bench version, for sizing the cost ceiling.
+
+    Reads leases that ended in the window, so a live run's partial spend never
+    drags a percentile down. Ledger cost is list price, never the provider
+    bill (#3271).
+    """
+    observed_at = datetime.now(UTC)
+    window_start = observed_at - timedelta(hours=hours)
+    rows = await load_ledger_cost_distribution(
+        session, window_start=window_start, window_end=observed_at
+    )
+    settings = settings_from_row(
+        await latest_inference_concurrency_settings_revision(session)
+    )
+    return InferenceLedgerCostDistribution(
+        observed_at=observed_at,
+        window_start=window_start,
+        window_end=observed_at,
+        run_cost_ceiling_microusd=settings.run_cost_ceiling_microusd,
+        cost_ceiling_mode=settings.cost_ceiling_mode,
+        case_cost_report_microusd=settings.case_cost_report_microusd,
+        benches=[InferenceLedgerCostBench.model_validate(dict(row)) for row in rows],
     )
 
 
@@ -409,8 +457,13 @@ async def get_inference_failure_taxonomy(
             )
         )
     confirmation_lanes, confirmation_groups = await _confirmation_failure_rows(session)
+    observed_at = datetime.now(UTC)
+    allowance_walls = [
+        InferenceAllowanceWallWindow.model_validate(dict(row))
+        for row in await load_allowance_wall_rows(session, now=observed_at)
+    ]
     return InferenceFailureTaxonomy(
-        observed_at=datetime.now(UTC),
+        observed_at=observed_at,
         window_seconds=list(FAILURE_WINDOWS_SECONDS),
         group_limit=FAILURE_GROUP_LIMIT,
         lanes=lanes,
@@ -419,6 +472,8 @@ async def get_inference_failure_taxonomy(
         confirmation_window_seconds=list(CONFIRMATION_FAILURE_WINDOWS_SECONDS),
         confirmation_lanes=confirmation_lanes,
         confirmation_groups=confirmation_groups,
+        allowance_window_seconds=list(ALLOWANCE_WALL_WINDOWS_SECONDS),
+        allowance_walls=allowance_walls,
     )
 
 

@@ -274,6 +274,8 @@ async def test_a_burst_names_its_model_route_and_code_without_inventing_a_route(
         "confirmation_window_seconds",
         "confirmation_lanes",
         "confirmation_groups",
+        "allowance_window_seconds",
+        "allowance_walls",
     }
     assert body["window_seconds"] == [60, 300, 900, 3600]
     # The confirmation lane reads a different table on a different cadence, so

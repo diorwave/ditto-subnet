@@ -12,6 +12,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+from ditto.api_models.inference_cost_ceiling import InferenceAllowanceWallWindow
+
 InferenceRequestKind = Literal["chat", "embedding", "decision"]
 
 InferenceGateway = Literal["openrouter", "reliable", "direct", "ditto-router"]
@@ -227,3 +229,8 @@ class InferenceFailureTaxonomy(BaseModel):
     confirmation_window_seconds: list[int] = []
     confirmation_lanes: list[ConfirmationFailureLaneWindow] = []
     confirmation_groups: list[ConfirmationFailureGroup] = []
+
+    # Run walls are read from the grant ledger on hour/day/week windows: a run
+    # hits a wall a few times a day, not thousands of times an hour (#3271).
+    allowance_window_seconds: list[int] = []
+    allowance_walls: list[InferenceAllowanceWallWindow] = []
